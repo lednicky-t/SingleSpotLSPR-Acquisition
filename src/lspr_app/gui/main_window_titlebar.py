@@ -1,0 +1,185 @@
+﻿from __future__ import annotations
+
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QMenuBar, QWidget
+
+from lspr_app.gui.icon_helpers import device_status_icon
+from lspr_app.gui.ui_helpers import make_window_button, window_control_icon
+
+
+def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
+    brand_icon_label = QLabel()
+    brand_icon_label.setObjectName("brandIconLabel")
+    brand_icon_label.setFixedSize(22, 22)
+    brand_icon_label.setToolTip("LSPR Acquisition brand icon.")
+    brand_icon_label.setPixmap(QIcon(str(brand_icon_path)).pixmap(22, 22))
+
+    window._window_mode_label = QLabel()
+    window._window_mode_label.setObjectName("windowModeLabel")
+    window._window_mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    window._window_mode_label.setContentsMargins(0, 0, 0, 0)
+    window._window_mode_label.setToolTip("Current application mode.")
+    window._update_window_mode_label()
+
+    window._window_mode_icon_label = QLabel()
+    window._window_mode_icon_label.setObjectName("windowModeIconLabel")
+    window._window_mode_icon_label.setFixedSize(16, 16)
+    window._window_mode_icon_label.setToolTip("Current source icon.")
+
+    center_cluster = QWidget()
+    center_layout = QHBoxLayout()
+    center_layout.setContentsMargins(0, 0, 0, 0)
+    center_layout.setSpacing(5)
+    center_layout.addWidget(window._window_mode_label)
+    center_layout.addWidget(window._window_mode_icon_label)
+    center_cluster.setLayout(center_layout)
+
+    window._window_min_button = make_window_button(
+        window_control_icon("minimize"),
+        "Minimize window",
+        window.showMinimized,
+    )
+    window._window_max_button = make_window_button(
+        window_control_icon("maximize"),
+        "Maximize window",
+        window._toggle_window_max_restore,
+    )
+    window._window_close_button = make_window_button(
+        window_control_icon("close"),
+        "Close application",
+        window.close,
+    )
+    window._window_max_button.setToolTip("Maximize or restore the window.")
+
+    status_cluster = QWidget()
+    status_layout = QHBoxLayout()
+    status_layout.setContentsMargins(0, 0, 0, 0)
+    status_layout.setSpacing(8)
+    window._startup_loading_frames = ["â—", "â—“", "â—‘", "â—’"]
+    window._startup_loading_frame_index = 0
+    window._startup_loading_label = QLabel("â—")
+    window._startup_loading_label.setObjectName("startupLoadingLabel")
+    window._startup_loading_label.setFixedSize(16, 16)
+    window._startup_loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    window._startup_loading_label.setToolTip("Device initialization is still in progress.")
+    window._startup_loading_label.setVisible(False)
+    window._startup_loading_timer = QTimer(window)
+    window._startup_loading_timer.setInterval(140)
+    window._startup_loading_timer.timeout.connect(window._advance_startup_loading_indicator)
+    window._hw_status_items = []
+    for key, label_text in (
+        ("spectrometer", "Spectrometer"),
+        ("pump", "Pump"),
+        ("valve", "Valve"),
+        ("mswitch", "M-Switch"),
+    ):
+        icon_label = QLabel()
+        icon_label.setFixedSize(16, 16)
+        icon_label.setToolTip(f"{label_text} connection status.")
+        text_label = QLabel(label_text)
+        text_label.setToolTip(f"{label_text} connection status.")
+        item = QWidget()
+        item_layout = QHBoxLayout()
+        item_layout.setContentsMargins(0, 0, 0, 0)
+        item_layout.setSpacing(4)
+        item_layout.addWidget(icon_label)
+        item_layout.addWidget(text_label)
+        item.setLayout(item_layout)
+        status_layout.addWidget(item)
+        window._hw_status_items.append((key, icon_label, text_label))
+    status_cluster.setLayout(status_layout)
+
+    left_cluster = QWidget()
+    left_layout = QHBoxLayout()
+    left_layout.setContentsMargins(0, 0, 0, 0)
+    left_layout.setSpacing(6)
+    left_layout.addWidget(brand_icon_label)
+    left_layout.addWidget(menu_bar)
+    left_cluster.setLayout(left_layout)
+
+    right_cluster = QWidget()
+    right_layout = QHBoxLayout()
+    right_layout.setContentsMargins(0, 0, 0, 0)
+    right_layout.setSpacing(4)
+    right_layout.addWidget(window._startup_loading_label)
+    right_layout.addWidget(status_cluster)
+    right_layout.addWidget(window._window_min_button)
+    right_layout.addWidget(window._window_max_button)
+    right_layout.addWidget(window._window_close_button)
+    right_cluster.setLayout(right_layout)
+
+    title_widget = QWidget()
+    title_widget.setObjectName("titleBar")
+    title_layout = QGridLayout()
+    title_layout.setContentsMargins(8, 3, 8, 3)
+    title_layout.setHorizontalSpacing(8)
+    title_layout.setVerticalSpacing(0)
+    title_layout.setColumnStretch(0, 1)
+    title_layout.setColumnStretch(1, 0)
+    title_layout.setColumnStretch(2, 1)
+    title_layout.addWidget(left_cluster, 0, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    title_layout.addWidget(center_cluster, 0, 1, alignment=Qt.AlignmentFlag.AlignCenter)
+    title_layout.addWidget(right_cluster, 0, 2, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    title_widget.setLayout(title_layout)
+    title_widget.installEventFilter(window)
+    return title_widget
+
+
+def refresh_hw_device_status_strip(window) -> None:
+    items = getattr(window, "_hw_status_items", None)
+    if not items:
+        return
+    experiment_control_window = getattr(window, "_experiment_control_window", None)
+    overrides = getattr(window, "_hardware_status_overrides", {})
+    init_active = bool(getattr(window, "_hardware_init_task", None)) or not bool(getattr(window, "_hardware_init_ready_emitted", False))
+    pump_client = getattr(experiment_control_window, "_client", None) if experiment_control_window is not None else None
+    valve_client = getattr(experiment_control_window, "_valve_client", None) if experiment_control_window is not None else None
+    mswitch_client = getattr(experiment_control_window, "_mswitch_client", None) if experiment_control_window is not None else None
+
+    def _is_connected(client) -> bool:
+        return bool(client is not None and getattr(client, "is_connected", lambda: False)())
+
+    spectrometer_detail = "(Simulations)" if not bool(window._hardware_available) else ""
+    devices = {
+        "spectrometer": (
+            bool(window._hardware_available),
+            spectrometer_detail,
+        ),
+        "pump": (
+            _is_connected(pump_client),
+            "",
+        ),
+        "valve": (
+            _is_connected(valve_client),
+            "",
+        ),
+        "mswitch": (
+            _is_connected(mswitch_client),
+            "",
+        ),
+    }
+    for key, icon_label, text_label in items:
+        online, detail = devices.get(key, (False, ""))
+        if init_active and key in overrides:
+            override_online, override_detail = overrides.get(key, (online, detail))
+            online = bool(override_online)
+            if key == "spectrometer" and override_detail:
+                detail = override_detail
+        elif key in overrides and not detail:
+            override_online, override_detail = overrides.get(key, (online, detail))
+            online = bool(online or override_online)
+            if key == "spectrometer" and override_detail:
+                detail = override_detail
+        icon_label.setPixmap(device_status_icon(online).pixmap(16, 16))
+        base_text = text_label.text().split(":", 1)[0].strip()
+        text_label.setText(base_text if not detail else f"{base_text}: {detail}")
+
+
+def sync_window_control_icons(window) -> None:
+    if not hasattr(window, "_window_max_button"):
+        return
+    maximized = window.isMaximized()
+    window._window_max_button.setIcon(window_control_icon("restore" if maximized else "maximize"))
+    window._window_max_button.setToolTip("Restore window" if maximized else "Maximize window")
+
