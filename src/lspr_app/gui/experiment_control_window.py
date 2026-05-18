@@ -1401,6 +1401,9 @@ class ExperimentControlWindow(QWidget):
         self._experiment_control_bootstrap_pending_state: dict[str, object] | None = None
         self._experiment_control_bootstrap_pending_step_index = 0
         self._experiment_control_bootstrap_batch_size = 24
+        self._experiment_control_view_mode_sizes: dict[str, list[int]] = {}
+        self._experiment_control_view_mode_panel_sizes: dict[str, list[int]] = {}
+        self._experiment_control_view_mode_apply_pending = False
         self._experiment_control_visible_rows_timer = QTimer(self)
         self._experiment_control_visible_rows_timer.setSingleShot(True)
         self._experiment_control_visible_rows_timer.setInterval(0)
@@ -1425,6 +1428,23 @@ class ExperimentControlWindow(QWidget):
             save_app_setting("theme_mode", self._theme_mode)
         loaded_time_unit = str(ui_state.get("time_unit_mode", "s"))
         self._time_unit_mode = loaded_time_unit if loaded_time_unit in {"s", "min", "h"} else "s"
+        self._experiment_control_view_mode_sizes = self._load_experiment_control_view_mode_sizes(ui_state)
+        self._experiment_control_view_mode_panel_sizes = self._load_experiment_control_view_mode_panel_sizes(ui_state)
+        self._experiment_control_view_mode = self._normalize_experiment_control_view_mode(
+            ui_state.get("experiment_control_view_mode", "full")
+        )
+        legacy_sizes = ui_state.get("flow_editor_splitter_sizes")
+        if not self._experiment_control_view_mode_sizes and isinstance(legacy_sizes, list):
+            parsed_legacy: list[int] = []
+            for value in legacy_sizes[:2]:
+                try:
+                    parsed_legacy.append(max(int(value), 20))
+                except (TypeError, ValueError):
+                    parsed_legacy = []
+                    break
+            if len(parsed_legacy) == 2:
+                self._experiment_control_view_mode_sizes[self._experiment_control_view_mode] = parsed_legacy
+        self._experiment_control_view_mode_apply_pending = True
 
         _LOGGER.info("Flow bootstrap +%.1f ms: init state prepared", (perf_counter() - self._bootstrap_t0) * 1000.0)
 
@@ -1706,8 +1726,22 @@ class ExperimentControlWindow(QWidget):
         self._experiment_plan_import_fill_timer = QTimer(self)
         self._experiment_plan_import_fill_timer.setInterval(0)
         self._experiment_plan_import_fill_timer.timeout.connect(self._advance_experiment_plan_import_population)
-        self.record_with_flow_check = QCheckBox("Record")
-        self.record_with_flow_check.setToolTip("Record measurement data while the experiment plan runs.")
+        self.record_with_flow_button = QToolButton()
+        self.record_with_flow_button.setObjectName("flowStepActionButton")
+        self.record_with_flow_button.setAutoRaise(True)
+        self.record_with_flow_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.record_with_flow_button.setFixedSize(32, 32)
+        self.record_with_flow_button.setIconSize(QSize(24, 24))
+        self.record_with_flow_button.setToolTip("Record measurement data while the experiment plan runs.")
+        self.record_with_flow_button.setStyleSheet(
+            "QToolButton#flowStepActionButton { background: transparent; border: none; padding: 0px; margin: 0px; }"
+            "QToolButton#flowStepActionButton:hover { background: rgba(127, 127, 127, 0.10); border: none; }"
+            "QToolButton#flowStepActionButton:pressed { background: rgba(127, 127, 127, 0.18); border: none; }"
+        )
+        self.record_with_flow_button.setCheckable(True)
+        self.record_with_flow_button.setChecked(True)
+        self.record_with_flow_button.toggled.connect(self._update_record_with_flow_button_icon)
+        self._update_record_with_flow_button_icon()
         self.timeline_widget = PumpPlanTimelineWidget()
         self.timeline_widget.set_theme(self._theme_mode)
         self.timeline_widget.set_theme_palette(self._theme_palette())
@@ -1752,10 +1786,21 @@ class ExperimentControlWindow(QWidget):
         editor_header_row_layout = QHBoxLayout()
         editor_header_row_layout.setContentsMargins(0, 0, 0, 0)
         editor_header_row_layout.setSpacing(6)
+        editor_header_row_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         editor_header_row_layout.addWidget(editor_header)
+        self._experiment_control_view_mode_button = QToolButton()
+        self._experiment_control_view_mode_button.setObjectName("flowViewModeButton")
+        self._experiment_control_view_mode_button.setAutoRaise(True)
+        self._experiment_control_view_mode_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._experiment_control_view_mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._experiment_control_view_mode_button.clicked.connect(self._cycle_experiment_control_view_mode)
+        self._update_experiment_control_view_mode_button()
+        editor_header_row_layout.addWidget(self._experiment_control_view_mode_button)
         editor_header_row_layout.addStretch(1)
         editor_header_row_layout.addWidget(editor_header_info)
+        editor_header_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         editor_header_row.setLayout(editor_header_row_layout)
+        self._experiment_control_header_row = editor_header_row
 
         editor_layout = QVBoxLayout()
         editor_layout.setContentsMargins(0, 0, 0, 0)
@@ -1915,7 +1960,10 @@ class ExperimentControlWindow(QWidget):
         matrix.addWidget(self.manual_dir_label, 2, 4)
         matrix.addWidget(self.manual_tube_label, 3, 4)
         matrix.setColumnStretch(ACTIVE_PUMP_CHANNELS + 8, 2)
-        editor_layout.addLayout(matrix)
+        self._experiment_control_matrix_widget = QWidget()
+        matrix.setContentsMargins(0, 0, 0, 0)
+        self._experiment_control_matrix_widget.setLayout(matrix)
+        editor_layout.addWidget(self._experiment_control_matrix_widget)
 
         editor_action_row = QHBoxLayout()
         editor_action_row.setSpacing(3)
@@ -1930,7 +1978,10 @@ class ExperimentControlWindow(QWidget):
         editor_action_row.addWidget(self.import_plan_busy_label)
         editor_action_row.addWidget(self.import_plan_button)
         editor_action_row.addWidget(self.export_plan_button)
-        editor_layout.addLayout(editor_action_row)
+        self._experiment_control_editor_action_row = QWidget()
+        editor_action_row.setContentsMargins(0, 0, 0, 0)
+        self._experiment_control_editor_action_row.setLayout(editor_action_row)
+        editor_layout.addWidget(self._experiment_control_editor_action_row)
 
         table_container = QWidget()
         table_layout = QVBoxLayout()
@@ -1940,6 +1991,7 @@ class ExperimentControlWindow(QWidget):
         table_layout.addWidget(self.plan_table, 1)
         table_container.setLayout(table_layout)
         table_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._experiment_control_table_container = table_container
 
         self._flow_editor_splitter = QSplitter(Qt.Orientation.Vertical)
         self._flow_editor_splitter.setChildrenCollapsible(False)
@@ -1954,17 +2006,27 @@ class ExperimentControlWindow(QWidget):
         self._flow_editor_splitter.setStretchFactor(0, 1)
         self._flow_editor_splitter.setStretchFactor(1, 0)
         self._flow_editor_splitter.splitterMoved.connect(self._on_flow_editor_splitter_moved)
-        editor_layout.addWidget(self._flow_editor_splitter)
-
         flow_action_row = QHBoxLayout()
         flow_action_row.setSpacing(4)
+        flow_action_row.setContentsMargins(0, 0, 0, 0)
         flow_action_row.addWidget(self.plan_toggle_button)
         flow_action_row.addWidget(self.stop_plan_button)
         flow_action_row.addWidget(self.previous_step_button)
         flow_action_row.addWidget(self.next_step_button)
-        flow_action_row.addWidget(self.record_with_flow_check)
+        flow_action_row.addWidget(self.record_with_flow_button)
         flow_action_row.addStretch(1)
-        editor_layout.addLayout(flow_action_row)
+        self._experiment_control_flow_action_row = QWidget()
+        self._experiment_control_flow_action_row.setLayout(flow_action_row)
+
+        timeline_controls_layout = QVBoxLayout()
+        timeline_controls_layout.setContentsMargins(0, 0, 0, 0)
+        timeline_controls_layout.setSpacing(0)
+        timeline_controls_layout.addWidget(self._flow_editor_splitter)
+        timeline_controls_layout.addWidget(self._experiment_control_flow_action_row)
+        timeline_controls_widget = QWidget()
+        timeline_controls_widget.setLayout(timeline_controls_layout)
+        self._experiment_control_timeline_controls_widget = timeline_controls_widget
+        editor_layout.addWidget(timeline_controls_widget)
         editor_container = QWidget()
         editor_container.setObjectName("flowEditorContainer")
         editor_container.setLayout(editor_layout)
@@ -3630,6 +3692,13 @@ class ExperimentControlWindow(QWidget):
         self.plan_toggle_button.setIcon(icon)
         self.plan_toggle_button.setToolTip(tooltip)
 
+    def _update_record_with_flow_button_icon(self) -> None:
+        if not hasattr(self, "record_with_flow_button"):
+            return
+        active = self.record_with_flow_button.isChecked()
+        color = QColor("#47a861" if active else "#8a98a8")
+        self.record_with_flow_button.setIcon(tint_tabler_icon(flow_tabler_icon("file_pencil"), color))
+
     def _toggle_experiment_control_run_hold(self) -> None:
         if self._plan_running:
             self._hold_experiment_control()
@@ -3637,7 +3706,7 @@ class ExperimentControlWindow(QWidget):
         self._run_experiment_control()
 
     def _request_recording_control(self, action: str) -> None:
-        if not self.record_with_flow_check.isChecked():
+        if not self.record_with_flow_button.isChecked():
             return True
         if str(action or "").strip().lower() == "pause":
             return True
@@ -3802,6 +3871,22 @@ class ExperimentControlWindow(QWidget):
                 border: none;
             }
             QToolButton#flowIconButton:pressed {
+                background: rgba(127, 127, 127, 0.18);
+                border: none;
+            }
+            QToolButton#flowViewModeButton {
+                background: transparent;
+                border: none;
+                padding: 0px;
+                margin: 0px;
+                color: #e8d85f;
+                font-weight: 600;
+            }
+            QToolButton#flowViewModeButton:hover {
+                background: rgba(127, 127, 127, 0.10);
+                border: none;
+            }
+            QToolButton#flowViewModeButton:pressed {
                 background: rgba(127, 127, 127, 0.18);
                 border: none;
             }
@@ -5431,6 +5516,237 @@ class ExperimentControlWindow(QWidget):
         scrollbar.setValue(scrollbar.value() - int(step * wheel_delta / 120))
         return True
 
+    def _normalize_experiment_control_view_mode(self, mode: object) -> str:
+        normalized = str(mode or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized in {"full", "table_timeline", "timeline"}:
+            return normalized
+        if normalized in {"tabletimeline", "tableplus_timeline", "table_plus_timeline"}:
+            return "table_timeline"
+        return "full"
+
+    def _load_experiment_control_view_mode_sizes(self, state: dict[str, object]) -> dict[str, list[int]]:
+        payload = state.get("experiment_control_view_mode_sizes")
+        sizes: dict[str, list[int]] = {}
+        if not isinstance(payload, dict):
+            return sizes
+        for raw_mode in ("full", "table_timeline", "timeline"):
+            raw_sizes = payload.get(raw_mode)
+            if not isinstance(raw_sizes, list):
+                continue
+            parsed = [int(value) for value in raw_sizes if isinstance(value, int) and int(value) >= 0]
+            if len(parsed) == 2:
+                sizes[raw_mode] = parsed
+        return sizes
+
+    def _load_experiment_control_view_mode_panel_sizes(self, state: dict[str, object]) -> dict[str, list[int]]:
+        payload = state.get("experiment_control_view_mode_panel_sizes")
+        sizes: dict[str, list[int]] = {}
+        if not isinstance(payload, dict):
+            return sizes
+        for raw_mode in ("full", "table_timeline", "timeline"):
+            raw_sizes = payload.get(raw_mode)
+            if not isinstance(raw_sizes, list):
+                continue
+            parsed = [int(value) for value in raw_sizes if isinstance(value, int) and int(value) >= 0]
+            if len(parsed) == 2:
+                sizes[raw_mode] = parsed
+        return sizes
+
+    def _experiment_control_current_splitter_sizes(self) -> list[int]:
+        splitter = getattr(self, "_flow_editor_splitter", None)
+        if splitter is None:
+            return []
+        return [max(int(size), 0) for size in splitter.sizes()]
+
+    def _experiment_control_parent_splitter(self):
+        window = self.window()
+        splitter = getattr(window, "plot_splitter", None)
+        if splitter is None or splitter.count() < 2:
+            return None
+        return splitter
+
+    def _experiment_control_current_parent_splitter_sizes(self) -> list[int]:
+        splitter = self._experiment_control_parent_splitter()
+        if splitter is None:
+            return []
+        return [max(int(size), 0) for size in splitter.sizes()]
+
+    def _experiment_control_min_table_splitter_height(self) -> int:
+        header = self.plan_table.horizontalHeader()
+        table = self.plan_table
+        rows = max(table.rowCount(), 0)
+        header_height = int(header.sizeHint().height())
+        if rows <= 0:
+            return max(header_height + 36, 96)
+        visible_rows = min(rows, 2)
+        content_height = 0
+        for row in range(visible_rows):
+            content_height += max(int(table.rowHeight(row)), int(table.sizeHintForRow(row)), 24)
+        return max(header_height + content_height + 8, header_height + 48)
+
+    def _experiment_control_default_splitter_sizes(self, mode: str) -> list[int]:
+        timeline_height = max(self.timeline_widget.minimumHeight(), self.timeline_widget.sizeHint().height(), 64)
+        if mode == "timeline":
+            return [0, timeline_height]
+        min_table_height = self._experiment_control_min_table_splitter_height()
+        if mode == "table_timeline":
+            return [min_table_height, timeline_height]
+        return [max(min_table_height, timeline_height * 2), timeline_height]
+
+    def _experiment_control_target_panel_height(self, mode: str | None = None) -> int:
+        normalized = self._normalize_experiment_control_view_mode(mode or self._experiment_control_view_mode)
+        header_height = 0
+        header_row = getattr(self, "_experiment_control_header_row", None)
+        if header_row is not None:
+            header_height = max(int(header_row.sizeHint().height()), int(header_row.minimumHeight()), 20)
+        matrix_height = 0
+        if normalized == "full" and hasattr(self, "_experiment_control_matrix_widget"):
+            matrix_height = max(int(self._experiment_control_matrix_widget.sizeHint().height()), 0)
+        action_height = 0
+        if normalized == "full" and hasattr(self, "_experiment_control_editor_action_row"):
+            action_height = max(int(self._experiment_control_editor_action_row.sizeHint().height()), 0)
+        content_spacing = 4 if normalized == "full" else 2
+        outer_margins = 16
+        if normalized == "timeline":
+            flow_action_height = 0
+            if hasattr(self, "_experiment_control_flow_action_row"):
+                flow_action_height = max(int(self._experiment_control_flow_action_row.sizeHint().height()), 0)
+            timeline_height = max(self.timeline_widget.minimumHeight(), self.timeline_widget.sizeHint().height(), 64)
+            splitter_handle = max(int(getattr(self._flow_editor_splitter, "handleWidth", lambda: 6)()), 6)
+            return max(header_height + timeline_height + flow_action_height + splitter_handle + content_spacing + outer_margins, 140)
+        timeline_controls_height = 0
+        timeline_controls_widget = getattr(self, "_experiment_control_timeline_controls_widget", None)
+        if timeline_controls_widget is not None:
+            timeline_controls_height = max(int(timeline_controls_widget.sizeHint().height()), 0)
+        return max(header_height + matrix_height + action_height + timeline_controls_height + content_spacing + outer_margins, 180)
+
+    def _experiment_control_default_parent_splitter_sizes(self, mode: str) -> list[int]:
+        splitter = self._experiment_control_parent_splitter()
+        if splitter is None:
+            return []
+        sizes = self._experiment_control_current_parent_splitter_sizes()
+        if len(sizes) != 2:
+            sizes = [0, 0]
+        total = sum(sizes)
+        if total <= 0:
+            total = max(int(splitter.height()), int(splitter.sizeHint().height()), 1)
+        target_top = self._experiment_control_target_panel_height(mode)
+        bottom_min = max(180, int(splitter.widget(1).minimumHeight()) if splitter.widget(1) is not None else 180)
+        top = min(max(target_top, 120), max(total - bottom_min, 120))
+        bottom = max(total - top, bottom_min)
+        return [top, bottom]
+
+    def _remember_experiment_control_view_mode_sizes(self, mode: str | None = None) -> None:
+        splitter_sizes = self._experiment_control_current_splitter_sizes()
+        if len(splitter_sizes) != 2:
+            return
+        normalized = self._normalize_experiment_control_view_mode(mode or self._experiment_control_view_mode)
+        self._experiment_control_view_mode_sizes[normalized] = splitter_sizes
+
+    def _remember_experiment_control_view_mode_panel_sizes(self, mode: str | None = None) -> None:
+        splitter_sizes = self._experiment_control_current_parent_splitter_sizes()
+        if len(splitter_sizes) != 2:
+            return
+        normalized = self._normalize_experiment_control_view_mode(mode or self._experiment_control_view_mode)
+        self._experiment_control_view_mode_panel_sizes[normalized] = splitter_sizes
+
+    def _apply_experiment_control_parent_splitter_sizes(self, mode: str | None = None) -> None:
+        splitter = self._experiment_control_parent_splitter()
+        if splitter is None:
+            return
+        normalized = self._normalize_experiment_control_view_mode(mode or self._experiment_control_view_mode)
+        cached_sizes = self._experiment_control_view_mode_panel_sizes.get(normalized)
+        if cached_sizes is None:
+            cached_sizes = self._experiment_control_default_parent_splitter_sizes(normalized)
+        if len(cached_sizes) != 2:
+            return
+        top = max(int(cached_sizes[0]), 120)
+        bottom = max(int(cached_sizes[1]), 180)
+        splitter.setSizes([top, bottom])
+
+    def _experiment_control_view_mode_label(self, mode: str | None = None) -> str:
+        normalized = self._normalize_experiment_control_view_mode(mode or self._experiment_control_view_mode)
+        return {
+            "full": "Full",
+            "table_timeline": "Table+Timeline",
+            "timeline": "Timeline",
+        }[normalized]
+
+    def _experiment_control_view_mode_tooltip(self, mode: str | None = None) -> str:
+        normalized = self._normalize_experiment_control_view_mode(mode or self._experiment_control_view_mode)
+        current = self._experiment_control_view_mode_label(normalized)
+        return (
+            f"Current view: {current}. Click to cycle between Full, Table+Timeline, and Timeline."
+            if normalized == "full"
+            else f"Current view: {current}. Click to cycle to the next visibility mode."
+        )
+
+    def _update_experiment_control_view_mode_button(self) -> None:
+        if not hasattr(self, "_experiment_control_view_mode_button"):
+            return
+        label = self._experiment_control_view_mode_label()
+        self._experiment_control_view_mode_button.setText(f"[{label}]")
+        self._experiment_control_view_mode_button.setToolTip(self._experiment_control_view_mode_tooltip())
+
+    def _apply_experiment_control_view_mode(self, *, save: bool = False) -> None:
+        mode = self._normalize_experiment_control_view_mode(self._experiment_control_view_mode)
+        self._experiment_control_view_mode = mode
+        show_matrix = mode == "full"
+        show_table = mode != "timeline"
+        if hasattr(self, "_experiment_control_matrix_widget"):
+            self._experiment_control_matrix_widget.setVisible(show_matrix)
+        if hasattr(self, "_experiment_control_editor_action_row"):
+            self._experiment_control_editor_action_row.setVisible(show_matrix)
+        if hasattr(self, "_experiment_control_table_container"):
+            self._experiment_control_table_container.setVisible(show_table)
+        if hasattr(self, "_flow_editor_splitter"):
+            if show_table:
+                cached_sizes = self._experiment_control_view_mode_sizes.get(mode)
+                if cached_sizes is None and mode == "table_timeline":
+                    cached_sizes = self._experiment_control_view_mode_sizes.get("full")
+                if cached_sizes is None:
+                    cached_sizes = self._experiment_control_default_splitter_sizes(mode)
+                if len(cached_sizes) == 2 and cached_sizes[0] > 0:
+                    cached_sizes = [
+                        max(int(cached_sizes[0]), self._experiment_control_min_table_splitter_height()),
+                        max(int(cached_sizes[1]), max(self.timeline_widget.minimumHeight(), self.timeline_widget.sizeHint().height(), 64)),
+                    ]
+                    self._flow_editor_splitter.setSizes(cached_sizes)
+                self._flow_editor_splitter.setStretchFactor(0, 1)
+                self._flow_editor_splitter.setStretchFactor(1, 0)
+            else:
+                cached_sizes = self._experiment_control_view_mode_sizes.get("timeline")
+                if cached_sizes is None:
+                    cached_sizes = self._experiment_control_default_splitter_sizes("timeline")
+                self._flow_editor_splitter.setSizes(cached_sizes)
+        self._update_experiment_control_view_mode_button()
+        if show_table:
+            self._fit_plan_table_columns_to_viewport()
+            self._update_plan_table_height()
+        self._sync_detail_visibility()
+        self._experiment_control_edit_controller.sync_overlay()
+        self.updateGeometry()
+        if self.parentWidget() is not None:
+            self.parentWidget().updateGeometry()
+        QTimer.singleShot(0, self._apply_experiment_control_parent_splitter_sizes)
+        if save:
+            self.save_ui_state()
+
+    def _cycle_experiment_control_view_mode(self) -> None:
+        order = ["full", "table_timeline", "timeline"]
+        current = self._normalize_experiment_control_view_mode(self._experiment_control_view_mode)
+        self._remember_experiment_control_view_mode_sizes(current)
+        self._remember_experiment_control_view_mode_panel_sizes(current)
+        next_mode = order[(order.index(current) + 1) % len(order)]
+        self._experiment_control_view_mode = next_mode
+        self._apply_experiment_control_view_mode(save=True)
+
+    def _apply_pending_experiment_control_view_mode(self) -> None:
+        if not self._experiment_control_view_mode_apply_pending:
+            return
+        self._experiment_control_view_mode_apply_pending = False
+        self._apply_experiment_control_view_mode()
+
     def _sync_detail_visibility(self) -> None:
         show_per_channel_editor = not self.manual_uniform_button.isChecked()
         self.manual_dir_label.setVisible(show_per_channel_editor)
@@ -5442,8 +5758,9 @@ class ExperimentControlWindow(QWidget):
         for spin in self.manual_tube_spins:
             spin.setVisible(show_per_channel_editor)
         self._update_plan_detail_toggle_icon()
-        self._configure_experiment_control_table_columns()
-        self._fit_plan_table_columns_to_viewport()
+        if not hasattr(self, "_experiment_control_table_container") or self._experiment_control_table_container.isVisible():
+            self._configure_experiment_control_table_columns()
+            self._fit_plan_table_columns_to_viewport()
 
     def _update_plan_detail_toggle_icon(self) -> None:
         update_plan_detail_toggle_icon(self)
@@ -6321,7 +6638,6 @@ class ExperimentControlWindow(QWidget):
         if isinstance(saved_details, bool):
             self.plan_detail_toggle.setChecked(saved_details)
             self._show_plan_details = saved_details
-        self._sync_detail_visibility()
         saved_switch_mode = state.get("switch_solution_mode")
         if isinstance(saved_switch_mode, bool):
             self.step_switch_mode_button.setChecked(saved_switch_mode)
@@ -6354,6 +6670,15 @@ class ExperimentControlWindow(QWidget):
         saved_pause_dialog_state = state.get("pause_state_dialog_state")
         if isinstance(saved_pause_dialog_state, dict):
             self._pause_state_dialog_state = dict(saved_pause_dialog_state)
+        saved_view_mode = state.get("experiment_control_view_mode")
+        if isinstance(saved_view_mode, str):
+            self._experiment_control_view_mode = self._normalize_experiment_control_view_mode(saved_view_mode)
+        saved_view_mode_panel_sizes = state.get("experiment_control_view_mode_panel_sizes")
+        if isinstance(saved_view_mode_panel_sizes, dict):
+            self._experiment_control_view_mode_panel_sizes = self._load_experiment_control_view_mode_panel_sizes(
+                {"experiment_control_view_mode_panel_sizes": saved_view_mode_panel_sizes}
+            )
+        self._experiment_control_view_mode_apply_pending = True
 
         self._experiment_control_bootstrap_pending_state = dict(state)
         self._experiment_control_bootstrap_pending_steps = self._deserialize_experiment_control_steps(state.get("plan_steps"))
@@ -6450,8 +6775,9 @@ class ExperimentControlWindow(QWidget):
             self._fit_plan_table_columns_to_viewport()
             self._update_plan_table_height()
             saved_splitter_sizes = state.get("flow_editor_splitter_sizes")
-            if isinstance(saved_splitter_sizes, list):
+            if isinstance(saved_splitter_sizes, list) and not self._experiment_control_view_mode_sizes:
                 self._apply_flow_editor_splitter_sizes(saved_splitter_sizes)
+            QTimer.singleShot(0, self._apply_pending_experiment_control_view_mode)
             self._set_status_message("Experiment control panel ready.")
         finally:
             self._experiment_control_bootstrap_pending_state = None
@@ -6573,6 +6899,9 @@ class ExperimentControlWindow(QWidget):
             x_pos = self.x()
             y_pos = self.y()
 
+        self._remember_experiment_control_view_mode_sizes()
+        self._remember_experiment_control_view_mode_panel_sizes()
+
         save_window_ui_state(
             "experiment_control_window",
             {
@@ -6593,6 +6922,9 @@ class ExperimentControlWindow(QWidget):
                 "tube_mm_values": self._tube_mm_values(),
                 "manual_uniform": self.manual_uniform_button.isChecked(),
                 "show_plan_details": self._show_plan_details,
+                "experiment_control_view_mode": self._experiment_control_view_mode,
+                "experiment_control_view_mode_sizes": dict(self._experiment_control_view_mode_sizes),
+                "experiment_control_view_mode_panel_sizes": dict(self._experiment_control_view_mode_panel_sizes),
                 "plan_table_column_widths": self._plan_table_column_widths(),
                 "plan_table_header_state": self._plan_table_header_state(),
                 "flow_editor_splitter_sizes": self._flow_editor_splitter_sizes(),
@@ -6628,6 +6960,7 @@ class ExperimentControlWindow(QWidget):
         if self._plan_table_initial_fit_pending:
             self._plan_table_initial_fit_pending = False
             QTimer.singleShot(0, self._fit_plan_table_columns_to_viewport)
+        QTimer.singleShot(0, self._apply_pending_experiment_control_view_mode)
 
     def closeEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
         _LOGGER.info("Experiment control window closed.")

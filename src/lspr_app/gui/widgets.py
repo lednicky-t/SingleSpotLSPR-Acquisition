@@ -8,6 +8,29 @@ from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QLabel, QSplitter, QSplitterHandle, QToolButton, QVBoxLayout, QSizePolicy, QWidget
 
 
+class SeparatorStyle:
+    handle_alpha = 130
+    handle_width = 2
+    length_ratio = 0.5
+    min_length = 4
+
+
+def set_separator_style(*, alpha: int | None = None, width: int | None = None, length_ratio: float | None = None, min_length: int | None = None) -> None:
+    if alpha is not None:
+        SeparatorStyle.handle_alpha = max(0, min(int(alpha), 255))
+    if width is not None:
+        SeparatorStyle.handle_width = max(int(width), 1)
+    if length_ratio is not None:
+        SeparatorStyle.length_ratio = max(float(length_ratio), 0.05)
+    if min_length is not None:
+        SeparatorStyle.min_length = max(int(min_length), 1)
+
+
+def configure_compact_splitter(splitter: QSplitter, *, handle_width: int | None = None) -> QSplitter:
+    splitter.setHandleWidth(int(handle_width or 12))
+    return splitter
+
+
 class FlexibleTimeAxis(pg.AxisItem):
     def __init__(self, orientation: str = "bottom") -> None:
         super().__init__(orientation=orientation)
@@ -115,27 +138,22 @@ class CompactSplitterHandle(QSplitterHandle):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         color = self.palette().color(self.foregroundRole())
-        color.setAlpha(90)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(color)
+        color.setAlpha(SeparatorStyle.handle_alpha)
+        pen = QPen(color)
+        pen.setWidth(SeparatorStyle.handle_width)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
 
         rect = self.rect()
         if self.orientation() == Qt.Orientation.Horizontal:
             center_y = rect.center().y()
-            dash_w = max(8, rect.width() // 4)
-            dash_h = 2
-            gap = 4
-            start_x = rect.center().x() - dash_w // 2
-            for offset in (-dash_h - gap, 0, dash_h + gap):
-                painter.drawRoundedRect(start_x, center_y + offset, dash_w, dash_h, 1, 1)
+            half_length = max(int(rect.height() * SeparatorStyle.length_ratio * 0.5), SeparatorStyle.min_length)
+            painter.drawLine(rect.center().x(), center_y - half_length, rect.center().x(), center_y + half_length)
         else:
             center_x = rect.center().x()
-            dash_w = 2
-            dash_h = max(8, rect.height() // 4)
-            gap = 4
-            start_y = rect.center().y() - dash_h // 2
-            for offset in (-dash_w - gap, 0, dash_w + gap):
-                painter.drawRoundedRect(center_x + offset, start_y, dash_w, dash_h, 1, 1)
+            half_length = max(int(rect.width() * SeparatorStyle.length_ratio * 0.5), SeparatorStyle.min_length)
+            painter.drawLine(center_x - half_length, rect.center().y(), center_x + half_length, rect.center().y())
         painter.end()
 
 

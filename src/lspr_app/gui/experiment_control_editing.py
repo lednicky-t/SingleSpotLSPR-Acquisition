@@ -596,10 +596,12 @@ class ExperimentControlEditingController(QObject):
         if self._overlay is None:
             return
         viewport = self._table.viewport()
-        if viewport is None:
+        if viewport is None or not self._table.isVisible() or not viewport.isVisible():
+            self._overlay.hide()
             return
         top_left = self._window.mapFromGlobal(viewport.mapToGlobal(viewport.rect().topLeft()))
         self._overlay.setGeometry(QRect(top_left, viewport.size()))
+        self._overlay.show()
         self._overlay.raise_()
         self._overlay.update()
 
