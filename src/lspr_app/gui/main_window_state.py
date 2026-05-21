@@ -20,6 +20,8 @@ def restore_ui_state(window) -> None:
     sensorgram_header_splitter_sizes = ui_state.get("sensorgram_header_splitter_sizes")
     maximized = ui_state.get("maximized")
     top_view_mode = ui_state.get("top_view_mode")
+    sensorgram_view_mode = ui_state.get("sensorgram_view_mode")
+    sensorgram_content_mode = ui_state.get("sensorgram_content_mode")
     left_controls_visible = ui_state.get("left_controls_visible")
     sensorgram_visible = ui_state.get("sensorgram_visible")
     trace_stats_metric_name = ui_state.get("trace_stats_metric_name")
@@ -80,6 +82,12 @@ def restore_ui_state(window) -> None:
         window._sensorgram_block.setVisible(sensorgram_visible)
     if isinstance(trace_stats_metric_name, str) and trace_stats_metric_name:
         window._trace_stats_metric_name = trace_stats_metric_name
+    if isinstance(sensorgram_view_mode, str):
+        window._sensorgram_view_mode = window._normalize_sensorgram_view_mode(sensorgram_view_mode)
+        window._update_sensorgram_view_mode_button()
+    if isinstance(sensorgram_content_mode, str):
+        window._sensorgram_content_mode = window._normalize_sensorgram_content_mode(sensorgram_content_mode)
+        window._update_sensorgram_content_mode_button()
     window._start_maximized = bool(maximized)
     window._sync_view_actions()
 
@@ -109,6 +117,8 @@ def save_ui_state(window) -> None:
             "plot_splitter_sizes": [int(size) for size in window.plot_splitter.sizes()],
             "sensorgram_header_splitter_sizes": [int(size) for size in window.sensorgram_header_splitter.sizes()],
             "top_view_mode": window._top_view_mode,
+            "sensorgram_view_mode": window._sensorgram_view_mode,
+            "sensorgram_content_mode": window._sensorgram_content_mode,
             "left_controls_visible": window._left_controls_scroll.isVisible(),
             "sensorgram_visible": window._sensorgram_block.isVisible(),
             "trace_stats_metric_name": window._trace_stats_metric_name,

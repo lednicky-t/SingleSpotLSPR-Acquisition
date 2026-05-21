@@ -1,20 +1,23 @@
 ﻿from __future__ import annotations
 
+import multiprocessing as mp
 import queue
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
 
 import numpy as np
+from PyQt6.QtGui import QColor, QIcon
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QFileDialog, QInputDialog
 
 from lspr_app.domain.models import Spectrum
 from lspr_app.domain.session import MeasurementError
-from lspr_app.gui.icon_helpers import math_function_tab_icon, prism_tab_icon, transport_icon
+from lspr_app.gui.icon_helpers import flow_tabler_icon, math_function_tab_icon, prism_tab_icon, tint_tabler_icon, transport_icon
 from lspr_app.gui.main_window_headers import update_source_link_buttons
+from lspr_app.gui.plot_controller import trim_history_tail_in_place
 from lspr_app.gui.workers import (
     AcquisitionRequest,
     AcquisitionResult,
@@ -25,6 +28,45 @@ from lspr_app.gui.workers import (
     LiveProcessingWorker,
 )
 from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter
+
+
+def _flush_live_processing_logs(window) -> None:
+    log_queue = getattr(window, "_live_processing_log_queue", None)
+    if log_queue is None:
+        return
+    while True:
+        try:
+            levelno, source, message = log_queue.get_nowait()
+        except queue.Empty:
+            return
+        except Exception:
+            return
+        try:
+            window._log_event(int(levelno), str(message), source=str(source))
+        except Exception:
+            continue
+
+
+def _archive_live_sample_if_needed(window, spectrum: Spectrum) -> None:
+    if not window._measurement_active or window._measurement_writer is None:
+        return
+    values = np.asarray(spectrum.values, dtype=np.float64)
+    wavelengths = np.asarray(spectrum.wavelengths_nm, dtype=np.float64)
+    peak_nm = float("nan")
+    if len(values) > 0 and len(wavelengths) > 0:
+        finite = np.isfinite(values)
+        if np.any(finite):
+            safe_values = np.where(finite, values, -np.inf)
+            peak_index = int(np.argmax(safe_values))
+            if 0 <= peak_index < len(wavelengths):
+                peak_nm = float(wavelengths[peak_index])
+    elapsed_s = 0.0
+    if window._measurement_started_at is not None:
+        elapsed_s = (spectrum.acquired_at - window._measurement_started_at).total_seconds()
+    try:
+        window._measurement_writer.append_batch([spectrum], [elapsed_s], [peak_nm])
+    except Exception:
+        logging.getLogger("lspr_app.storage").exception("Failed to enqueue measurement frame for storage.")
 
 
 def request_manual_acquisition(window, kind: str) -> None:
@@ -171,6 +213,7 @@ def handle_acquisition_success(window, kind: str, result: AcquisitionResult) -> 
 
 
 def flush_live_acquisition_results(window) -> None:
+    _flush_live_processing_logs(window)
     latest_event: LiveAcquisitionEvent | None = None
     dropped_events = 0
     while True:
@@ -193,6 +236,8 @@ def flush_live_acquisition_results(window) -> None:
         return
 
     if latest_event.error is not None:
+        if latest_event.source_epoch != window._source_epoch:
+            return
         window._live_active = False
         window._live_worker = None
         window._live_result_timer.stop()
@@ -200,8 +245,11 @@ def flush_live_acquisition_results(window) -> None:
         return
 
     if latest_event.result is not None:
+        if latest_event.source_epoch != window._source_epoch:
+            return
         result = latest_event.result
         spectrum = result.spectrum
+        _archive_live_sample_if_needed(window, spectrum)
         now = latest_event.produced_at_perf if latest_event.produced_at_perf is not None else perf_counter()
         previous_finish = window._raw_last_finish_ts
         window._raw_last_finish_ts = now
@@ -237,6 +285,7 @@ def flush_live_acquisition_results(window) -> None:
 
 
 def flush_live_processed_results(window) -> None:
+    _flush_live_processing_logs(window)
     latest_event: LiveProcessedEvent | None = None
     dropped_events = 0
     while True:
@@ -254,6 +303,8 @@ def flush_live_processed_results(window) -> None:
         return
 
     if latest_event.error is not None:
+        if latest_event.source_epoch != window._source_epoch:
+            return
         window._live_active = False
         window._live_processing_worker = None
         window._live_processed_timer.stop()
@@ -263,6 +314,9 @@ def flush_live_processed_results(window) -> None:
     if latest_event.result is None or latest_event.result.processed is None:
         if window._live_processing_worker is not None and window._live_processing_worker.is_alive() and window._live_active:
             window._live_processed_timer.start(window._live_ui_refresh_delay_ms)
+        return
+
+    if latest_event.source_epoch != window._source_epoch:
         return
 
     result = latest_event.result
@@ -285,6 +339,7 @@ def flush_live_processed_results(window) -> None:
     window._last_display_average_count = 1
     window._last_display_period_ms = display_window_ms
     window._last_processing_ms = result.processing_ms
+    window._last_processing_queue_wait_ms = result.queue_wait_ms
     if result.processing_ms > 0:
         window._processing_rate_hz = 1000.0 / result.processing_ms
         display_period_ms = max(1000.0 / max(window.live_rate_spin.value(), 1e-9), 1.0)
@@ -305,12 +360,18 @@ def flush_live_processed_results(window) -> None:
     window._analysis_metrics_cache_key = None
     window._analysis_metrics_cache_result = {}
     window._update_poly_warning_indicator(fit)
-    window._plot_render_dirty = True
-    if not window._plot_refresh_timer.isActive():
-        window._plot_refresh_timer.start()
-    window._request_deferred_ui_refresh(trace_plot=True, summary=True, stats=True, live_estimate=True, trace_label="Peak position (nm)")
+    window._live_plot_update_counter = int(getattr(window, "_live_plot_update_counter", 0)) + 1
+    refresh_live_plot = window._live_plot_update_counter % max(int(getattr(window, "_live_plot_refresh_stride", 2)), 1) == 0
+    if refresh_live_plot:
+        window._plot_render_dirty = True
+        if not window._plot_refresh_timer.isActive():
+            window._plot_refresh_timer.start()
+        window._request_deferred_ui_refresh(trace_plot=True, live_estimate=True, telemetry=True, trace_label="Peak position (nm)")
+        window._request_trace_autoscale()
+    else:
+        window._request_deferred_ui_refresh(live_estimate=True, telemetry=True)
     window._append_processed_trace_history(processed, fit)
-    window._request_trace_autoscale()
+    window._append_sensorgram_heatmap_history(processed)
     window._log_throttled(
         "live_display",
         f"Live display updated | dropped={dropped_events}",
@@ -360,23 +421,27 @@ def start_live_acquisition(window) -> None:
     window._last_display_average_count = None
     window._last_display_period_ms = None
     window._last_processing_ms = None
+    window._last_processing_queue_wait_ms = None
     window._processing_rate_hz = None
     window._processing_headroom_ratio = None
+    window._live_plot_update_counter = 0
     window._live_display_dropped_frames = 0
     window._live_display_started_at = perf_counter()
     window._live_trace_started_at = None
     window._last_live_processing_perf = None
     window._peak_history.clear()
     window._reset_live_accumulator()
-    window._live_stop_event = threading.Event()
-    window._live_result_queue = queue.Queue(maxsize=4)
-    window._live_processing_input_queue = queue.Queue(maxsize=16)
-    window._live_processed_queue = queue.Queue(maxsize=4)
+    ctx = mp.get_context("spawn")
+    window._live_stop_event = ctx.Event()
+    window._live_result_queue = ctx.Queue(maxsize=4)
+    window._live_processing_input_queue = ctx.Queue(maxsize=16)
+    window._live_processed_queue = ctx.Queue(maxsize=4)
+    window._live_processing_log_queue = ctx.Queue(maxsize=32)
+    simulation_parameters = None
     if window._source_mode == "simulation":
-        acquire_sample = lambda settings: window._simulation_backend.acquire_kind_spectrum("sample", settings)
+        simulation_parameters = window._simulation_backend.simulation_parameters()
         window._log_info("Continuous simulation acquisition started.")
     else:
-        acquire_sample = lambda settings: window._spectrometer.acquire_spectrum(settings)
         window._log_info("Continuous spectrometer acquisition started.")
     window._set_measurement_buttons_enabled(False)
     window._set_manual_acquisition_buttons_enabled(True)
@@ -390,17 +455,22 @@ def start_live_acquisition(window) -> None:
         measurement_started_at=window._measurement_started_at,
     )
     window._live_worker = LiveAcquisitionWorker(
-        acquire_sample,
         request,
         window._live_result_queue,
         window._live_processing_input_queue,
         window._live_stop_event,
+        source_mode=window._source_mode,
+        simulation_parameters=simulation_parameters,
+        debug_mode_enabled=window._processing_debug_mode_enabled,
+        log_queue=window._live_processing_log_queue,
     )
     window._live_processing_worker = LiveProcessingWorker(
         window._live_processed_queue,
         window._live_processing_input_queue,
         window._live_stop_event,
         window._current_processing_settings(),
+        debug_mode_enabled=window._processing_debug_mode_enabled,
+        log_queue=window._live_processing_log_queue,
     )
     if window._source_mode == "simulation":
         window._live_worker.update_cycle_period(1.0 / max(window.sim_output_rate_spin.value(), 1e-9))
@@ -421,19 +491,39 @@ def stop_live_acquisition(window, message: str = "Live acquisition stopped.") ->
     window._trace_display_cursor_s = 0.0
     window._last_live_processing_perf = None
     window._last_processing_ms = None
+    window._last_processing_queue_wait_ms = None
     window._processing_rate_hz = None
     window._processing_headroom_ratio = None
+    window._live_plot_update_counter = 0
     window._reset_live_accumulator()
     window._set_measurement_buttons_enabled(True)
     window._set_manual_acquisition_buttons_enabled(True)
     window.status_label.setText(message)
+    _flush_live_processing_logs(window)
     window._request_deferred_ui_refresh(telemetry=True)
     window._log_info(message)
     window._update_window_mode_label()
     if window._live_worker is not None and not window._live_worker.is_alive():
         window._live_worker = None
-    if window._live_processing_worker is not None and not window._live_processing_worker.is_alive():
-        window._live_processing_worker = None
+    if window._live_worker is not None:
+        try:
+            window._live_worker.stop()
+            window._live_worker.join(timeout=2.0)
+            if window._live_worker.is_alive():
+                window._log_warning("Live acquisition worker did not exit cleanly; terminating it.")
+                window._live_worker.terminate()
+                window._live_worker.join(timeout=1.0)
+        except Exception as exc:
+            window._log_warning(f"Live acquisition worker shutdown failed: {exc}")
+        window._live_worker = None
+    if window._live_processing_worker is not None:
+        try:
+            window._live_processing_worker.join(timeout=0.25)
+        except Exception:
+            pass
+        if not window._live_processing_worker.is_alive():
+            window._live_processing_worker = None
+    _flush_live_processing_logs(window)
 
 
 def start_acquisition(window, kind: str) -> None:
@@ -504,6 +594,8 @@ def set_manual_acquisition_buttons_enabled(window, enabled: bool) -> None:
 def set_measurement_ui_locked(window, locked: bool) -> None:
     window.sim_resolution_spin.setEnabled(not locked)
     window.sim_output_rate_spin.setEnabled(not locked and window._source_mode == "simulation")
+    if hasattr(window, "_set_recording_context_controls_enabled"):
+        window._set_recording_context_controls_enabled(not locked)
     if locked:
         window.source_tabs.setToolTip("Switch tabs without changing the active feed.")
         window.sim_resolution_spin.setToolTip(
@@ -530,10 +622,18 @@ def update_measurement_toggle_button(window) -> None:
     window.measurement_toggle_button.setToolTip(tooltip)
     trace_button = getattr(window, "trace_record_button", None)
     if trace_button is not None:
-        trace_icon = transport_icon(window._theme_mode, "stop") if window._measurement_active else transport_icon(window._theme_mode, "record")
+        if window._measurement_active:
+            record_color = QColor("#d84d4d" if window._theme_mode == "dark" else "#a11d1d")
+            record_color.setAlpha(255 if bool(getattr(window, "_recording_blink_visible", True)) else 90)
+            trace_icon = tint_tabler_icon(flow_tabler_icon("player_record"), record_color)
+        else:
+            trace_icon = transport_icon(window._theme_mode, "record")
         trace_tooltip = "Stop sensorgram recording" if window._measurement_active else "Start sensorgram recording"
         trace_button.setIcon(trace_icon)
         trace_button.setToolTip(trace_tooltip)
+    experiment_control_window = getattr(window, "_experiment_control_window", None)
+    if experiment_control_window is not None and hasattr(experiment_control_window, "_set_record_with_flow_recording_active"):
+        experiment_control_window._set_record_with_flow_recording_active(bool(window._measurement_active))
 
 
 def toggle_measurement_run(window) -> None:
@@ -605,6 +705,14 @@ def start_measurement_run(window) -> None:
             window._log_info("Measurement start cancelled.")
             return
         destination = Path(file_path)
+        if hasattr(window, "project_destination_edit") and not str(window.recording_project_destination() or "").strip():
+            window.project_destination_edit.setText(str(destination.parent))
+            if hasattr(window, "_remember_recording_project_destination"):
+                window._remember_recording_project_destination()
+        if hasattr(window, "experiment_name_edit") and not str(window.recording_experiment_name() or "").strip():
+            window.experiment_name_edit.setText(experiment_name)
+            if hasattr(window, "_remember_recording_experiment_name"):
+                window._remember_recording_experiment_name()
     destination.parent.mkdir(parents=True, exist_ok=True)
     started_at = datetime.now(timezone.utc)
     # Recording follows the execution state, but it is not stopped by flow HOLD.
@@ -629,7 +737,23 @@ def start_measurement_run(window) -> None:
     if window._live_worker is not None and window._live_worker.is_alive():
         window._live_worker.update_archive_context(window._measurement_writer, True, window._measurement_started_at)
     set_measurement_ui_locked(window, True)
+    if hasattr(window, "_set_recording_blink_indicator"):
+        window._set_recording_blink_indicator(True)
+    if hasattr(window, "_sensorgram_view_mode"):
+        window._sensorgram_view_mode = "absolute"
+    if hasattr(window, "_apply_sensorgram_view_mode"):
+        window._apply_sensorgram_view_mode(save=False)
+    if hasattr(window, "_sensorgram_content_mode"):
+        window._sensorgram_content_mode = "metric"
+    if hasattr(window, "_apply_sensorgram_content_mode"):
+        window._apply_sensorgram_content_mode(save=False)
     window._peak_history.clear()
+    if hasattr(window, "_sensorgram_heatmap_history"):
+        window._sensorgram_heatmap_history.clear()
+    if hasattr(window, "_sensorgram_heatmap_wavelengths"):
+        window._sensorgram_heatmap_wavelengths = None
+    window._trace_display_cursor_s = 0.0
+    window._live_trace_started_at = None
     window._peak_reference_processed = None
     set_measurement_buttons_enabled(window, True)
     window.status_label.setText(f"Recording to {destination.name}")
@@ -653,6 +777,7 @@ def stop_measurement_run(window) -> None:
     if not window._measurement_active:
         return
     # STOP is the only state that finalizes the recording file.
+    started_at = window._measurement_started_at
     flush_measurement_frames(window, force=True)
     if window._live_worker is not None and window._live_worker.is_alive():
         window._live_worker.update_archive_context(None, False, None)
@@ -665,7 +790,27 @@ def stop_measurement_run(window) -> None:
     window._measurement_started_at = None
     window._measurement_axis_lock = None
     set_measurement_ui_locked(window, False)
+    if hasattr(window, "_set_recording_blink_indicator"):
+        window._set_recording_blink_indicator(False)
     window._sync_simulation_backend_from_controls()
+    if started_at is not None and window._peak_history:
+        converted_history: dict[str, list[tuple[float, float]]] = {}
+        for metric_name, series in window._peak_history.items():
+            converted_series: list[tuple[float, float]] = []
+            for elapsed_s, value in series:
+                local_timestamp = (started_at + timedelta(seconds=float(elapsed_s))).astimezone().timestamp()
+                converted_series.append((float(local_timestamp), float(value)))
+            if converted_series:
+                converted_history[metric_name] = converted_series
+        window._peak_history = converted_history
+    if started_at is not None and getattr(window, "_sensorgram_heatmap_history", None):
+        converted_heatmap_history: list[tuple[float, np.ndarray]] = []
+        for elapsed_s, values in window._sensorgram_heatmap_history:
+            local_timestamp = (started_at + timedelta(seconds=float(elapsed_s))).astimezone().timestamp()
+            converted_heatmap_history.append((float(local_timestamp), np.asarray(values, dtype=np.float64).copy()))
+        window._sensorgram_heatmap_history = converted_heatmap_history
+    window._trace_display_cursor_s = 0.0
+    window._live_trace_started_at = None
     window._peak_reference_processed = None
     set_measurement_buttons_enabled(window, True)
     window.status_label.setText("Measurement stopped.")
@@ -679,12 +824,16 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
     if not window._live_active:
         return
 
-    started_at = window._live_trace_started_at
-    if started_at is None:
-        started_at = processed.acquired_at
-        window._live_trace_started_at = started_at
+    measurement_active = bool(window._measurement_active)
+    if measurement_active:
+        started_at = window._measurement_started_at
+        if started_at is not None:
+            elapsed_s = max((processed.acquired_at - started_at).total_seconds(), 0.0)
+        else:
+            elapsed_s = 0.0
+    else:
+        elapsed_s = float(processed.acquired_at.timestamp())
 
-    elapsed_s = float(window._trace_display_cursor_s)
     display_step_s = max(1.0 / max(window.live_rate_spin.value(), 1e-9), 1e-3)
     metrics = window._get_analysis_metrics(processed, fit)
     updated = False
@@ -694,16 +843,14 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
             continue
         history = window._peak_history.setdefault(metric_name, [])
         history.append((elapsed_s, float(value)))
-        cutoff = elapsed_s - window._trace_display_window_s
-        if cutoff > 0:
-            history = [(x, y) for x, y in history if x >= cutoff]
-        window._peak_history[metric_name] = history[-300:]
+        trim_history_tail_in_place(history, int(getattr(window, "_trace_history_max_points", 6000)))
+        window._peak_history[metric_name] = history
         updated = True
 
     window._trace_display_cursor_s = elapsed_s + display_step_s
 
     if updated:
-        if window._measurement_writer is not None and window._measurement_active:
+        if window._measurement_writer is not None and measurement_active:
             metric_row = {
                 "t_ms": int(round(elapsed_s * 1000.0)),
                 "sample_index": -1,

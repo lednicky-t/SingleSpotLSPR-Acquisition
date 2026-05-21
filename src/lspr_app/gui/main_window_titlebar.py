@@ -67,6 +67,10 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
     window._startup_loading_timer = QTimer(window)
     window._startup_loading_timer.setInterval(140)
     window._startup_loading_timer.timeout.connect(window._advance_startup_loading_indicator)
+    window._recording_blink_visible = True
+    window._recording_blink_timer = QTimer(window)
+    window._recording_blink_timer.setInterval(650)
+    window._recording_blink_timer.timeout.connect(window._advance_recording_blink_indicator)
     window._hw_status_items = []
     for key, label_text in (
         ("spectrometer", "Spectrometer"),

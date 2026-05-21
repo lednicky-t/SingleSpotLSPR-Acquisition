@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
+import os
 import warnings
 from dataclasses import replace
+from time import perf_counter, thread_time
 
 import numpy as np
 from scipy.signal import savgol_filter
@@ -9,31 +12,73 @@ from scipy.signal import savgol_filter
 from lspr_app.domain.models import ProcessingSettings, Spectrum
 
 
+_PROCESSING_LOGGER = logging.getLogger("lspr_app.processing")
+_DEFAULT_SLOW_PROCESSING_LOG_THRESHOLD_MS = 5.0
+_PROCESSING_DEBUG_MODE_ENABLED = False
+
+
+def set_processing_debug_mode_enabled(enabled: bool) -> None:
+    global _PROCESSING_DEBUG_MODE_ENABLED
+    _PROCESSING_DEBUG_MODE_ENABLED = bool(enabled)
+
+
+def processing_debug_mode_enabled() -> bool:
+    return _PROCESSING_DEBUG_MODE_ENABLED
+
+
 def process_spectrum(spectrum: Spectrum | None, settings: ProcessingSettings) -> tuple[Spectrum | None, Spectrum | None]:
     if spectrum is None:
         return None, None
 
+    started = perf_counter()
+    started_cpu = thread_time()
+    timings_ms: dict[str, float] = {}
+    timings_cpu_ms: dict[str, float] = {}
+
+    stage_started = perf_counter()
+    stage_cpu_started = thread_time()
     mask = (spectrum.wavelengths_nm >= settings.wavelength_min_nm) & (
         spectrum.wavelengths_nm <= settings.wavelength_max_nm
     )
+    timings_ms["mask"] = (perf_counter() - stage_started) * 1000.0
+    timings_cpu_ms["mask"] = (thread_time() - stage_cpu_started) * 1000.0
     if not np.any(mask):
         return None, None
 
+    stage_started = perf_counter()
+    stage_cpu_started = thread_time()
     wavelengths = spectrum.wavelengths_nm[mask].copy()
     values = spectrum.values[mask].copy()
+    timings_ms["slice"] = (perf_counter() - stage_started) * 1000.0
+    timings_cpu_ms["slice"] = (thread_time() - stage_cpu_started) * 1000.0
+
+    stage_started = perf_counter()
+    stage_cpu_started = thread_time()
     cleaned = _sanitize_curve_values(wavelengths, values)
+    timings_ms["sanitize"] = (perf_counter() - stage_started) * 1000.0
+    timings_cpu_ms["sanitize"] = (thread_time() - stage_cpu_started) * 1000.0
     if cleaned is None:
         return None, None
     wavelengths, values, replaced_nonfinite = cleaned
 
+    stage_started = perf_counter()
+    stage_cpu_started = thread_time()
     if settings.baseline_method == "linear":
         values = values - _linear_baseline(values)
+    timings_ms["baseline"] = (perf_counter() - stage_started) * 1000.0
+    timings_cpu_ms["baseline"] = (thread_time() - stage_cpu_started) * 1000.0
 
+    stage_started = perf_counter()
+    stage_cpu_started = thread_time()
     if settings.smoothing_method == "moving_average":
         values = _moving_average(values, settings.smoothing_window)
     elif settings.smoothing_method == "savitzky_golay":
         values = _savitzky_golay(values, settings.smoothing_window)
+    timings_ms["smoothing"] = (perf_counter() - stage_started) * 1000.0
+    timings_cpu_ms["smoothing"] = (thread_time() - stage_cpu_started) * 1000.0
 
+    stage_started = perf_counter()
+    stage_cpu_started = thread_time()
     processed = replace(
         spectrum,
         wavelengths_nm=wavelengths,
@@ -52,8 +97,30 @@ def process_spectrum(spectrum: Spectrum | None, settings: ProcessingSettings) ->
             "fwhm_nm": _compute_fwhm_nm(wavelengths, values),
         },
     )
+    timings_ms["metadata"] = (perf_counter() - stage_started) * 1000.0
+    timings_cpu_ms["metadata"] = (thread_time() - stage_cpu_started) * 1000.0
 
-    return processed, fit_processed_spectrum(processed, settings)
+    stage_started = perf_counter()
+    stage_cpu_started = thread_time()
+    fit = fit_processed_spectrum(processed, settings)
+    timings_ms["fit"] = (perf_counter() - stage_started) * 1000.0
+    timings_cpu_ms["fit"] = (thread_time() - stage_cpu_started) * 1000.0
+
+    total_ms = (perf_counter() - started) * 1000.0
+    total_cpu_ms = (thread_time() - started_cpu) * 1000.0
+    _log_slow_processing_profile(
+        total_ms,
+        total_cpu_ms,
+        timings_ms,
+        timings_cpu_ms,
+        input_points=len(spectrum.wavelengths_nm),
+        processed_points=len(wavelengths),
+        replaced_nonfinite=replaced_nonfinite,
+        settings=settings,
+        fit_present=fit is not None,
+    )
+
+    return processed, fit
 
 
 def resolve_fit_window(
@@ -656,3 +723,55 @@ def _sanitize_curve_values(
     if np.count_nonzero(finite) < 2:
         return None
     return original_x[finite], restored[finite], int(np.count_nonzero(bad))
+
+
+def _slow_processing_log_threshold_ms() -> float:
+    raw_value = os.getenv("LSPR_PROCESSING_SLOW_LOG_MS")
+    if raw_value is None:
+        return _DEFAULT_SLOW_PROCESSING_LOG_THRESHOLD_MS
+    try:
+        return max(float(raw_value), 0.0)
+    except ValueError:
+        return _DEFAULT_SLOW_PROCESSING_LOG_THRESHOLD_MS
+
+
+def _log_slow_processing_profile(
+    total_ms: float,
+    total_cpu_ms: float,
+    timings_ms: dict[str, float],
+    timings_cpu_ms: dict[str, float],
+    *,
+    input_points: int,
+    processed_points: int,
+    replaced_nonfinite: int,
+    settings: ProcessingSettings,
+    fit_present: bool,
+) -> None:
+    if not _PROCESSING_DEBUG_MODE_ENABLED:
+        return
+    if total_ms < _slow_processing_log_threshold_ms():
+        return
+
+    stages = (
+        f"mask={timings_ms.get('mask', 0.0):.2f}/{timings_cpu_ms.get('mask', 0.0):.2f} ms",
+        f"slice={timings_ms.get('slice', 0.0):.2f}/{timings_cpu_ms.get('slice', 0.0):.2f} ms",
+        f"sanitize={timings_ms.get('sanitize', 0.0):.2f}/{timings_cpu_ms.get('sanitize', 0.0):.2f} ms",
+        f"baseline={timings_ms.get('baseline', 0.0):.2f}/{timings_cpu_ms.get('baseline', 0.0):.2f} ms",
+        f"smoothing={timings_ms.get('smoothing', 0.0):.2f}/{timings_cpu_ms.get('smoothing', 0.0):.2f} ms",
+        f"metadata={timings_ms.get('metadata', 0.0):.2f}/{timings_cpu_ms.get('metadata', 0.0):.2f} ms",
+        f"fit={timings_ms.get('fit', 0.0):.2f}/{timings_cpu_ms.get('fit', 0.0):.2f} ms",
+    )
+    _PROCESSING_LOGGER.info(
+        "Slow spectrum processing: total=%.2f/%.2f ms wall/cpu | points=%d->%d | nonfinite=%d | "
+        "baseline=%s | smoothing=%s(%d) | fit=%s | %s",
+        total_ms,
+        total_cpu_ms,
+        input_points,
+        processed_points,
+        replaced_nonfinite,
+        settings.baseline_method,
+        settings.smoothing_method,
+        settings.smoothing_window,
+        "on" if fit_present else "off",
+        " | ".join(stages),
+    )

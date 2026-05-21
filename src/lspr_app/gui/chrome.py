@@ -92,6 +92,12 @@ def build_menu_bar(window) -> QMenuBar:
     legend_action.setToolTip("Show a short legend for the status and telemetry labels.")
     legend_action.triggered.connect(window._show_diagnostics_legend_dialog)
 
+    debug_mode_action = help_menu.addAction("Debug mode")
+    debug_mode_action.setCheckable(True)
+    debug_mode_action.setChecked(bool(getattr(window, "_processing_debug_mode_enabled", False)))
+    debug_mode_action.setToolTip("Enable slow-spectrum profiling and other developer diagnostics.")
+    debug_mode_action.toggled.connect(window._set_processing_debug_mode_enabled)
+
     help_menu.addSeparator()
     about_action = help_menu.addAction("About")
     about_action.setToolTip("Show application information.")

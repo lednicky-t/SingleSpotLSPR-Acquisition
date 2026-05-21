@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - optional dependency guard
 from PyQt6.QtCore import QByteArray, QObject, QRectF, QRunnable, QSize, QThreadPool, QTimer, Qt, QEvent, QModelIndex, QItemSelectionModel, pyqtSignal
 from pathlib import Path
 
-from PyQt6.QtGui import QColor, QFont, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap
+from PyQt6.QtGui import QColor, QFont, QFontInfo, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -923,6 +923,17 @@ class PumpPlanTimelineWidget(QWidget):
             return f"{label}: -"
         return f"{label}: {self._format_duration(max(float(value_s), 0.0))} / {clock_text}"
 
+    def _scaled_font(self, base_font: QFont, *, delta: float = 0.0, minimum: float = 1.0, bold: bool | None = None) -> QFont:
+        font_info = QFontInfo(base_font)
+        base_size = float(font_info.pointSizeF())
+        if base_size <= 0:
+            base_size = float(font_info.pointSize()) if font_info.pointSize() > 0 else 10.0
+        font = QFont(font_info.family())
+        font.setPointSizeF(max(base_size + delta, minimum))
+        if bold is not None:
+            font.setBold(bold)
+        return font
+
     def paintEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
         dark = self._theme_mode == "dark"
         palette = self._theme_palette or {}
@@ -933,8 +944,7 @@ class PumpPlanTimelineWidget(QWidget):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-            title_font = QFont(self.font())
-            title_font.setPointSize(max(title_font.pointSize() - 1, 10))
+            title_font = self._scaled_font(self.font(), delta=-1.0, minimum=10.0)
             painter.setFont(title_font)
             painter.setPen(QPen(QColor(palette.get("title", text_color.name()))))
             title_y = 18
@@ -947,9 +957,7 @@ class PumpPlanTimelineWidget(QWidget):
             for index, part in enumerate(status_parts):
                 text = str(part["text"])
                 is_step_part = index < 3
-                font = QFont(self.font())
-                font.setPointSize(max(font.pointSize() - 1, 9))
-                font.setBold(False)
+                font = self._scaled_font(self.font(), delta=-1.0, minimum=9.0, bold=False)
                 painter.setFont(font)
                 metrics = painter.fontMetrics()
                 if index < len(status_parts) - 1:
@@ -974,7 +982,7 @@ class PumpPlanTimelineWidget(QWidget):
 
             if not self._steps:
                 painter.setPen(QPen(muted))
-                painter.setFont(self.font())
+                painter.setFont(self._scaled_font(self.font(), minimum=9.0))
                 painter.drawText(left_pad, 56, "No pump-plan steps.")
                 return
 
@@ -1356,6 +1364,10 @@ class ExperimentControlWindow(QWidget):
         self._auto_connect_devices = bool(auto_connect_devices)
         self._plan_running = False
         self._plan_holding = False
+        self._plan_hold_blink_frame = 0
+        self._plan_hold_blink_timer = QTimer(self)
+        self._plan_hold_blink_timer.setInterval(180)
+        self._plan_hold_blink_timer.timeout.connect(self._advance_plan_hold_blink_indicator)
         self._plan_elapsed_s = 0.0
         self._plan_resume_elapsed_s = 0.0
         self._plan_started_monotonic: float | None = None
@@ -1741,6 +1753,7 @@ class ExperimentControlWindow(QWidget):
         self.record_with_flow_button.setCheckable(True)
         self.record_with_flow_button.setChecked(True)
         self.record_with_flow_button.toggled.connect(self._update_record_with_flow_button_icon)
+        self._record_with_flow_recording_active = False
         self._update_record_with_flow_button_icon()
         self.timeline_widget = PumpPlanTimelineWidget()
         self.timeline_widget.set_theme(self._theme_mode)
@@ -3686,18 +3699,56 @@ class ExperimentControlWindow(QWidget):
         if self._plan_running:
             icon = transport_icon(self._theme_mode, "pause")
             tooltip = "Hold plan"
+            timer = getattr(self, "_plan_hold_blink_timer", None)
+            if timer is not None and timer.isActive():
+                timer.stop()
         else:
-            icon = transport_icon(self._theme_mode, "play")
-            tooltip = "Run plan" if not self._plan_holding else "Resume plan"
+            if self._plan_holding:
+                icon = self._hold_plan_play_icon()
+                tooltip = "Resume plan"
+                timer = getattr(self, "_plan_hold_blink_timer", None)
+                if timer is not None and not timer.isActive():
+                    self._plan_hold_blink_frame = 0
+                    timer.start()
+            else:
+                icon = transport_icon(self._theme_mode, "play")
+                tooltip = "Run plan"
+                timer = getattr(self, "_plan_hold_blink_timer", None)
+                if timer is not None and timer.isActive():
+                    timer.stop()
+                self._plan_hold_blink_frame = 0
         self.plan_toggle_button.setIcon(icon)
         self.plan_toggle_button.setToolTip(tooltip)
+
+    def _hold_plan_play_icon(self) -> QIcon:
+        alpha_steps = [255, 226, 194, 160, 126, 160, 194, 226]
+        frame_index = int(getattr(self, "_plan_hold_blink_frame", 0)) % len(alpha_steps)
+        color = QColor("#47a861")
+        color.setAlpha(alpha_steps[frame_index])
+        return tint_tabler_icon(flow_tabler_icon("player_play"), color)
+
+    def _advance_plan_hold_blink_indicator(self) -> None:
+        timer = getattr(self, "_plan_hold_blink_timer", None)
+        if timer is None or not timer.isActive() or not self._plan_holding:
+            return
+        self._plan_hold_blink_frame = (int(getattr(self, "_plan_hold_blink_frame", 0)) + 1) % 8
+        self._update_experiment_control_toggle_button()
 
     def _update_record_with_flow_button_icon(self) -> None:
         if not hasattr(self, "record_with_flow_button"):
             return
         active = self.record_with_flow_button.isChecked()
-        color = QColor("#47a861" if active else "#8a98a8")
+        recording_active = bool(getattr(self, "_record_with_flow_recording_active", False))
+        color = QColor("#47a861" if active and not recording_active else "#8a98a8")
         self.record_with_flow_button.setIcon(tint_tabler_icon(flow_tabler_icon("file_pencil"), color))
+        if recording_active:
+            self.record_with_flow_button.setToolTip("Sensorgram recording is active.")
+        else:
+            self.record_with_flow_button.setToolTip("Record measurement data while the experiment plan runs.")
+
+    def _set_record_with_flow_recording_active(self, active: bool) -> None:
+        self._record_with_flow_recording_active = bool(active)
+        self._update_record_with_flow_button_icon()
 
     def _toggle_experiment_control_run_hold(self) -> None:
         if self._plan_running:
@@ -5664,6 +5715,10 @@ class ExperimentControlWindow(QWidget):
         bottom = max(int(cached_sizes[1]), 180)
         splitter.setSizes([top, bottom])
 
+    def _persist_experiment_control_view_mode_layout(self) -> None:
+        self._apply_experiment_control_parent_splitter_sizes()
+        self.save_ui_state()
+
     def _experiment_control_view_mode_label(self, mode: str | None = None) -> str:
         normalized = self._normalize_experiment_control_view_mode(mode or self._experiment_control_view_mode)
         return {
@@ -5728,9 +5783,10 @@ class ExperimentControlWindow(QWidget):
         self.updateGeometry()
         if self.parentWidget() is not None:
             self.parentWidget().updateGeometry()
-        QTimer.singleShot(0, self._apply_experiment_control_parent_splitter_sizes)
         if save:
-            self.save_ui_state()
+            QTimer.singleShot(0, self._persist_experiment_control_view_mode_layout)
+        else:
+            QTimer.singleShot(0, self._apply_experiment_control_parent_splitter_sizes)
 
     def _cycle_experiment_control_view_mode(self) -> None:
         order = ["full", "table_timeline", "timeline"]
@@ -6663,7 +6719,8 @@ class ExperimentControlWindow(QWidget):
             while len(labels) < 12:
                 labels.append(f"Solution {len(labels) + 1}")
             self._switch_solution_labels = labels
-            self._refresh_switch_solution_controls()
+        self._update_experiment_control_toggle_button()
+        self._refresh_switch_solution_controls()
         saved_pause_state = state.get("pause_state_step")
         if isinstance(saved_pause_state, dict):
             self._experiment_control_pause_template = self._deserialize_experiment_control_pause_template(saved_pause_state)

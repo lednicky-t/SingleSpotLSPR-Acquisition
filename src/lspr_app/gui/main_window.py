@@ -14,9 +14,21 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph import exporters as pg_exporters
 
-from PyQt6.QtCore import QPoint, QSize, Qt, QThreadPool, QTimer, pyqtSignal
+from PyQt6.QtCore import QPoint, QSize, Qt, QThreadPool, QTimer, QUrl, QRectF, pyqtSignal
 from PyQt6.QtCore import QEvent
-from PyQt6.QtGui import QFont, QColor, QGuiApplication, QIcon, QKeySequence, QPainter, QPixmap, QShortcut, QTextCursor
+from PyQt6.QtGui import (
+    QDesktopServices,
+    QFont,
+    QFontInfo,
+    QColor,
+    QGuiApplication,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPixmap,
+    QShortcut,
+    QTextCursor,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -54,7 +66,7 @@ from lspr_app.device.serial_controllers import SerialController, controller_port
 from lspr_app.device.valve_controllers import detect_valve_controller
 from lspr_app.device.simulated import SimulationParameters, SimulatedSpectrometer
 from lspr_app.domain.models import AcquisitionSettings, ProcessingSettings, Spectrum
-from lspr_app.domain.processing import fit_processed_spectrum
+from lspr_app.domain.processing import fit_processed_spectrum, set_processing_debug_mode_enabled
 from lspr_app.domain.session import MeasurementError, MeasurementSession
 from lspr_app.storage.app_config import (
     load_processing_settings,
@@ -196,6 +208,8 @@ from lspr_app.gui.plot_controller import (
     autoscale_residual_axis,
     autoscale_spectrum_plot,
     autoscale_trace_plot,
+    clip_series_to_window,
+    downsample_spectrum_series_for_view,
     flush_deferred_ui_refreshes,
     flush_plot_refreshes,
     handle_spectrum_mouse_moved,
@@ -204,6 +218,8 @@ from lspr_app.gui.plot_controller import (
     refresh_trace_plot,
     render_trace_series,
     request_trace_autoscale,
+    spectrum_render_cache_key,
+    trim_history_tail_in_place,
     update_residual_axis_visibility,
     update_residual_view_geometry,
     update_spectrum_stats,
@@ -271,10 +287,11 @@ class LogTerminalTextEdit(QTextEdit):
                 event.ignore()
                 return
             factor = 1.1 if delta_y > 0 else 1 / 1.1
-            font = QFont(self.font())
-            current_size = float(font.pointSizeF() if font.pointSizeF() > 0 else font.pointSize())
+            font_info = QFontInfo(self.font())
+            current_size = float(font_info.pointSizeF())
             if current_size <= 0:
-                current_size = 9.0
+                current_size = float(font_info.pointSize()) if font_info.pointSize() > 0 else 9.0
+            font = QFont(font_info.family())
             new_size = max(self._min_font_size, min(current_size * factor, self._max_font_size))
             font.setPointSizeF(new_size)
             self.setFont(font)
@@ -301,6 +318,12 @@ class MainWindow(QMainWindow):
     }
     TRACE_METRIC_COLORS = {
         "smoothed_max": "#0072B2",
+        "centroid": "#009E73",
+        "poly_max": "#E69F00",
+        "gaussian_center": "#D55E00",
+    }
+    SENSORGRAM_TIME_PLOT_COLORS = {
+        "smoothed_max": "#1F77B4",
         "centroid": "#009E73",
         "poly_max": "#E69F00",
         "gaussian_center": "#D55E00",
@@ -367,6 +390,7 @@ class MainWindow(QMainWindow):
         self._live_result_queue: queue.Queue[LiveAcquisitionEvent] = queue.Queue(maxsize=4)
         self._live_processing_input_queue: queue.Queue[LiveAcquisitionEvent] = queue.Queue(maxsize=16)
         self._live_processed_queue: queue.Queue[LiveProcessedEvent] = queue.Queue(maxsize=4)
+        self._live_processing_log_queue: queue.Queue[tuple[int, str, str]] = queue.Queue(maxsize=32)
         self._measurement_active = False
         self._measurement_paused = False
         self._measurement_writer: AsyncHDF5MeasurementWriter | None = None
@@ -392,6 +416,7 @@ class MainWindow(QMainWindow):
         self._last_overhead_ms: float | None = None
         self._effective_raw_rate_hz: float | None = None
         self._last_processing_ms: float | None = None
+        self._last_processing_queue_wait_ms: float | None = None
         self._processing_rate_hz: float | None = None
         self._processing_headroom_ratio: float | None = None
         self._last_display_average_count: int | None = None
@@ -404,6 +429,8 @@ class MainWindow(QMainWindow):
         self._live_display_dropped_frames = 0
         self._live_display_started_at: float | None = None
         self._last_live_processing_perf: float | None = None
+        self._live_plot_update_counter = 0
+        self._live_plot_refresh_stride = 2
         self._capabilities: SpectrometerCapabilities = self._spectrometer.capabilities()
         self._processing_settings = load_processing_settings()
         self._ui_state = load_window_ui_state("main_window")
@@ -436,9 +463,20 @@ class MainWindow(QMainWindow):
         self._temporal_history_key: tuple[object, ...] | None = None
         self._trace_display_window_s = 60.0
         self._trace_display_cursor_s = 0.0
+        self._trace_history_max_points = 6000
+        self._recording_blink_visible = True
+        self._processing_debug_mode_enabled = bool(load_app_setting("processing_debug_mode", False))
+        set_processing_debug_mode_enabled(self._processing_debug_mode_enabled)
+        self._sensorgram_view_mode = "absolute"
+        self._sensorgram_content_mode = "metric"
+        self._sensorgram_heatmap_history: list[tuple[float, np.ndarray]] = []
+        self._sensorgram_heatmap_history_max_rows = 2000
+        self._sensorgram_heatmap_wavelengths: np.ndarray | None = None
         self._last_summary_text: str = ""
         self._last_summary_refresh_ts: float = 0.0
         self._pending_trace_label: str = "Peak position (nm)"
+        self._trace_view_locked = False
+        self._trace_view_autoscaling = False
         self._ui_summary_dirty = False
         self._ui_telemetry_dirty = False
         self._ui_live_estimate_dirty = False
@@ -447,6 +485,7 @@ class MainWindow(QMainWindow):
         self._plot_render_dirty = False
         self._visible_processed_plot: Spectrum | None = None
         self._visible_fit_plot: Spectrum | None = None
+        self._spectrum_render_cache_key: tuple[object, ...] | None = None
         self._visible_trace_x: np.ndarray | None = None
         self._visible_trace_y: np.ndarray | None = None
         self._visible_trace_mode = "elapsed"
@@ -456,7 +495,7 @@ class MainWindow(QMainWindow):
         self._source_epoch = 0
         self._processing_refresh_delay_ms = 120
         self._stats_refresh_delay_ms = 180
-        self._live_ui_refresh_delay_ms = 180
+        self._live_ui_refresh_delay_ms = 220
         self._acquisition_state_timer = QTimer(self)
         self._acquisition_state_timer.setSingleShot(True)
         self._acquisition_state_timer.setInterval(250)
@@ -526,9 +565,10 @@ class MainWindow(QMainWindow):
         self.project_destination_edit.setToolTip("Root folder where experiment folders and HDF5 files will be saved.")
         self.project_destination_edit.setFrame(False)
         self.project_destination_edit.setFixedHeight(24)
+        self.project_destination_edit.setCursor(Qt.CursorShape.PointingHandCursor)
         self.project_destination_browse_button = self._make_frameless_icon_button(
             tint_tabler_icon(flow_tabler_icon("folder", "folder_open"), QColor("#8fbaff")),
-            "Choose the project destination folder.",
+            "Open the project destination folder in the file explorer.",
             size=24,
         )
         self.experiment_name_edit = QLineEdit(str(load_app_setting("recording_experiment_name", "")))
@@ -537,7 +577,8 @@ class MainWindow(QMainWindow):
         self.experiment_name_edit.setToolTip("Experiment folder name and part of the HDF5 file name.")
         self.experiment_name_edit.setFrame(False)
         self.experiment_name_edit.setFixedHeight(24)
-        self.project_destination_browse_button.clicked.connect(self._choose_recording_project_destination)
+        self.project_destination_edit.installEventFilter(self)
+        self.project_destination_browse_button.clicked.connect(self._open_recording_project_destination_in_explorer)
         self.project_destination_edit.editingFinished.connect(self._remember_recording_project_destination)
         self.experiment_name_edit.editingFinished.connect(self._remember_recording_experiment_name)
 
@@ -715,7 +756,7 @@ class MainWindow(QMainWindow):
         self.baseline_method_combo.setToolTip("Method used to estimate and subtract the baseline.")
         self.smoothing_window_spin = QSpinBox()
         make_compact_spinbox(self.smoothing_window_spin)
-        self.smoothing_window_spin.setRange(1, 101)
+        self.smoothing_window_spin.setRange(1, 2147483647)
         self.smoothing_window_spin.setSingleStep(2)
         self.smoothing_window_spin.setToolTip("Smoothing window in data points. Larger values smooth more strongly.")
         self.temporal_smoothing_spin = QSpinBox()
@@ -917,7 +958,13 @@ class MainWindow(QMainWindow):
         }
         for curve in self.trace_curves.values():
             curve.setClipToView(True)
-            curve.setDownsampling(auto=False, ds=1)
+            curve.setDownsampling(auto=True, method="peak")
+        self.trace_heatmap_image = pg.ImageItem(axisOrder="row-major")
+        self.trace_heatmap_image.setVisible(False)
+        self.trace_heatmap_image.setZValue(-10)
+        self.trace_heatmap_image.setAutoDownsample(True)
+        self.trace_heatmap_image.setLookupTable(self._sensorgram_heatmap_lookup_table())
+        self.trace_plot.addItem(self.trace_heatmap_image, ignoreBounds=True)
         self.trace_legend = self.trace_plot.addLegend(offset=(10, 10))
         self.trace_vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#666666", width=1))
         self.trace_hline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#666666", width=1))
@@ -928,7 +975,9 @@ class MainWindow(QMainWindow):
             rateLimit=60,
             slot=self._handle_trace_mouse_moved,
         )
+        self.trace_plot.getPlotItem().vb.sigRangeChanged.connect(self._handle_trace_view_range_changed)
         self._style_plot_widgets()
+        self._apply_sensorgram_display_style()
         _startup_mark("plot widgets styled")
 
         self.session_summary = QTextEdit()
@@ -1077,7 +1126,32 @@ class MainWindow(QMainWindow):
         spectrum_stats_bar.addWidget(self.spectrum_cursor_label)
 
         trace_title = QLabel("Sensorgram")
-        trace_title.setStyleSheet("font-size: 13px; font-weight: 800; letter-spacing: 0.8px; color: #5b6775;")
+        trace_title.setObjectName("sensorgramHeaderLabel")
+        self.sensorgram_view_mode_button = QToolButton()
+        self.sensorgram_view_mode_button.setObjectName("sensorgramViewModeButton")
+        self.sensorgram_view_mode_button.setAutoRaise(True)
+        self.sensorgram_view_mode_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.sensorgram_view_mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sensorgram_view_mode_button.clicked.connect(self._cycle_sensorgram_view_mode)
+        self._update_sensorgram_view_mode_button()
+        self.sensorgram_content_mode_button = QToolButton()
+        self.sensorgram_content_mode_button.setObjectName("sensorgramContentModeButton")
+        self.sensorgram_content_mode_button.setAutoRaise(True)
+        self.sensorgram_content_mode_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.sensorgram_content_mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sensorgram_content_mode_button.clicked.connect(self._cycle_sensorgram_content_mode)
+        self._update_sensorgram_content_mode_button()
+
+        trace_title_row = QHBoxLayout()
+        trace_title_row.setContentsMargins(0, 0, 0, 0)
+        trace_title_row.setSpacing(6)
+        trace_title_row.addWidget(trace_title)
+        trace_title_row.addWidget(self.sensorgram_view_mode_button)
+        trace_title_row.addWidget(self.sensorgram_content_mode_button)
+        trace_title_row.addStretch(1)
+        trace_title_row_widget = QWidget()
+        trace_title_row_widget.setLayout(trace_title_row)
+        trace_title_row_widget.setContentsMargins(0, 0, 0, 0)
 
         trace_left_field = QHBoxLayout()
         trace_left_field.setContentsMargins(0, 0, 0, 0)
@@ -1235,7 +1309,7 @@ class MainWindow(QMainWindow):
         trace_layout = QVBoxLayout()
         trace_layout.setContentsMargins(0, 0, 0, 0)
         trace_layout.setSpacing(4)
-        trace_layout.addWidget(trace_title)
+        trace_layout.addWidget(trace_title_row_widget)
         trace_layout.addWidget(trace_body_splitter)
         trace_layout.addWidget(self.trace_plot, 1)
         trace_block.setLayout(trace_layout)
@@ -1292,16 +1366,20 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout()
         layout.setContentsMargins(6, 0, 6, 0)
         layout.setSpacing(5)
+        controls_row = QHBoxLayout()
+        controls_row.setContentsMargins(0, 0, 0, 0)
+        controls_row.setSpacing(5)
         project_label = QLabel("Project's destination")
         project_label.setToolTip("Root folder for saved experiment folders.")
         experiment_label = QLabel("Experiment name")
         experiment_label.setToolTip("Folder name and filename component for the current experiment.")
-        layout.addWidget(project_label)
-        layout.addWidget(self.project_destination_edit, 3)
-        layout.addWidget(self.project_destination_browse_button)
-        layout.addSpacing(6)
-        layout.addWidget(experiment_label)
-        layout.addWidget(self.experiment_name_edit, 2)
+        controls_row.addWidget(project_label)
+        controls_row.addWidget(self.project_destination_edit, 3)
+        controls_row.addWidget(self.project_destination_browse_button)
+        controls_row.addSpacing(6)
+        controls_row.addWidget(experiment_label)
+        controls_row.addWidget(self.experiment_name_edit, 2)
+        layout.addLayout(controls_row)
         panel.setLayout(layout)
         panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         panel.setFixedHeight(28)
@@ -1313,6 +1391,11 @@ class MainWindow(QMainWindow):
     def recording_experiment_name(self) -> str:
         return self.experiment_name_edit.text().strip()
 
+    def _set_recording_context_controls_enabled(self, enabled: bool) -> None:
+        self.project_destination_edit.setEnabled(enabled)
+        self.project_destination_browse_button.setEnabled(enabled)
+        self.experiment_name_edit.setEnabled(enabled)
+
     def _choose_recording_project_destination(self) -> None:
         current = self.recording_project_destination()
         start_dir = current if current else str(Path.cwd())
@@ -1321,6 +1404,15 @@ class MainWindow(QMainWindow):
             return
         self.project_destination_edit.setText(selected)
         self._remember_recording_project_destination()
+
+    def _open_recording_project_destination_in_explorer(self) -> None:
+        current = self.recording_project_destination()
+        folder = Path(current).expanduser() if current else Path.cwd()
+        if not folder.exists():
+            folder = folder.parent if folder.parent.exists() else Path.cwd()
+        if folder.is_file():
+            folder = folder.parent
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder.resolve())))
 
     def _remember_recording_project_destination(self) -> None:
         save_app_setting("recording_project_destination", self.recording_project_destination())
@@ -1385,6 +1477,7 @@ class MainWindow(QMainWindow):
                 "tab": "#1b2026",
                 "tab_selected": "#13161b",
                 "accent": "#b2bac4",
+                "title": "#b2bac4",
                 "scroll": "#49505a",
                 "scroll_hover": "#5c6470",
                 "splitter": "#2b3138",
@@ -1415,6 +1508,7 @@ class MainWindow(QMainWindow):
             "tab": "#e8eef3",
             "tab_selected": "#f4f6f8",
             "accent": "#2f80c1",
+            "title": "#2f80c1",
             "scroll": "#bcc9d5",
             "scroll_hover": "#9fb3c5",
             "splitter": "#dde5ec",
@@ -1465,6 +1559,35 @@ class MainWindow(QMainWindow):
                 padding: 0px;
                 margin: 0px;
             }
+            QLabel#sensorgramHeaderLabel {
+                color: %(title)s;
+                font-size: 13px;
+                font-weight: 800;
+                letter-spacing: 0.8px;
+                background: transparent;
+                border: none;
+                padding: 0px;
+                margin: 0px;
+            }
+            QToolButton#sensorgramViewModeButton,
+            QToolButton#sensorgramContentModeButton {
+                background: transparent;
+                border: none;
+                padding: 0px;
+                margin: 0px;
+                color: #e8d85f;
+                font-weight: 600;
+            }
+            QToolButton#sensorgramViewModeButton:hover,
+            QToolButton#sensorgramContentModeButton:hover {
+                background: transparent;
+                border: none;
+            }
+            QToolButton#sensorgramViewModeButton:pressed,
+            QToolButton#sensorgramContentModeButton:pressed {
+                background: transparent;
+                border: none;
+            }
             QLabel#traceClearLabel {
                 color: %(accent)s;
                 background: transparent;
@@ -1482,8 +1605,8 @@ class MainWindow(QMainWindow):
                 border-radius: 0px;
                 padding: 0px;
                 margin: 0px;
-                min-width: 24px;
-                min-height: 18px;
+                min-width: 0px;
+                min-height: 0px;
             }
             QToolButton#windowButton:hover {
                 background: %(button_hover)s;
@@ -1812,6 +1935,7 @@ class MainWindow(QMainWindow):
         save_app_setting("theme_mode", self._theme_mode)
         self._apply_modern_style()
         self._style_plot_widgets()
+        self._apply_sensorgram_display_style()
         self._update_measurement_toggle_button()
         self._log_info(f"Theme switched to {self._theme_mode}.")
         if self._experiment_control_window is not None:
@@ -1862,6 +1986,36 @@ class MainWindow(QMainWindow):
         self._update_freeze_button_icon()
         self._update_residual_button_icon()
         self._update_dark_reference_button_icons()
+
+    def _sensorgram_heatmap_lookup_table(self) -> np.ndarray:
+        try:
+            return pg.colormap.get("viridis").getLookupTable(0.0, 1.0, 256)
+        except Exception:
+            try:
+                color_map = pg.ColorMap(
+                    [0.0, 0.25, 0.5, 0.75, 1.0],
+                    [
+                        (68, 1, 84, 255),
+                        (59, 82, 139, 255),
+                        (33, 145, 140, 255),
+                        (94, 201, 98, 255),
+                        (253, 231, 37, 255),
+                    ],
+                )
+                return color_map.getLookupTable(0.0, 1.0, 256)
+            except Exception:
+                return pg.colormap.get("plasma").getLookupTable(0.0, 1.0, 256)
+
+    def _apply_sensorgram_display_style(self) -> None:
+        mode = self._normalize_sensorgram_content_mode(getattr(self, "_sensorgram_content_mode", "metric"))
+        if mode == "heatmap":
+            self.trace_heatmap_image.setLookupTable(self._sensorgram_heatmap_lookup_table())
+            for curve in self.trace_curves.values():
+                curve.setPen(pg.mkPen("#8A5CFF", width=2.2))
+            return
+
+        for metric_name, curve in self.trace_curves.items():
+            curve.setPen(pg.mkPen(self.SENSORGRAM_TIME_PLOT_COLORS.get(metric_name, "#1F77B4"), width=2.2))
 
     def _set_log_following(self, enabled: bool) -> None:
         set_log_following(self, enabled)
@@ -2046,6 +2200,8 @@ class MainWindow(QMainWindow):
             self._experiment_control_window.flow_state_recorded.connect(self._handle_flow_state_recorded)
             self._experiment_control_window.recording_controller = self
             self._experiment_control_window.theme_changed.connect(self.set_theme)
+            if hasattr(self._experiment_control_window, "_set_record_with_flow_recording_active"):
+                self._experiment_control_window._set_record_with_flow_recording_active(bool(self._measurement_active))
             if hasattr(self, "_top_content_stack"):
                 placeholder = getattr(self, "_flow_panel_placeholder", None)
                 if placeholder is not None:
@@ -2303,6 +2459,8 @@ class MainWindow(QMainWindow):
         self._last_display_average_count = None
         self._last_display_period_ms = None
         self._peak_history.clear()
+        self._sensorgram_heatmap_history.clear()
+        self._sensorgram_heatmap_wavelengths = None
         self._peak_reference_processed = None
         self._live_trace_started_at = None
         self._reset_live_accumulator()
@@ -2351,6 +2509,13 @@ class MainWindow(QMainWindow):
                 noise=float(self.sim_noise_slider.value()),
             )
         )
+        if (
+            self._live_active
+            and self._source_mode == "simulation"
+            and self._live_worker is not None
+            and self._live_worker.is_alive()
+        ):
+            self._live_worker.update_simulation_parameters(self._simulation_backend.simulation_parameters())
 
     def _connect_processing_widgets(self) -> None:
         self.range_min_spin.valueChanged.connect(self._handle_processing_setting_change)
@@ -2732,6 +2897,31 @@ class MainWindow(QMainWindow):
             timer.stop()
             label.setVisible(False)
 
+    def _set_recording_blink_indicator(self, active: bool) -> None:
+        timer = getattr(self, "_recording_blink_timer", None)
+        if timer is None:
+            return
+        if active:
+            if not timer.isActive():
+                self._recording_blink_visible = True
+                self._render_recording_blink_indicator()
+                timer.start()
+        else:
+            timer.stop()
+            self._recording_blink_visible = True
+            self._render_recording_blink_indicator()
+
+    def _advance_recording_blink_indicator(self) -> None:
+        timer = getattr(self, "_recording_blink_timer", None)
+        if timer is None or not timer.isActive():
+            return
+        self._recording_blink_visible = not bool(getattr(self, "_recording_blink_visible", True))
+        self._render_recording_blink_indicator()
+
+    def _render_recording_blink_indicator(self) -> None:
+        self._update_measurement_toggle_button()
+        self._update_window_mode_label()
+
     def _advance_startup_loading_indicator(self) -> None:
         label = getattr(self, "_startup_loading_label", None)
         if label is None:
@@ -2871,6 +3061,11 @@ class MainWindow(QMainWindow):
         update_window_mode_label(self)
 
     def eventFilter(self, obj, event) -> bool:  # pragma: no cover - GUI runtime path
+        if obj is getattr(self, "project_destination_edit", None):
+            event_type = event.type()
+            if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self._choose_recording_project_destination()
+                return True
         if obj is self._title_bar_widget:
             event_type = event.type()
             if event_type == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
@@ -2941,6 +3136,17 @@ class MainWindow(QMainWindow):
             "ovh = acquisition latency minus expected budget\n"
             "show = last displayed frame/window summary",
         )
+
+    def _set_processing_debug_mode_enabled(self, enabled: bool) -> None:
+        self._processing_debug_mode_enabled = bool(enabled)
+        set_processing_debug_mode_enabled(self._processing_debug_mode_enabled)
+        save_app_setting("processing_debug_mode", self._processing_debug_mode_enabled)
+        if self._live_processing_worker is not None:
+            self._live_processing_worker.update_debug_mode(self._processing_debug_mode_enabled)
+        state_text = "enabled" if self._processing_debug_mode_enabled else "disabled"
+        self.status_label.setText(f"Debug mode {state_text}.")
+        self._log_info(f"Processing debug mode {state_text}.")
+        self._request_deferred_ui_refresh(live_estimate=True)
 
     def _install_shortcuts(self) -> None:
         shortcuts = [
@@ -3025,6 +3231,8 @@ class MainWindow(QMainWindow):
         if trace_label is not None:
             self._pending_trace_label = trace_label
         delay_ms = self._live_ui_refresh_delay_ms if self._live_active else self._stats_refresh_delay_ms
+        if self._live_active and (trace_plot or live_estimate or telemetry):
+            delay_ms = max(delay_ms, 220)
         if not self._stats_refresh_timer.isActive():
             self._stats_refresh_timer.start(delay_ms)
 
@@ -3183,6 +3391,7 @@ class MainWindow(QMainWindow):
         autoscale_spectrum_plot_for(self)
 
     def _autoscale_trace_plot(self) -> None:
+        self._trace_view_locked = False
         autoscale_trace_plot_for(self)
 
     def _update_residual_view_geometry(self) -> None:
@@ -3206,6 +3415,36 @@ class MainWindow(QMainWindow):
     def _refresh_spectrum_plot(self, processed: Spectrum | None, fit: Spectrum | None) -> None:
         if self._plots_frozen:
             return
+        view_x_min = view_x_max = view_width_px = None
+        try:
+            view_box = self.spectrum_plot.getPlotItem().vb
+            view_range = view_box.viewRange()
+            x_range = view_range[0]
+            view_x_min = float(x_range[0])
+            view_x_max = float(x_range[1])
+            scene_rect = view_box.sceneBoundingRect()
+            if scene_rect is not None:
+                view_width_px = float(scene_rect.width())
+                if not np.isfinite(view_width_px):
+                    view_width_px = None
+        except Exception:
+            view_x_min = view_x_max = view_width_px = None
+
+        residual_visible = bool(fit is not None and self.show_residual_button.isChecked())
+        show_gaussian = self._needs_gaussian_metric()
+        render_key = spectrum_render_cache_key(
+            processed,
+            fit,
+            view_x_min=view_x_min,
+            view_x_max=view_x_max,
+            view_width_px=view_width_px,
+            residual_visible=residual_visible,
+            show_gaussian=show_gaussian,
+            peak_tracking_mode=self._current_processing_settings().peak_tracking_mode,
+        )
+        if render_key == self._spectrum_render_cache_key:
+            return
+        self._spectrum_render_cache_key = render_key
         self._visible_processed_plot = processed
         self._visible_fit_plot = fit
         if processed is None:
@@ -3223,25 +3462,46 @@ class MainWindow(QMainWindow):
         low = float(np.min(processed.wavelengths_nm))
         high = float(np.max(processed.wavelengths_nm))
         self.processing_region_item.setRegion((low, high))
-        self.spectrum_curve.setData(processed.wavelengths_nm, processed.values)
-        residual_visible = bool(fit is not None and self.show_residual_button.isChecked())
+
+        display_x, display_y = downsample_spectrum_series_for_view(
+            np.asarray(processed.wavelengths_nm, dtype=np.float64),
+            np.asarray(processed.values, dtype=np.float64),
+            view_x_min=view_x_min,
+            view_x_max=view_x_max,
+            view_width_px=view_width_px,
+        )
+        self.spectrum_curve.setData(display_x, display_y)
         if fit is not None:
-            self.fit_curve.setData(fit.wavelengths_nm, fit.values)
+            fit_values = np.asarray(fit.values, dtype=np.float64)
+            fit_low = float(fit.metadata.get("fit_window_min_nm", np.min(fit.wavelengths_nm)))
+            fit_high = float(fit.metadata.get("fit_window_max_nm", np.max(fit.wavelengths_nm)))
+            display_fit_x, _ = clip_series_to_window(
+                display_x,
+                display_y,
+                window_min=fit_low,
+                window_max=fit_high,
+            )
+            if len(display_fit_x) > 0 and len(fit.wavelengths_nm) > 0:
+                display_fit_y = np.interp(
+                    display_fit_x,
+                    np.asarray(fit.wavelengths_nm, dtype=np.float64),
+                    fit_values,
+                )
+            else:
+                display_fit_x = np.empty(0, dtype=np.float64)
+                display_fit_y = fit_values[:0]
+            self.fit_curve.setData(display_fit_x, display_fit_y)
             if residual_visible:
                 residual_base = np.interp(
-                    fit.wavelengths_nm,
-                    processed.wavelengths_nm,
-                    processed.values,
-                    left=float(processed.values[0]),
-                    right=float(processed.values[-1]),
+                    display_fit_x,
+                    np.asarray(processed.wavelengths_nm, dtype=np.float64),
+                    np.asarray(processed.values, dtype=np.float64),
                 )
-                residual_values = residual_base - fit.values
-                self.residual_curve.setData(fit.wavelengths_nm, residual_values)
+                residual_values = residual_base - display_fit_y
+                self.residual_curve.setData(display_fit_x, residual_values)
                 self._autoscale_residual_axis()
             else:
                 self.residual_curve.setData([], [])
-            fit_low = float(fit.metadata.get("fit_window_min_nm", np.min(fit.wavelengths_nm)))
-            fit_high = float(fit.metadata.get("fit_window_max_nm", np.max(fit.wavelengths_nm)))
             self.fit_region_item.setRegion((fit_low, fit_high))
         else:
             self.fit_curve.setData([], [])
@@ -3301,6 +3561,11 @@ class MainWindow(QMainWindow):
     ) -> None:
         render_trace_series_for(self, history, clock_mode)
 
+    def _handle_trace_view_range_changed(self, *_args) -> None:
+        if self._plots_frozen or self._trace_view_autoscaling:
+            return
+        self._trace_view_locked = True
+
     def _primary_trace_metric(self) -> str:
         return primary_trace_metric(self)
 
@@ -3338,6 +3603,105 @@ class MainWindow(QMainWindow):
         self._cycle_trace_stats_metric()
         if event is not None and hasattr(event, "accept"):
             event.accept()
+
+    def _normalize_sensorgram_view_mode(self, mode: object) -> str:
+        normalized = str(mode or "").strip().lower()
+        return normalized if normalized in {"absolute", "rolling"} else "absolute"
+
+    def _sensorgram_view_mode_label(self, mode: str | None = None) -> str:
+        normalized = self._normalize_sensorgram_view_mode(mode or self._sensorgram_view_mode)
+        return "Absolute" if normalized == "absolute" else "Rolling"
+
+    def _sensorgram_view_mode_tooltip(self, mode: str | None = None) -> str:
+        normalized = self._normalize_sensorgram_view_mode(mode or self._sensorgram_view_mode)
+        if normalized == "absolute":
+            return "Current display: Absolute. Click to switch to Rolling and show only the most recent sensorgram window."
+        return "Current display: Rolling. Click to switch to Absolute and show the full sensorgram history from the start of recording."
+
+    def _update_sensorgram_view_mode_button(self) -> None:
+        if not hasattr(self, "sensorgram_view_mode_button"):
+            return
+        label = self._sensorgram_view_mode_label()
+        self.sensorgram_view_mode_button.setText(f"[{label}]")
+        self.sensorgram_view_mode_button.setToolTip(self._sensorgram_view_mode_tooltip())
+
+    def _apply_sensorgram_view_mode(self, *, save: bool = False) -> None:
+        self._sensorgram_view_mode = self._normalize_sensorgram_view_mode(self._sensorgram_view_mode)
+        self._trace_view_locked = False
+        self._update_sensorgram_view_mode_button()
+        self._request_trace_autoscale()
+        self._request_deferred_ui_refresh(trace_plot=True, stats=True)
+        if save:
+            self._schedule_acquisition_state_persist()
+
+    def _cycle_sensorgram_view_mode(self) -> None:
+        current = self._normalize_sensorgram_view_mode(self._sensorgram_view_mode)
+        self._sensorgram_view_mode = "rolling" if current == "absolute" else "absolute"
+        self._apply_sensorgram_view_mode(save=True)
+
+    def _normalize_sensorgram_content_mode(self, mode: object) -> str:
+        normalized = str(mode or "").strip().lower()
+        return normalized if normalized in {"metric", "heatmap"} else "metric"
+
+    def _sensorgram_content_mode_label(self, mode: str | None = None) -> str:
+        normalized = self._normalize_sensorgram_content_mode(mode or self._sensorgram_content_mode)
+        return "Metric time plot" if normalized == "metric" else "Extinction heatmap"
+
+    def _sensorgram_content_mode_tooltip(self, mode: str | None = None) -> str:
+        normalized = self._normalize_sensorgram_content_mode(mode or self._sensorgram_content_mode)
+        if normalized == "metric":
+            return (
+                "Current display: Metric time plot. Click to switch to Extinction heatmap. "
+                "The plot will change from time-tracked metrics to a wavelength-vs-time heatmap."
+            )
+        return (
+            "Current display: Extinction heatmap. Click to switch to Metric time plot. "
+            "The plot will change from a heatmap back to time-tracked metrics."
+        )
+
+    def _update_sensorgram_content_mode_button(self) -> None:
+        if not hasattr(self, "sensorgram_content_mode_button"):
+            return
+        label = self._sensorgram_content_mode_label()
+        self.sensorgram_content_mode_button.setText(f"[{label}]")
+        self.sensorgram_content_mode_button.setToolTip(self._sensorgram_content_mode_tooltip())
+
+    def _apply_sensorgram_content_mode(self, *, save: bool = False) -> None:
+        self._sensorgram_content_mode = self._normalize_sensorgram_content_mode(self._sensorgram_content_mode)
+        self._trace_view_locked = False
+        self._update_sensorgram_content_mode_button()
+        self._apply_sensorgram_display_style()
+        self._request_trace_autoscale()
+        self._request_deferred_ui_refresh(trace_plot=True, stats=True)
+        if save:
+            self._schedule_acquisition_state_persist()
+
+    def _cycle_sensorgram_content_mode(self) -> None:
+        current = self._normalize_sensorgram_content_mode(self._sensorgram_content_mode)
+        self._sensorgram_content_mode = "heatmap" if current == "metric" else "metric"
+        self._apply_sensorgram_content_mode(save=True)
+
+    def _append_sensorgram_heatmap_history(self, spectrum: Spectrum | None) -> None:
+        if spectrum is None or len(spectrum.wavelengths_nm) == 0 or len(spectrum.values) == 0:
+            return
+        if self._measurement_active and self._measurement_started_at is not None:
+            time_value = max((spectrum.acquired_at - self._measurement_started_at).total_seconds(), 0.0)
+        else:
+            time_value = float(spectrum.acquired_at.timestamp())
+        wavelengths = np.asarray(spectrum.wavelengths_nm, dtype=np.float64)
+        values = np.asarray(spectrum.values, dtype=np.float64)
+        if (
+            self._sensorgram_heatmap_wavelengths is None
+            or self._sensorgram_heatmap_wavelengths.shape != wavelengths.shape
+            or not np.allclose(self._sensorgram_heatmap_wavelengths, wavelengths)
+        ):
+            self._sensorgram_heatmap_wavelengths = wavelengths.copy()
+            self._sensorgram_heatmap_history.clear()
+        self._sensorgram_heatmap_history.append((float(time_value), values.copy()))
+        trim_history_tail_in_place(
+            self._sensorgram_heatmap_history,
+            int(getattr(self, "_sensorgram_heatmap_history_max_rows", 2000)),
+        )
 
     def _active_trace_series(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
         if self._peak_history:
@@ -3537,8 +3901,27 @@ class MainWindow(QMainWindow):
         self._processing_refresh_timer.stop()
         self._live_stop_event.set()
         if self._live_worker is not None and self._live_worker.is_alive():
-            self._live_worker.join(timeout=2.0)
+            try:
+                self._live_worker.stop()
+                self._live_worker.join(timeout=2.0)
+                if self._live_worker.is_alive():
+                    self._log_warning("Live acquisition worker did not exit cleanly; terminating it.")
+                    self._live_worker.terminate()
+                    self._live_worker.join(timeout=1.0)
+            except Exception as exc:
+                self._log_warning(f"Live acquisition worker shutdown failed: {exc}")
         self._live_worker = None
+        if self._live_processing_worker is not None:
+            try:
+                self._live_processing_worker.stop()
+                self._live_processing_worker.join(timeout=2.0)
+                if self._live_processing_worker.is_alive():
+                    self._log_warning("Live processing worker did not exit cleanly; terminating it.")
+                    self._live_processing_worker.terminate()
+                    self._live_processing_worker.join(timeout=1.0)
+            except Exception as exc:
+                self._log_warning(f"Live processing worker shutdown failed: {exc}")
+        self._live_processing_worker = None
         self._live_result_timer.stop()
         self._reset_live_accumulator()
         if self._measurement_active:

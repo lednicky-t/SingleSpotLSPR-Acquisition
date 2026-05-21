@@ -131,8 +131,13 @@ class HDF5MeasurementWriter:
         self._metadata.attrs["app_version"] = "0.1.0"
 
         switch_columns = ["switch_port", "solution_label"]
-        switch_empty = np.empty((0, len(switch_columns)), dtype=h5py.string_dtype(encoding="utf-8"))
-        ds = self._metadata.create_dataset("switch_solution_map", data=switch_empty)
+        ds = self._metadata.create_dataset(
+            "switch_solution_map",
+            shape=(0, len(switch_columns)),
+            maxshape=(None, len(switch_columns)),
+            dtype=h5py.string_dtype(encoding="utf-8"),
+            chunks=True,
+        )
         ds.attrs["columns"] = _string_array(switch_columns)
 
     def update_processing(self, processing: ProcessingSettings) -> None:
@@ -343,7 +348,17 @@ class HDF5MeasurementWriter:
         table = np.asarray(rows, dtype=h5py.string_dtype(encoding="utf-8"))
         if name in group:
             dataset = group[name]
-            if dataset.shape != table.shape:
+            needs_recreate = dataset.chunks is None or dataset.shape != table.shape or dataset.ndim != table.ndim
+            if needs_recreate:
+                del group[name]
+                dataset = group.create_dataset(
+                    name,
+                    shape=table.shape,
+                    maxshape=(None, table.shape[1] if table.ndim > 1 else None),
+                    dtype=table.dtype,
+                    chunks=True,
+                )
+            elif dataset.shape != table.shape:
                 dataset.resize(table.shape)
             dataset[...] = table
             dataset.attrs["columns"] = _string_array(columns)

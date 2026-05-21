@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import logging
 from time import perf_counter
+from datetime import datetime
 
 import numpy as np
 
 from lspr_app.domain.models import ProcessingSettings, Spectrum
-from lspr_app.domain.processing import fit_processed_spectrum
-from lspr_app.gui.icon_helpers import math_function_tab_icon, prism_tab_icon
+from lspr_app.domain.processing import fit_processed_spectrum, processing_debug_mode_enabled
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QPixmap
+
+from lspr_app.gui.icon_helpers import math_function_tab_icon, prism_tab_icon, transport_icon
 from lspr_app.gui.plot_controller import (
     autoscale_residual_axis as _autoscale_residual_axis,
     autoscale_spectrum_plot as _autoscale_spectrum_plot,
@@ -239,7 +243,7 @@ def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
         level=logging.DEBUG,
         min_interval=0.75,
     )
-    window._request_deferred_ui_refresh(trace_plot=True, summary=True, stats=True, trace_label="Peak position (nm)")
+    window._request_deferred_ui_refresh(trace_plot=True, live_estimate=True, telemetry=True, trace_label="Peak position (nm)")
     if window._pending_plot_request is not None:
         pending = window._pending_plot_request
         window._pending_plot_request = None
@@ -247,15 +251,54 @@ def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
 
 
 def flush_deferred_ui_refreshes_for(window) -> None:
+    started = perf_counter()
+    summary_dirty = bool(getattr(window, "_ui_summary_dirty", False))
+    telemetry_dirty = bool(getattr(window, "_ui_telemetry_dirty", False))
+    live_estimate_dirty = bool(getattr(window, "_ui_live_estimate_dirty", False))
+    stats_dirty = bool(getattr(window, "_ui_stats_dirty", False))
+    trace_dirty = bool(getattr(window, "_ui_trace_plot_dirty", False))
     _flush_deferred_ui_refreshes(window)
+    if processing_debug_mode_enabled():
+        elapsed_ms = (perf_counter() - started) * 1000.0
+        if elapsed_ms >= 2.0:
+            window._log_throttled(
+                "gui_deferred_refresh",
+                (
+                    f"GUI deferred refresh: {elapsed_ms:.2f} ms | "
+                    f"summary={int(summary_dirty)} telemetry={int(telemetry_dirty)} "
+                    f"live_estimate={int(live_estimate_dirty)} stats={int(stats_dirty)} trace={int(trace_dirty)}"
+                ),
+                level=logging.INFO,
+                min_interval=0.5,
+            )
 
 
 def flush_plot_refreshes_for(window) -> None:
+    started = perf_counter()
     _flush_plot_refreshes(window)
+    if processing_debug_mode_enabled():
+        elapsed_ms = (perf_counter() - started) * 1000.0
+        if elapsed_ms >= 2.0:
+            window._log_throttled(
+                "gui_plot_refresh",
+                f"GUI plot refresh: {elapsed_ms:.2f} ms | dirty={int(bool(getattr(window, '_plot_render_dirty', False)))}",
+                level=logging.INFO,
+                min_interval=0.5,
+            )
 
 
 def refresh_plot_for(window) -> None:
+    started = perf_counter()
     _refresh_plot(window)
+    if processing_debug_mode_enabled():
+        elapsed_ms = (perf_counter() - started) * 1000.0
+        if elapsed_ms >= 2.0:
+            window._log_throttled(
+                "gui_refresh_plot",
+                f"GUI refresh_plot: {elapsed_ms:.2f} ms",
+                level=logging.INFO,
+                min_interval=0.5,
+            )
 
 
 def handle_residual_toggle_for(window, visible: bool) -> None:
@@ -295,6 +338,10 @@ def set_plots_frozen_for(window, frozen: bool) -> None:
 
 def clear_trace_history_for(window) -> None:
     window._peak_history.clear()
+    if hasattr(window, "_sensorgram_heatmap_history"):
+        window._sensorgram_heatmap_history.clear()
+    if hasattr(window, "_sensorgram_heatmap_wavelengths"):
+        window._sensorgram_heatmap_wavelengths = None
     signal = window._session.state.absorbance or window._session.state.sample
     if signal is not None:
         processed, _ = window._get_analysis_processed_spectrum(signal)
@@ -360,9 +407,12 @@ def update_live_estimate_for(window) -> None:
     proc_text = "-" if window._last_processing_ms is None else f"{window._last_processing_ms:.1f} ms"
     headroom_text = headroom_value_text_for(window._processing_headroom_ratio)
     source_rate_text = "-" if window._effective_raw_rate_hz is None else f"{window._effective_raw_rate_hz:.1f} Hz"
+    wait_text = ""
+    if processing_debug_mode_enabled() and window._last_processing_queue_wait_ms is not None:
+        wait_text = f" | wait {window._last_processing_queue_wait_ms:.1f} ms"
     window.live_estimate.setText(
         f"src {source_rate_text} | disp {window.live_rate_spin.value():.2f} Hz | "
-        f"proc {proc_text} | head {headroom_text} | skip {skipped_rate_hz:.1f} Hz"
+        f"proc {proc_text}{wait_text} | head {headroom_text} | skip {skipped_rate_hz:.1f} Hz"
     )
     window._ui_live_estimate_dirty = False
 
@@ -453,20 +503,34 @@ def update_window_mode_label_for(window) -> None:
         return
     source_name = "Spectrometer" if window._source_mode == "spectrometer" else "Simulation"
     if window._measurement_active:
-        text = f"Measurement | {source_name}"
-        tooltip = "A measurement is currently active."
+        text = f"Recording | {source_name}"
+        tooltip = "A measurement is currently saving data."
+        window._window_mode_label.setStyleSheet("color: #ff5b5b; font-weight: 700;")
+        blink_visible = bool(getattr(window, "_recording_blink_visible", True))
     elif window._live_active:
         text = f"Live mode | {source_name}"
         tooltip = "Live acquisition is running."
+        window._window_mode_label.setStyleSheet("")
     else:
         text = f"Free mode | {source_name}"
         tooltip = "The app is open but no measurement is running."
+        window._window_mode_label.setStyleSheet("")
     window._window_mode_label.setText(text)
     window._window_mode_label.setToolTip(tooltip)
     if hasattr(window, "_window_mode_icon_label"):
-        source_icon = prism_tab_icon() if window._source_mode == "spectrometer" else math_function_tab_icon()
-        window._window_mode_icon_label.setPixmap(source_icon.pixmap(16, 16))
-        window._window_mode_icon_label.setToolTip(f"{source_name} source")
+        if window._measurement_active:
+            if blink_visible:
+                source_icon = transport_icon(window._theme_mode, "record")
+                window._window_mode_icon_label.setPixmap(source_icon.pixmap(16, 16))
+            else:
+                blank = QPixmap(16, 16)
+                blank.fill(Qt.GlobalColor.transparent)
+                window._window_mode_icon_label.setPixmap(blank)
+            window._window_mode_icon_label.setToolTip("Recording is active.")
+        else:
+            source_icon = prism_tab_icon() if window._source_mode == "spectrometer" else math_function_tab_icon()
+            window._window_mode_icon_label.setPixmap(source_icon.pixmap(16, 16))
+            window._window_mode_icon_label.setToolTip(f"{source_name} source")
 
 
 # Convenience aliases for window delegation.
