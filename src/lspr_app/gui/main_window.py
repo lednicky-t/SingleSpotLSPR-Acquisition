@@ -89,6 +89,7 @@ from lspr_app.gui.main_window_headers import (
     update_source_link_buttons,
     update_source_tab_headers,
 )
+from lspr_app.gui.main_window_runtime_state import UiRefreshState
 from lspr_app.gui.icon_helpers import (
     dark_icon,
     reference_icon,
@@ -116,6 +117,7 @@ from lspr_app.gui.main_window_state import (
     save_ui_state,
     schedule_acquisition_state_persist,
 )
+from lspr_app.gui.trace_history_buffer import TraceHistoryBuffer
 from lspr_app.gui.main_window_processing import (
     apply_processing_settings_to_widgets,
     populate_analysis_resolution_combo,
@@ -214,25 +216,25 @@ from lspr_app.gui.acquisition_controller import (
     update_window_mode_label,
 )
 from lspr_app.gui.shortcut_help import build_shortcuts_help_text
-from lspr_app.gui.plot_controller import (
+from lspr_app.gui.plot_controller import flush_deferred_ui_refreshes, flush_plot_refreshes, refresh_plot
+from lspr_app.gui.spectrum_plot_controller import (
     autoscale_residual_axis,
     autoscale_spectrum_plot,
-    autoscale_trace_plot,
     clip_series_to_window,
     downsample_spectrum_series_for_view,
-    flush_deferred_ui_refreshes,
-    flush_plot_refreshes,
     handle_spectrum_mouse_moved,
-    handle_trace_mouse_moved,
-    refresh_plot,
-    refresh_trace_plot,
-    render_trace_series,
-    request_trace_autoscale,
     spectrum_render_cache_key,
-    trim_history_tail_in_place,
     update_residual_axis_visibility,
     update_residual_view_geometry,
     update_spectrum_stats,
+)
+from lspr_app.gui.history_utils import trim_history_tail_in_place
+from lspr_app.gui.trace_plot_controller import (
+    autoscale_trace_plot,
+    handle_trace_mouse_moved,
+    refresh_trace_plot,
+    render_trace_series,
+    request_trace_autoscale,
     update_trace_stats,
 )
 from lspr_app.gui.processing_helpers import (
@@ -513,18 +515,12 @@ class MainWindow(QMainWindow):
         self._sensorgram_heatmap_history: list[tuple[float, np.ndarray]] = []
         self._sensorgram_heatmap_history_max_rows = 2000
         self._sensorgram_heatmap_wavelengths: np.ndarray | None = None
+        self._peak_history_buffers: dict[str, TraceHistoryBuffer] = {}
         self._last_summary_text: str = ""
         self._last_summary_refresh_ts: float = 0.0
-        self._pending_trace_label: str = "Peak position (nm)"
         self._trace_view_locked = False
         self._trace_view_autoscaling = False
-        self._ui_summary_dirty = False
-        self._ui_telemetry_dirty = False
-        self._ui_live_estimate_dirty = False
-        self._ui_stats_dirty = False
-        self._ui_session_stats_dirty = False
-        self._ui_trace_plot_dirty = False
-        self._plot_render_dirty = False
+        self._ui_refresh_state = UiRefreshState(pending_trace_label="Peak position (nm)")
         self._visible_processed_plot: Spectrum | None = None
         self._visible_fit_plot: Spectrum | None = None
         self._spectrum_render_cache_key: tuple[object, ...] | None = None
@@ -2648,6 +2644,7 @@ class MainWindow(QMainWindow):
         self._last_display_average_count = None
         self._last_display_period_ms = None
         self._peak_history.clear()
+        self._peak_history_buffers.clear()
         self._sensorgram_heatmap_history.clear()
         self._sensorgram_heatmap_wavelengths = None
         self._peak_reference_processed = None
@@ -3430,19 +3427,19 @@ class MainWindow(QMainWindow):
         trace_label: str | None = None,
     ) -> None:
         if stats:
-            self._ui_stats_dirty = True
+            self._ui_refresh_state.stats_dirty = True
         if trace_plot:
-            self._ui_trace_plot_dirty = True
+            self._ui_refresh_state.trace_plot_dirty = True
         if summary:
-            self._ui_summary_dirty = True
+            self._ui_refresh_state.summary_dirty = True
         if telemetry:
-            self._ui_telemetry_dirty = True
+            self._ui_refresh_state.telemetry_dirty = True
         if live_estimate:
-            self._ui_live_estimate_dirty = True
+            self._ui_refresh_state.live_estimate_dirty = True
         if session_stats or stats or trace_plot or summary or telemetry or live_estimate or trace_label is not None:
-            self._ui_session_stats_dirty = True
+            self._ui_refresh_state.session_stats_dirty = True
         if trace_label is not None:
-            self._pending_trace_label = trace_label
+            self._ui_refresh_state.pending_trace_label = trace_label
         delay_ms = self._live_ui_refresh_delay_ms if self._live_active else self._stats_refresh_delay_ms
         if self._live_active and (trace_plot or live_estimate or telemetry):
             delay_ms = max(delay_ms, 220)
@@ -3563,7 +3560,7 @@ class MainWindow(QMainWindow):
         self._analysis_metrics_cache_key = None
         self._analysis_metrics_cache_result = {}
         self._update_poly_warning_indicator(fit)
-        self._plot_render_dirty = True
+        self._ui_refresh_state.plot_render_dirty = True
         if not self._plot_refresh_timer.isActive():
             self._plot_refresh_timer.start()
         self._log_throttled(
@@ -4022,6 +4019,16 @@ class MainWindow(QMainWindow):
         )
 
     def _active_trace_series(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        selected_metrics = set(self._selected_trace_metrics())
+        peak_history_buffers = getattr(self, "_peak_history_buffers", None)
+        if peak_history_buffers:
+            active = {
+                name: buffer.to_arrays()
+                for name, buffer in peak_history_buffers.items()
+                if name in selected_metrics and len(buffer) > 0
+            }
+            if active:
+                return active
         if self._peak_history:
             return {
                 name: (
@@ -4029,7 +4036,7 @@ class MainWindow(QMainWindow):
                     np.asarray([item[1] for item in series], dtype=np.float64),
                 )
                 for name, series in self._peak_history.items()
-                if name in self._selected_trace_metrics() and series
+                if name in selected_metrics and series
             }
         return {}
 

@@ -12,21 +12,21 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPixmap
 
 from lspr_app.gui.icon_helpers import math_function_tab_icon, prism_tab_icon, transport_icon
-from lspr_app.gui.plot_controller import (
+from lspr_app.gui.plot_controller import flush_deferred_ui_refreshes as _flush_deferred_ui_refreshes, flush_plot_refreshes as _flush_plot_refreshes, refresh_plot as _refresh_plot
+from lspr_app.gui.spectrum_plot_controller import (
     autoscale_residual_axis as _autoscale_residual_axis,
     autoscale_spectrum_plot as _autoscale_spectrum_plot,
-    autoscale_trace_plot as _autoscale_trace_plot,
-    flush_deferred_ui_refreshes as _flush_deferred_ui_refreshes,
-    flush_plot_refreshes as _flush_plot_refreshes,
     handle_spectrum_mouse_moved as _handle_spectrum_mouse_moved,
-    handle_trace_mouse_moved as _handle_trace_mouse_moved,
-    refresh_plot as _refresh_plot,
-    refresh_trace_plot as _refresh_trace_plot,
-    render_trace_series as _render_trace_series,
-    request_trace_autoscale as _request_trace_autoscale,
     update_residual_axis_visibility as _update_residual_axis_visibility,
     update_residual_view_geometry as _update_residual_view_geometry,
     update_spectrum_stats as _update_spectrum_stats,
+)
+from lspr_app.gui.trace_plot_controller import (
+    autoscale_trace_plot as _autoscale_trace_plot,
+    handle_trace_mouse_moved as _handle_trace_mouse_moved,
+    refresh_trace_plot as _refresh_trace_plot,
+    render_trace_series as _render_trace_series,
+    request_trace_autoscale as _request_trace_autoscale,
     update_trace_stats as _update_trace_stats,
 )
 from lspr_app.gui.processing_helpers import (
@@ -234,7 +234,7 @@ def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
     window._analysis_metrics_cache_key = None
     window._analysis_metrics_cache_result = {}
     window._update_poly_warning_indicator(fit)
-    window._plot_render_dirty = True
+    window._ui_refresh_state.plot_render_dirty = True
     if not window._plot_refresh_timer.isActive():
         window._plot_refresh_timer.start()
     window._log_throttled(
@@ -252,11 +252,12 @@ def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
 
 def flush_deferred_ui_refreshes_for(window) -> None:
     started = perf_counter()
-    summary_dirty = bool(getattr(window, "_ui_summary_dirty", False))
-    telemetry_dirty = bool(getattr(window, "_ui_telemetry_dirty", False))
-    live_estimate_dirty = bool(getattr(window, "_ui_live_estimate_dirty", False))
-    stats_dirty = bool(getattr(window, "_ui_stats_dirty", False))
-    trace_dirty = bool(getattr(window, "_ui_trace_plot_dirty", False))
+    refresh_state = getattr(window, "_ui_refresh_state", None)
+    summary_dirty = bool(getattr(refresh_state, "summary_dirty", False))
+    telemetry_dirty = bool(getattr(refresh_state, "telemetry_dirty", False))
+    live_estimate_dirty = bool(getattr(refresh_state, "live_estimate_dirty", False))
+    stats_dirty = bool(getattr(refresh_state, "stats_dirty", False))
+    trace_dirty = bool(getattr(refresh_state, "trace_plot_dirty", False))
     _flush_deferred_ui_refreshes(window)
     if processing_debug_mode_enabled():
         elapsed_ms = (perf_counter() - started) * 1000.0
@@ -281,7 +282,10 @@ def flush_plot_refreshes_for(window) -> None:
         if elapsed_ms >= 2.0:
             window._log_throttled(
                 "gui_plot_refresh",
-                f"GUI plot refresh: {elapsed_ms:.2f} ms | dirty={int(bool(getattr(window, '_plot_render_dirty', False)))}",
+                (
+                    "GUI plot refresh: "
+                    f"{elapsed_ms:.2f} ms | dirty={int(bool(getattr(getattr(window, '_ui_refresh_state', None), 'plot_render_dirty', False)))}"
+                ),
                 level=logging.INFO,
                 min_interval=0.5,
             )
@@ -345,13 +349,15 @@ def set_sensorgram_frozen_for(window, frozen: bool) -> None:
     window._update_sensorgram_freeze_button_icon()
     if not frozen:
         window._refresh_trace_plot("Peak position (nm)")
-        window._ui_trace_plot_dirty = False
+        window._ui_refresh_state.trace_plot_dirty = False
         window._request_trace_autoscale()
     window._schedule_acquisition_state_persist()
 
 
 def clear_trace_history_for(window) -> None:
     window._peak_history.clear()
+    if hasattr(window, "_peak_history_buffers"):
+        window._peak_history_buffers.clear()
     if hasattr(window, "_sensorgram_heatmap_history"):
         window._sensorgram_heatmap_history.clear()
     if hasattr(window, "_sensorgram_heatmap_wavelengths"):
@@ -435,13 +441,13 @@ def update_live_estimate_for(window) -> None:
         f"src {source_rate_text} | disp {window.live_rate_spin.value():.2f} Hz | "
         f"proc {proc_text}{wait_text} | head {headroom_text} | skip {skipped_rate_hz:.1f} Hz"
     )
-    window._ui_live_estimate_dirty = False
+    window._ui_refresh_state.live_estimate_dirty = False
 
 
 def refresh_telemetry_for(window) -> None:
     if window._last_elapsed_ms is None:
         window.telemetry_label.setText("waiting for first spectrum")
-        window._ui_telemetry_dirty = False
+        window._ui_refresh_state.telemetry_dirty = False
         return
 
     spacing = "-" if window._last_spacing_ms is None else f"{window._last_spacing_ms:.1f} ms"
@@ -453,7 +459,7 @@ def refresh_telemetry_for(window) -> None:
         f"acq {window._last_elapsed_ms:.1f} ms | int {spacing} | "
         f"ovh {overhead} | show {displayed}"
     )
-    window._ui_telemetry_dirty = False
+    window._ui_refresh_state.telemetry_dirty = False
 
 
 def live_skip_rate_hz_for(window) -> float:

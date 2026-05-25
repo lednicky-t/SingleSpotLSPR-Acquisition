@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import TypeVar
 
 from PyQt6.QtCore import QRectF
 
@@ -10,17 +9,7 @@ import numpy as np
 import pyqtgraph as pg
 
 from lspr_app.domain.models import Spectrum
-
-T = TypeVar("T")
-
-
-def trim_history_tail_in_place(history: list[T], max_len: int) -> None:
-    if max_len <= 0:
-        history.clear()
-        return
-    excess = len(history) - max_len
-    if excess > 0:
-        del history[:excess]
+from lspr_app.gui.history_utils import trim_history_tail_in_place
 
 
 def _current_trace_view_state(window) -> tuple[float | None, float | None, float | None]:
@@ -251,50 +240,58 @@ def flush_deferred_ui_refreshes(window) -> None:
     if window._plots_frozen:
         return
     did_work = False
-    if window._ui_live_estimate_dirty:
+    refresh_state = getattr(window, "_ui_refresh_state", None)
+    if getattr(refresh_state, "live_estimate_dirty", False):
         window._update_live_estimate()
-        window._ui_live_estimate_dirty = False
+        refresh_state.live_estimate_dirty = False
         did_work = True
-    if window._ui_telemetry_dirty:
+    if getattr(refresh_state, "telemetry_dirty", False):
         window._refresh_telemetry()
-        window._ui_telemetry_dirty = False
+        refresh_state.telemetry_dirty = False
         did_work = True
-    if window._ui_trace_plot_dirty and not bool(getattr(window, "_sensorgram_frozen", False)):
-        window._refresh_trace_plot(window._pending_trace_label)
-        window._ui_trace_plot_dirty = False
+    if getattr(refresh_state, "trace_plot_dirty", False) and not bool(getattr(window, "_sensorgram_frozen", False)):
+        window._refresh_trace_plot(refresh_state.pending_trace_label or "Peak position (nm)")
+        refresh_state.trace_plot_dirty = False
         did_work = True
-    if window._ui_summary_dirty:
+    if getattr(refresh_state, "summary_dirty", False):
         window._refresh_session_summary()
-        window._ui_summary_dirty = False
+        refresh_state.summary_dirty = False
         did_work = True
-    if window._ui_stats_dirty:
+    if getattr(refresh_state, "stats_dirty", False):
         window._update_spectrum_stats(window._last_processed_plot, window._last_fit_plot)
         window._update_trace_stats()
-        window._ui_stats_dirty = False
+        refresh_state.stats_dirty = False
         did_work = True
-    if window._ui_session_stats_dirty:
+    if getattr(refresh_state, "session_stats_dirty", False):
         window._refresh_session_statistics()
-        window._ui_session_stats_dirty = False
+        refresh_state.session_stats_dirty = False
         did_work = True
     if did_work:
         window._log_throttled(
             "ui_flush",
-            f"UI flush | trace_dirty={window._ui_trace_plot_dirty} | stats_dirty={window._ui_stats_dirty} | display_rate={window.live_rate_spin.value():.2f} Hz",
+            (
+                "UI flush | trace_dirty="
+                f"{int(bool(getattr(refresh_state, 'trace_plot_dirty', False)))} | "
+                f"stats_dirty={int(bool(getattr(refresh_state, 'stats_dirty', False)))} | "
+                f"display_rate={window.live_rate_spin.value():.2f} Hz"
+            ),
             level=logging.DEBUG,
             min_interval=1.0,
         )
 
 
 def flush_plot_refreshes(window) -> None:
+    refresh_state = getattr(window, "_ui_refresh_state", None)
     if window._plots_frozen:
-        window._plot_render_dirty = False
+        if refresh_state is not None:
+            refresh_state.plot_render_dirty = False
         return
-    if window._plot_render_dirty:
+    if getattr(refresh_state, "plot_render_dirty", False):
         plot_mode = window.PLOT_MODES[window.plot_selector.currentText()]
         plot_spectrum = window._session.get_plot_data(plot_mode)
         plot_fit = window._last_fit_plot if plot_mode in {"sample", "absorbance"} else None
         window._refresh_spectrum_plot(plot_spectrum, plot_fit)
-        window._plot_render_dirty = False
+        refresh_state.plot_render_dirty = False
 
 
 def refresh_plot(window) -> None:

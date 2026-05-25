@@ -16,8 +16,9 @@ from PyQt6.QtWidgets import QFileDialog, QInputDialog
 from lspr_app.domain.models import Spectrum
 from lspr_app.domain.session import MeasurementError
 from lspr_app.gui.icon_helpers import flow_tabler_icon, math_function_tab_icon, prism_tab_icon, tint_tabler_icon, transport_icon
+from lspr_app.gui.history_utils import trim_history_tail_in_place
 from lspr_app.gui.main_window_headers import update_source_link_buttons
-from lspr_app.gui.plot_controller import trim_history_tail_in_place
+from lspr_app.gui.trace_history_buffer import TraceHistoryBuffer
 from lspr_app.gui.workers import (
     AcquisitionRequest,
     AcquisitionResult,
@@ -404,7 +405,7 @@ def flush_live_processed_results(window) -> None:
     window._live_plot_update_counter = int(getattr(window, "_live_plot_update_counter", 0)) + 1
     refresh_live_plot = window._live_plot_update_counter % max(int(getattr(window, "_live_plot_refresh_stride", 2)), 1) == 0
     if refresh_live_plot:
-        window._plot_render_dirty = True
+        window._ui_refresh_state.plot_render_dirty = True
         if not window._plot_refresh_timer.isActive():
             window._plot_refresh_timer.start()
         window._request_deferred_ui_refresh(trace_plot=True, live_estimate=True, telemetry=True, trace_label="Peak position (nm)")
@@ -471,6 +472,8 @@ def start_live_acquisition(window) -> None:
     window._live_trace_started_at = None
     window._last_live_processing_perf = None
     window._peak_history.clear()
+    if hasattr(window, "_peak_history_buffers"):
+        window._peak_history_buffers.clear()
     window._reset_live_accumulator()
     ctx = mp.get_context("spawn")
     window._live_stop_event = ctx.Event()
@@ -798,6 +801,8 @@ def start_measurement_run(window) -> None:
     if hasattr(window, "_apply_sensorgram_content_mode"):
         window._apply_sensorgram_content_mode(save=False)
     window._peak_history.clear()
+    if hasattr(window, "_peak_history_buffers"):
+        window._peak_history_buffers.clear()
     if hasattr(window, "_sensorgram_heatmap_history"):
         window._sensorgram_heatmap_history.clear()
     if hasattr(window, "_sensorgram_heatmap_wavelengths"):
@@ -904,6 +909,19 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
         history.append((elapsed_s, float(value)))
         trim_history_tail_in_place(history, int(getattr(window, "_trace_history_max_points", 6000)))
         window._peak_history[metric_name] = history
+        peak_history_buffers = getattr(window, "_peak_history_buffers", None)
+        if peak_history_buffers is None:
+            peak_history_buffers = {}
+            window._peak_history_buffers = peak_history_buffers
+        buffer = peak_history_buffers.get(metric_name)
+        max_points = int(getattr(window, "_trace_history_max_points", 6000))
+        if buffer is None or buffer.capacity != max_points:
+            buffer = TraceHistoryBuffer(max_points)
+            for history_elapsed_s, history_value in history:
+                buffer.append(history_elapsed_s, history_value)
+            peak_history_buffers[metric_name] = buffer
+        else:
+            buffer.append(elapsed_s, float(value))
         updated = True
 
     window._trace_display_cursor_s = elapsed_s + display_step_s
@@ -926,7 +944,11 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
         window._request_trace_autoscale()
         window._log_throttled(
             "trace_append",
-            f"Trace point appended | points={len(next(iter(window._peak_history.values()), []))} | rate={window.live_rate_spin.value():.2f} Hz",
+            (
+                "Trace point appended | points="
+                f"{len(next(iter(getattr(window, '_peak_history_buffers', {}).values()), []))} | "
+                f"rate={window.live_rate_spin.value():.2f} Hz"
+            ),
             level=logging.DEBUG,
             min_interval=1.0,
         )
