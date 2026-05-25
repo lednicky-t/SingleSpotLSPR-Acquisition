@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from lspr_core import ExperimentPlan, ExperimentPlanStep as CoreExperimentPlanStep, SuiteIdentity, retime_steps, summarize_experiment_plan
 from lspr_io import build_legacy_experiment_plan_row_table
+from lspr_app.version import APP_VERSION
 
 ACTIVE_PUMP_CHANNELS = 4
 HDF5_PUMP_CHANNELS = 6
@@ -87,7 +88,7 @@ def to_core_experiment_plan(steps: list[PumpPlanStep], *, app_name: str = "LSPR 
     return ExperimentPlan(
         identity=SuiteIdentity(
             app_name=app_name,
-            app_version="0.1.0",
+            app_version=APP_VERSION,
             format_name="LSPR Experiment Plan",
             format_version=1,
         ),

@@ -7,6 +7,7 @@ Suggested layout:
 - `hardware/` for wiring, ports, and lab-specific notes
 - `experiment-control/` for future experiment-control documentation
 - `measurement_file_format.md` for the native HDF5 measurement schema
+- `processing_math.md` for the metric definitions and fit/analysis rules
 
 Deferred design notes:
 

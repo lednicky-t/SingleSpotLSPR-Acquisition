@@ -154,8 +154,7 @@ def compute_centroid_nm(processed: Spectrum, fit: Spectrum | None, settings: Pro
     centroid = centroid_from_curve(dense_wavelengths, dense_values)
     if centroid is not None:
         return centroid
-    source = fit if fit is not None else processed
-    return float(source.wavelengths_nm[int(np.nanargmax(source.values))])
+    return float(processed.wavelengths_nm[int(np.nanargmax(processed.values))])
 
 
 def compute_fit_r(processed: Spectrum, fit: Spectrum | None) -> str | None:

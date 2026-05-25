@@ -32,6 +32,7 @@ from lspr_io import (
 )
 from lspr_app.domain.models import ProcessingSettings, Spectrum
 from lspr_app.domain.pump_plan import to_core_experiment_plan
+from lspr_app.version import APP_VERSION
 
 
 def repack_measurement_hdf5_file(source_path: Path) -> Path:
@@ -140,7 +141,7 @@ class HDF5MeasurementWriter:
                 created_by="LSPR Acquisition",
                 started_at_utc=self._started_at_utc,
                 app_name="LSPR Acquisition",
-                app_version="0.1.0",
+                app_version=APP_VERSION,
                 experiment_name=experiment_name,
             ),
         )
@@ -151,7 +152,7 @@ class HDF5MeasurementWriter:
                 created_by="LSPR Acquisition",
                 started_at_utc=self._started_at_utc,
                 app_name="LSPR Acquisition",
-                app_version="0.1.0",
+                app_version=APP_VERSION,
                 experiment_name=experiment_name,
             ),
             storage_compression_enabled=self._compression_enabled,
@@ -169,7 +170,7 @@ class HDF5MeasurementWriter:
         self._spectra = self._handle.create_group("spectra")
         self._processed = self._handle.create_group("processed")
         self._devices = self._handle.create_group("devices")
-        self._session_identity = standard_session_identity(app_name="LSPR Acquisition", app_version="0.1.0")
+        self._session_identity = standard_session_identity(app_name="LSPR Acquisition", app_version=APP_VERSION)
         write_session_metadata(
             self._metadata,
             identity=self._session_identity,

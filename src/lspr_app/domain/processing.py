@@ -162,24 +162,7 @@ def build_dense_analysis_curve(
         step = span / max(num_points - 1, 1)
     dense_wavelengths = np.linspace(low, high, num_points, dtype=np.float64)
 
-    dense_values = None
-    if fit is not None:
-        fit_method = fit.metadata.get("fit_method")
-        if fit_method == "poly":
-            dense_values = np.interp(dense_wavelengths, fit.wavelengths_nm, fit.values)
-        elif fit_method == "gaussian":
-            amplitude = fit.metadata.get("gaussian_amplitude")
-            center_nm = fit.metadata.get("gaussian_center_nm")
-            sigma_nm = fit.metadata.get("gaussian_sigma_nm")
-            offset = fit.metadata.get("gaussian_offset")
-            if all(isinstance(item, (int, float)) for item in (amplitude, center_nm, sigma_nm, offset)):
-                sigma = max(float(sigma_nm), 1e-6)
-                dense_values = float(offset) + float(amplitude) * np.exp(
-                    -0.5 * ((dense_wavelengths - float(center_nm)) / sigma) ** 2
-                )
-
-    if dense_values is None:
-        dense_values = np.interp(dense_wavelengths, processed.wavelengths_nm, processed.values)
+    dense_values = np.interp(dense_wavelengths, processed.wavelengths_nm, processed.values)
 
     return dense_wavelengths, dense_values.astype(np.float64, copy=False), fit_window_meta
 
