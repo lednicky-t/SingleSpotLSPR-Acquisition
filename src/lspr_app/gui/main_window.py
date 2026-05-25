@@ -157,6 +157,7 @@ from lspr_app.gui.main_window_plotting import (
     reference_peak_nm_for_shift_for,
     render_trace_series_for,
     request_trace_autoscale_for,
+    set_sensorgram_frozen_for,
     set_plots_frozen_for,
     temporal_history_token_for,
     update_poly_warning_indicator_for,
@@ -501,6 +502,7 @@ class MainWindow(QMainWindow):
         self._visible_trace_y: np.ndarray | None = None
         self._visible_trace_mode = "elapsed"
         self._plots_frozen = False
+        self._sensorgram_frozen = False
         self._closing = False
         self._screen_fitted = False
         self._source_epoch = 0
@@ -736,6 +738,14 @@ class MainWindow(QMainWindow):
         )
         self.freeze_plots_button.setCheckable(True)
         self.freeze_plots_button.toggled.connect(self._set_plots_frozen)
+        self.sensorgram_freeze_button = self._make_frameless_icon_button(
+            snowflake_icon(self._theme_mode, False),
+            "Freeze only the sensorgram trace and heatmap so you can inspect it while acquisition continues.",
+            size=30,
+        )
+        self.sensorgram_freeze_button.setCheckable(True)
+        self.sensorgram_freeze_button.toggled.connect(self._set_sensorgram_frozen)
+        self._update_sensorgram_freeze_button_icon()
         self.clear_trace_button = QToolButton()
         self.clear_trace_button.setObjectName("flowStepActionButton")
         self.clear_trace_button.setAutoRaise(True)
@@ -1227,6 +1237,7 @@ class MainWindow(QMainWindow):
         trace_left_field.setContentsMargins(0, 0, 0, 0)
         trace_left_field.setSpacing(6)
         trace_left_field.addWidget(self.trace_record_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        trace_left_field.addWidget(self.sensorgram_freeze_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         trace_left_field.addWidget(self.clear_trace_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         trace_left_field.addStretch(1)
 
@@ -3563,6 +3574,9 @@ class MainWindow(QMainWindow):
     def _set_plots_frozen(self, frozen: bool) -> None:
         set_plots_frozen_for(self, frozen)
 
+    def _set_sensorgram_frozen(self, frozen: bool) -> None:
+        set_sensorgram_frozen_for(self, frozen)
+
     def _clear_trace_history(self) -> None:
         clear_trace_history_for(self)
 
@@ -4093,6 +4107,11 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "freeze_plots_button"):
             return
         self.freeze_plots_button.setIcon(snowflake_icon(self._theme_mode, self._plots_frozen))
+
+    def _update_sensorgram_freeze_button_icon(self) -> None:
+        if not hasattr(self, "sensorgram_freeze_button"):
+            return
+        self.sensorgram_freeze_button.setIcon(snowflake_icon(self._theme_mode, self._sensorgram_frozen))
 
     def _update_residual_button_icon(self) -> None:
         if not hasattr(self, "show_residual_button"):

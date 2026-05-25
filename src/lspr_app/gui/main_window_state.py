@@ -26,6 +26,7 @@ def restore_ui_state(window) -> None:
     sensorgram_content_mode = ui_state.get("sensorgram_content_mode")
     trace_display_window_s = ui_state.get("trace_display_window_s")
     sensorgram_downsampling_enabled = ui_state.get("sensorgram_downsampling_enabled")
+    sensorgram_frozen = ui_state.get("sensorgram_frozen")
     left_controls_visible = ui_state.get("left_controls_visible")
     sensorgram_visible = ui_state.get("sensorgram_visible")
     trace_stats_metric_name = ui_state.get("trace_stats_metric_name")
@@ -105,6 +106,9 @@ def restore_ui_state(window) -> None:
         window._sensorgram_downsampling_enabled = window._normalize_sensorgram_downsampling_enabled(
             sensorgram_downsampling_enabled
         )
+    if isinstance(sensorgram_frozen, bool):
+        window._sensorgram_frozen = bool(sensorgram_frozen)
+        window._update_sensorgram_freeze_button_icon()
     window._update_sensorgram_display_window_button()
     window._update_sensorgram_downsampling_button()
     window._start_maximized = bool(maximized)
@@ -143,6 +147,7 @@ def save_ui_state(window) -> None:
             "sensorgram_content_mode": window._sensorgram_content_mode,
             "trace_display_window_s": float(window._trace_display_window_s),
             "sensorgram_downsampling_enabled": bool(window._sensorgram_downsampling_enabled),
+            "sensorgram_frozen": bool(getattr(window, "_sensorgram_frozen", False)),
             "left_controls_visible": window._left_controls_scroll.isVisible(),
             "sensorgram_visible": window._sensorgram_block.isVisible(),
             "trace_stats_metric_name": window._trace_stats_metric_name,

@@ -336,6 +336,20 @@ def set_plots_frozen_for(window, frozen: bool) -> None:
     window._schedule_acquisition_state_persist()
 
 
+def set_sensorgram_frozen_for(window, frozen: bool) -> None:
+    window._sensorgram_frozen = frozen
+    if hasattr(window, "sensorgram_freeze_button") and window.sensorgram_freeze_button.isChecked() != frozen:
+        window.sensorgram_freeze_button.blockSignals(True)
+        window.sensorgram_freeze_button.setChecked(frozen)
+        window.sensorgram_freeze_button.blockSignals(False)
+    window._update_sensorgram_freeze_button_icon()
+    if not frozen:
+        window._refresh_trace_plot("Peak position (nm)")
+        window._ui_trace_plot_dirty = False
+        window._request_trace_autoscale()
+    window._schedule_acquisition_state_persist()
+
+
 def clear_trace_history_for(window) -> None:
     window._peak_history.clear()
     if hasattr(window, "_sensorgram_heatmap_history"):

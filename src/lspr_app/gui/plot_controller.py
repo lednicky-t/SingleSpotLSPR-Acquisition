@@ -259,7 +259,7 @@ def flush_deferred_ui_refreshes(window) -> None:
         window._refresh_telemetry()
         window._ui_telemetry_dirty = False
         did_work = True
-    if window._ui_trace_plot_dirty:
+    if window._ui_trace_plot_dirty and not bool(getattr(window, "_sensorgram_frozen", False)):
         window._refresh_trace_plot(window._pending_trace_label)
         window._ui_trace_plot_dirty = False
         did_work = True
@@ -409,7 +409,7 @@ def update_residual_axis_visibility(window, visible: bool | None = None) -> None
 
 
 def request_trace_autoscale(window) -> None:
-    if window._plots_frozen:
+    if window._plots_frozen or bool(getattr(window, "_sensorgram_frozen", False)):
         return
     window._trace_autoscale_timer.start()
 
