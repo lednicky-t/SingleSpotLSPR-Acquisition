@@ -100,7 +100,12 @@ from lspr_app.gui.icon_helpers import (
     tint_tabler_icon,
 )
 from lspr_app.gui.main_window_titlebar import build_title_bar, refresh_hw_device_status_strip, sync_window_control_icons
-from lspr_app.gui.main_window_panels import build_processing_group, build_simulation_page, build_spectrometer_page
+from lspr_app.gui.main_window_panels import (
+    build_processing_group,
+    build_simulation_page,
+    build_spectrometer_page,
+    configure_processing_group_controls,
+)
 from lspr_app.gui.main_window_state import (
     acquisition_state_payload,
     apply_acquisition_state_to_widgets,
@@ -113,7 +118,6 @@ from lspr_app.gui.main_window_state import (
 )
 from lspr_app.gui.main_window_processing import (
     apply_processing_settings_to_widgets,
-    configure_processing_group_controls,
     populate_analysis_resolution_combo,
     current_processing_settings,
     load_processing_settings_dialog,
