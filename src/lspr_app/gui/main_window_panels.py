@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -132,21 +133,12 @@ def build_processing_group(window) -> QGroupBox:
     processing_layout.setHorizontalSpacing(12)
     processing_layout.setVerticalSpacing(8)
 
-    range_row = QHBoxLayout()
-    range_row.setContentsMargins(0, 0, 0, 0)
-    range_row.setSpacing(6)
-    range_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
-    range_row.addWidget(QLabel("Min"))
-    range_row.addWidget(window.range_min_spin)
-    range_row.addSpacing(10)
-    range_row.addWidget(QLabel("Max"))
-    range_row.addWidget(window.range_max_spin)
-    range_row.addStretch(1)
+    range_row = _build_processing_range_widget(window)
     range_label = QLabel("Range (nm)")
     range_label.setToolTip("Wavelength range used for processing and fits.")
     processing_layout.addRow(range_label, range_row)
 
-    baseline_label = QLabel("Baseline")
+    baseline_label = QLabel("Baseline removal")
     baseline_label.setToolTip("Baseline subtraction method.")
     processing_layout.addRow(baseline_label, window.baseline_method_combo)
 
@@ -194,15 +186,6 @@ def build_processing_group(window) -> QGroupBox:
     poly_label.setToolTip("Polynomial order used when polynomial fitting is selected.")
     processing_layout.addRow(poly_label, poly_row)
 
-    analysis_row = QHBoxLayout()
-    analysis_row.setContentsMargins(0, 0, 0, 0)
-    analysis_row.setSpacing(6)
-    analysis_row.addWidget(window.analysis_resolution_spin)
-    analysis_row.addStretch(1)
-    analysis_label = QLabel("Analysis")
-    analysis_label.setToolTip("Resolution used for peak and centroid analysis.")
-    processing_layout.addRow(analysis_label, analysis_row)
-
     peak_label = QLabel("Peak method")
     peak_label.setToolTip("Choose which peak metric is shown in the trace plot and summary.")
     processing_layout.addRow(peak_label, window.peak_metric_combo)
@@ -226,6 +209,45 @@ def build_processing_group(window) -> QGroupBox:
     processing_layout.addRow(processing_buttons)
     processing_group.setLayout(processing_layout)
     return processing_group
+
+
+def configure_processing_group_controls(window) -> None:
+    range_width = max(window.range_min_spin.sizeHint().width(), window.range_max_spin.sizeHint().width())
+    window.range_min_spin.setMinimumWidth(range_width)
+    window.range_max_spin.setMinimumWidth(range_width)
+    window.smoothing_window_spin.setMinimumWidth(range_width)
+    window.analysis_resolution_spin.setMinimumWidth(max(window.analysis_resolution_spin.sizeHint().width(), 84))
+    window.smoothing_method_combo.setMinimumWidth(range_width * 2)
+
+
+def _build_processing_range_widget(window) -> QWidget:
+    range_widget = QWidget()
+    range_layout = QGridLayout()
+    range_layout.setContentsMargins(0, 0, 0, 0)
+    range_layout.setHorizontalSpacing(6)
+    range_layout.setVerticalSpacing(2)
+    range_layout.setColumnStretch(0, 0)
+    range_layout.setColumnStretch(1, 0)
+    range_layout.setColumnStretch(2, 0)
+
+    labels = [
+        ("Min", "Minimum wavelength used for processing and fit range."),
+        ("Max", "Maximum wavelength used for processing and fit range."),
+        ("Resolution", "Resolution used for peak and centroid analysis."),
+    ]
+    controls = [window.range_min_spin, window.range_max_spin, window.analysis_resolution_spin]
+    for column, ((label, tooltip), control) in enumerate(zip(labels, controls, strict=True)):
+        label_widget = QLabel(label)
+        label_widget.setToolTip(tooltip)
+        control.setToolTip(tooltip)
+        range_layout.addWidget(label_widget, 0, column, alignment=Qt.AlignmentFlag.AlignHCenter)
+        range_layout.addWidget(control, 1, column)
+
+    range_layout.setRowStretch(0, 0)
+    range_layout.setRowStretch(1, 0)
+    range_widget.setLayout(range_layout)
+    range_widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+    return range_widget
 
 
 def _add_sim_row(

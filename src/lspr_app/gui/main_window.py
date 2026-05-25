@@ -113,6 +113,8 @@ from lspr_app.gui.main_window_state import (
 )
 from lspr_app.gui.main_window_processing import (
     apply_processing_settings_to_widgets,
+    configure_processing_group_controls,
+    populate_analysis_resolution_combo,
     current_processing_settings,
     load_processing_settings_dialog,
     persist_processing_settings,
@@ -784,9 +786,9 @@ class MainWindow(QMainWindow):
         self.range_max_spin.setToolTip("Maximum wavelength used for processing and fit range.")
 
         self.smoothing_method_combo = QComboBox()
-        self.smoothing_method_combo.addItem("none", "none")
-        self.smoothing_method_combo.addItem("moving average", "moving_average")
-        self.smoothing_method_combo.addItem("savitzky golay", "savitzky_golay")
+        self.smoothing_method_combo.addItem("None", "none")
+        self.smoothing_method_combo.addItem("Moving average", "moving_average")
+        self.smoothing_method_combo.addItem("Savitzky-Golay", "savitzky_golay")
         self.smoothing_method_combo.setToolTip("Method used to smooth the spectrum before analysis.")
         self.baseline_method_combo = QComboBox()
         self.baseline_method_combo.addItems(["none", "linear"])
@@ -834,13 +836,9 @@ class MainWindow(QMainWindow):
         self.fit_window_spin.setValue(120)
         self.fit_window_spin.setSuffix(" nm")
         self.fit_window_spin.setToolTip("Fit range width in nm around the detected local peak maximum.")
-        self.analysis_resolution_spin = QDoubleSpinBox()
-        make_compact_spinbox(self.analysis_resolution_spin)
-        self.analysis_resolution_spin.setRange(0.0001, 0.1)
-        self.analysis_resolution_spin.setDecimals(4)
-        self.analysis_resolution_spin.setSingleStep(0.0001)
-        self.analysis_resolution_spin.setValue(0.001)
-        self.analysis_resolution_spin.setSuffix(" nm")
+        self.analysis_resolution_spin = QComboBox()
+        populate_analysis_resolution_combo(self.analysis_resolution_spin)
+        self.analysis_resolution_spin.setCurrentIndex(2)
         self.analysis_resolution_spin.setToolTip(
             "Resolution used for peak and centroid analysis. Lower values improve sub-sample tracking but cost more CPU."
         )
@@ -2533,6 +2531,7 @@ class MainWindow(QMainWindow):
             self.smoothing_method_combo,
             self.crop_method_combo,
             self.fit_method_combo,
+            self.analysis_resolution_spin,
             self.peak_metric_combo,
             self.plot_selector,
         ]
@@ -2542,11 +2541,7 @@ class MainWindow(QMainWindow):
             combo.setMinimumContentsLength(1)
             combo.view().setTextElideMode(Qt.TextElideMode.ElideRight)
 
-        range_width = max(self.range_min_spin.sizeHint().width(), self.range_max_spin.sizeHint().width())
-        self.range_min_spin.setMinimumWidth(range_width)
-        self.range_max_spin.setMinimumWidth(range_width)
-        self.smoothing_window_spin.setMinimumWidth(range_width)
-        self.smoothing_method_combo.setMinimumWidth(range_width * 2)
+        configure_processing_group_controls(self)
 
         for button in (
             self.measurement_toggle_button,
@@ -2695,7 +2690,7 @@ class MainWindow(QMainWindow):
         self.fit_method_combo.currentTextChanged.connect(self._handle_processing_setting_change)
         self.poly_order_spin.valueChanged.connect(self._handle_processing_setting_change)
         self.fit_window_spin.valueChanged.connect(self._handle_processing_setting_change)
-        self.analysis_resolution_spin.valueChanged.connect(self._handle_processing_setting_change)
+        self.analysis_resolution_spin.currentIndexChanged.connect(self._handle_processing_setting_change)
         self.peak_metric_combo.currentTextChanged.connect(self._handle_processing_setting_change)
         self.trace_max_check.toggled.connect(self._handle_processing_setting_change)
         self.trace_centroid_check.toggled.connect(self._handle_processing_setting_change)

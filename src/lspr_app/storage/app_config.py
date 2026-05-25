@@ -45,7 +45,7 @@ def load_processing_settings(path: Path = DEFAULT_CONFIG_PATH) -> ProcessingSett
     if processing.get("fit_enabled") is True and defaults.get("fit_method") == "none":
         defaults["fit_method"] = "poly"
     defaults["analysis_resolution_nm"] = float(
-        min(max(defaults.get("analysis_resolution_nm", 0.001), 0.0001), 0.1)
+        min(max(defaults.get("analysis_resolution_nm", 0.001), 0.000001), 0.1)
     )
     defaults["trace_noise_window_s"] = float(min(max(defaults.get("trace_noise_window_s", 10.0), 0.5), 600.0))
     trace_metrics = defaults.get("trace_metrics")
