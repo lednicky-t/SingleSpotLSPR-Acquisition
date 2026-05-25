@@ -311,6 +311,30 @@ class LogTerminalTextEdit(QTextEdit):
         super().wheelEvent(event)
 
 
+class ResidualViewBox(pg.ViewBox):
+    def wheelEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
+        angle_delta = getattr(event, "angleDelta", None)
+        if angle_delta is None:
+            event.ignore()
+            return
+        delta_y = angle_delta().y()
+        if delta_y == 0:
+            event.ignore()
+            return
+        view_range = self.viewRange()
+        y_range = view_range[1]
+        y_min = float(y_range[0])
+        y_max = float(y_range[1])
+        if not np.isfinite(y_min) or not np.isfinite(y_max) or y_max <= y_min:
+            event.ignore()
+            return
+        factor = 1.12 if delta_y > 0 else 1 / 1.12
+        center = (y_min + y_max) * 0.5
+        half_span = max((y_max - y_min) * 0.5 * factor, 1e-9)
+        self.setYRange(center - half_span, center + half_span, padding=0.0)
+        event.accept()
+
+
 class MainWindow(QMainWindow):
     hardware_init_progress = pyqtSignal(int, str)
     hardware_init_finished = pyqtSignal()
@@ -921,11 +945,11 @@ class MainWindow(QMainWindow):
         spectrum_plot_item = self.spectrum_plot.getPlotItem()
         spectrum_plot_item.showAxis("right")
         self.residual_axis = spectrum_plot_item.getAxis("right")
-        self.residual_axis.setLabel("Residual")
+        self.residual_axis.setLabel("Residual (%)")
         self.residual_axis.enableAutoSIPrefix(False)
         self.residual_axis.setTextPen(pg.mkPen("#7a7a7a"))
         self.residual_axis.setPen(pg.mkPen("#7a7a7a"))
-        self.residual_view = pg.ViewBox()
+        self.residual_view = ResidualViewBox()
         spectrum_plot_item.scene().addItem(self.residual_view)
         self.residual_curve = pg.PlotDataItem(pen=pg.mkPen("#888888", width=1))
         self.residual_view.addItem(self.residual_curve)
@@ -3689,7 +3713,12 @@ class MainWindow(QMainWindow):
                     np.asarray(processed.wavelengths_nm, dtype=np.float64),
                     np.asarray(processed.values, dtype=np.float64),
                 )
-                residual_values = residual_base - display_fit_y
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    residual_values = np.where(
+                        np.abs(display_fit_y) > 1e-12,
+                        ((residual_base - display_fit_y) / display_fit_y) * 100.0,
+                        np.nan,
+                    )
                 self.residual_curve.setData(display_fit_x, residual_values)
                 self._autoscale_residual_axis()
             else:

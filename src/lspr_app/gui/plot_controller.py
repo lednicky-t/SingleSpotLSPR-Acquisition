@@ -390,13 +390,12 @@ def autoscale_residual_axis(window) -> None:
     if not np.any(finite):
         return
     y = y[finite]
-    center = float(np.median(y))
-    amplitude = float(np.percentile(np.abs(y - center), 95))
-    amplitude = max(amplitude, float(np.max(np.abs(y - center))), 1e-9)
-    pad = max(amplitude * 0.25, 1e-6)
+    amplitude = float(np.percentile(np.abs(y), 95))
+    amplitude = max(amplitude, float(np.max(np.abs(y))), 1e-9)
+    pad = max(amplitude * 0.15, 1e-6)
     if not np.isfinite(pad):
         pad = 1e-6
-    window.residual_view.setYRange(center - (amplitude + pad), center + (amplitude + pad), padding=0.0)
+    window.residual_view.setYRange(-(amplitude + pad), amplitude + pad, padding=0.0)
 
 
 def update_residual_axis_visibility(window, visible: bool | None = None) -> None:
