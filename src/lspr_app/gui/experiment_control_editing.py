@@ -22,8 +22,6 @@ class _SelectionOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAutoFillBackground(False)
-        self.raise_()
-        self.show()
 
     def _paint_rect(self, painter: QPainter, rect, *, dashed: bool = False, fill: bool = False) -> None:
         pen = QPen(QColor("#d8b44a"))
