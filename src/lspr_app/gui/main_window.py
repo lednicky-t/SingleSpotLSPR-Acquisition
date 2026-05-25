@@ -1463,8 +1463,9 @@ class MainWindow(QMainWindow):
 
         self._top_content_stack = QStackedWidget()
         self._top_content_stack.addWidget(spectrum_block)
-        self._flow_panel_placeholder = QWidget()
-        self._top_content_stack.addWidget(self._flow_panel_placeholder)
+        self._experiment_control_panel_placeholder = QWidget()
+        self._flow_panel_placeholder = self._experiment_control_panel_placeholder
+        self._top_content_stack.addWidget(self._experiment_control_panel_placeholder)
         self._top_content_stack.setCurrentIndex(0)
 
         plot_splitter = CompactSplitter(Qt.Orientation.Vertical)
@@ -2353,6 +2354,9 @@ class MainWindow(QMainWindow):
     def _open_experiment_control_window(self) -> None:
         self._activate_flow_view()
 
+    def _open_experimental_control_window(self) -> None:
+        self._open_experiment_control_window()
+
     def _toggle_flow_panel_visibility(self, checked: bool | None = None) -> None:
         if checked is None:
             self._activate_flow_view() if self._top_view_mode != "flow" else self._activate_spectra_view()
@@ -2360,6 +2364,9 @@ class MainWindow(QMainWindow):
             self._activate_flow_view()
         else:
             self._activate_spectra_view()
+
+    def _toggle_experimental_control_panel_visibility(self, checked: bool | None = None) -> None:
+        self._toggle_flow_panel_visibility(checked)
 
     def _ensure_flow_panel(self) -> None:
         if self._experiment_control_window is None:
@@ -2376,13 +2383,13 @@ class MainWindow(QMainWindow):
             self._experiment_control_window.valve_availability_changed.connect(self._handle_valve_availability_changed)
             self._experiment_control_window.mswitch_availability_changed.connect(self._handle_mswitch_availability_changed)
             self._experiment_control_window.recording_control_requested.connect(self._handle_flow_recording_control)
-            self._experiment_control_window.flow_state_recorded.connect(self._handle_flow_state_recorded)
+            self._experiment_control_window.experimental_control_state_recorded.connect(self._handle_experimental_control_state_recorded)
             self._experiment_control_window.recording_controller = self
             self._experiment_control_window.theme_changed.connect(self.set_theme)
             if hasattr(self._experiment_control_window, "_set_record_with_flow_recording_active"):
                 self._experiment_control_window._set_record_with_flow_recording_active(bool(self._measurement_active))
             if hasattr(self, "_top_content_stack"):
-                placeholder = getattr(self, "_flow_panel_placeholder", None)
+                placeholder = getattr(self, "_experiment_control_panel_placeholder", getattr(self, "_flow_panel_placeholder", None))
                 if placeholder is not None:
                     index = self._top_content_stack.indexOf(placeholder)
                     if index >= 0:
@@ -2390,6 +2397,9 @@ class MainWindow(QMainWindow):
                         placeholder.setParent(None)
                     self._top_content_stack.addWidget(self._experiment_control_window)
             self._log_info("Experiment control panel created.")
+
+    def _ensure_experimental_control_panel(self) -> None:
+        self._ensure_flow_panel()
 
     def _sync_main_view_visibility(self) -> None:
         if self._main_content_widget is None:
@@ -2399,6 +2409,9 @@ class MainWindow(QMainWindow):
 
     def _show_flow_only(self) -> None:
         self._activate_flow_view()
+
+    def _show_experimental_control_only(self) -> None:
+        self._show_flow_only()
 
     def _show_plots_only(self) -> None:
         self._activate_spectra_view()
@@ -2422,6 +2435,9 @@ class MainWindow(QMainWindow):
         self._sync_view_actions()
 
     def _activate_experiment_control_view(self) -> None:
+        self._activate_flow_view()
+
+    def _activate_experimental_control_view(self) -> None:
         self._activate_flow_view()
 
     def _toggle_left_controls(self, checked: bool | None = None) -> None:
@@ -2502,7 +2518,7 @@ class MainWindow(QMainWindow):
             return True
         return True
 
-    def _handle_flow_state_recorded(self, payload: object) -> None:
+    def _handle_experimental_control_state_recorded(self, payload: object) -> None:
         if self._measurement_writer is None or not self._measurement_active:
             return
         if not isinstance(payload, dict):
@@ -2514,6 +2530,9 @@ class MainWindow(QMainWindow):
             elapsed_ms = 0
         row["t_ms"] = max(elapsed_ms, 0)
         self._measurement_writer.append_flow_state(row)
+
+    def _handle_flow_state_recorded(self, payload: object) -> None:
+        self._handle_experimental_control_state_recorded(payload)
 
     def _apply_control_sizing(self) -> None:
         tall_widgets = [

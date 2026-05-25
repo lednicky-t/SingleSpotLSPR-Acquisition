@@ -151,8 +151,6 @@ class _FlowSelectionOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAutoFillBackground(False)
-        self.raise_()
-        self.show()
 
     def _selection_rect(self, indexes: list[QModelIndex]) -> QRectF | None:
         rects = []
@@ -1487,7 +1485,8 @@ class ExperimentControlWindow(QWidget):
     valve_availability_changed = pyqtSignal(object)
     mswitch_availability_changed = pyqtSignal(object)
     recording_control_requested = pyqtSignal(str)
-    flow_state_recorded = pyqtSignal(object)
+    experimental_control_state_recorded = pyqtSignal(object)
+    flow_state_recorded = experimental_control_state_recorded
     theme_changed = pyqtSignal(str)
     PLAN_COLOR_OPTIONS = [
         ("Blue", "#4E79A7"),
@@ -6579,7 +6578,7 @@ class ExperimentControlWindow(QWidget):
             ((" | ".join(status_messages) + " | ") if status_messages else "") + f"Applied experiment-plan step {step.step}."
         )
         _LOGGER.info("Applied experiment-plan step %s", step.step)
-        self._emit_flow_state("step_applied", step, status="; ".join(status_messages))
+        self._emit_experimental_control_state("step_applied", step, status="; ".join(status_messages))
         return True
 
     def _jump_to_experiment_control_step(self, row: int) -> None:
@@ -6628,7 +6627,7 @@ class ExperimentControlWindow(QWidget):
         self._set_status_message(f"Running experiment plan from step {self._plan_active_row + 1 if self._plan_active_row is not None else 1}.")
         _LOGGER.info("Experiment plan started | step=%s", self._plan_active_row + 1 if self._plan_active_row is not None else 1)
         if self._plan_active_row is not None and 0 <= self._plan_active_row < len(steps):
-            self._emit_flow_state("plan_started", steps[self._plan_active_row])
+            self._emit_experimental_control_state("plan_started", steps[self._plan_active_row])
 
     def _hold_experiment_control(self) -> None:
         if not (self._plan_running or self._plan_holding):
@@ -6650,7 +6649,7 @@ class ExperimentControlWindow(QWidget):
         else:
             self._set_status_message("Experiment plan hold.")
             _LOGGER.info("Experiment plan hold.")
-        self._emit_flow_state("plan_hold", self._applied_plan_step)
+        self._emit_experimental_control_state("plan_hold", self._applied_plan_step)
 
     def _stop_experiment_control(self) -> None:
         steps = self._read_experiment_control_steps()
@@ -6677,7 +6676,7 @@ class ExperimentControlWindow(QWidget):
         else:
             self._set_status_message("Experiment plan stopped.")
         _LOGGER.info("Experiment plan stopped.")
-        self._emit_flow_state("plan_stopped", self._applied_plan_step)
+        self._emit_experimental_control_state("plan_stopped", self._applied_plan_step)
         self._request_recording_control("stop")
 
     def _move_to_relative_experiment_control_step(self, delta: int) -> None:
@@ -6692,11 +6691,11 @@ class ExperimentControlWindow(QWidget):
         self._jump_to_experiment_control_step(target)
         if running:
             self._apply_experiment_control_step_to_pump(steps[target], start=True)
-            self._emit_flow_state("step_jump", steps[target])
+            self._emit_experimental_control_state("step_jump", steps[target])
         if not (self._plan_running or self._plan_holding):
             self._set_status_message(f"Selected experiment-plan step {target + 1}.")
 
-    def _emit_flow_state(self, event: str, step: PumpPlanStep | None = None, *, status: str = "") -> None:
+    def _emit_experimental_control_state(self, event: str, step: PumpPlanStep | None = None, *, status: str = "") -> None:
         if step is None:
             step = self._applied_plan_step
         payload: dict[str, object] = {
@@ -6717,7 +6716,10 @@ class ExperimentControlWindow(QWidget):
             payload[f"ch{index + 1}_flow_ul_min"] = float(channel.flow_ul_min) if channel is not None else ""
             payload[f"ch{index + 1}_direction"] = str(channel.direction or "OFF") if channel is not None else ""
             payload[f"ch{index + 1}_tube_mm"] = float(tube_values[index]) if index < len(tube_values) else ""
-        self.flow_state_recorded.emit(payload)
+        self.experimental_control_state_recorded.emit(payload)
+
+    def _emit_flow_state(self, event: str, step: PumpPlanStep | None = None, *, status: str = "") -> None:
+        self._emit_experimental_control_state(event, step, status=status)
 
     def _advance_experiment_control_progress(self) -> None:
         if not self._plan_running or self._plan_started_monotonic is None:

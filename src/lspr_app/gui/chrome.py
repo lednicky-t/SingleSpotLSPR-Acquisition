@@ -37,11 +37,11 @@ def build_menu_bar(window) -> QMenuBar:
     spectra_action.triggered.connect(lambda _checked=False: window._activate_spectra_view())
     view_menu_actions["top_view"]["spectra"] = spectra_action
 
-    flow_action = view_menu.addAction("Experimental control")
-    flow_action.setCheckable(True)
-    flow_action.setActionGroup(top_view_group)
-    flow_action.triggered.connect(lambda _checked=False: window._activate_flow_view())
-    view_menu_actions["top_view"]["flow"] = flow_action
+    experimental_control_action = view_menu.addAction("Experimental control")
+    experimental_control_action.setCheckable(True)
+    experimental_control_action.setActionGroup(top_view_group)
+    experimental_control_action.triggered.connect(lambda _checked=False: window._activate_experimental_control_view())
+    view_menu_actions["top_view"]["flow"] = experimental_control_action
 
     left_controls_action = view_menu.addAction("Left controls")
     left_controls_action.setCheckable(True)
@@ -62,8 +62,8 @@ def build_menu_bar(window) -> QMenuBar:
     view_menu.addSeparator()
     spectra_preset_action = view_menu.addAction("Spectra preset")
     spectra_preset_action.triggered.connect(window._activate_spectra_view)
-    flow_preset_action = view_menu.addAction("Experimental control preset")
-    flow_preset_action.triggered.connect(window._activate_flow_view)
+    experimental_control_preset_action = view_menu.addAction("Experimental control preset")
+    experimental_control_preset_action.triggered.connect(window._activate_experimental_control_view)
     window._view_menu_actions = view_menu_actions
 
     hw_menu = menu_bar.addMenu("HW")
