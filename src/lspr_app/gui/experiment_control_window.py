@@ -1803,7 +1803,7 @@ class ExperimentControlWindow(QWidget):
         self.step_switch_combo.setMinimumWidth(148)
         self.step_switch_combo.setToolTip("AMF switch position and solution for this step.")
         self.step_switch_combo.currentIndexChanged.connect(self._handle_step_switch_combo_changed)
-        self.step_switch_combo.setVisible(True)
+        self.step_switch_combo.setVisible(False)
         self.step_switch_mode_button = QToolButton()
         self.step_switch_mode_button.setObjectName("flowSwitchModeButton")
         self.step_switch_mode_button.setAutoRaise(True)
@@ -1954,6 +1954,7 @@ class ExperimentControlWindow(QWidget):
         self.timeline_widget.set_theme_palette(self._theme_palette())
         self.timeline_widget.set_time_unit_mode(self._time_unit_mode)
         self.timeline_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._startup_ui_pending = True
         self._build_ui()
         _LOGGER.info("Flow bootstrap +%.1f ms: UI built", (perf_counter() - self._bootstrap_t0) * 1000.0)
         self._refresh_switch_solution_combo(self.step_switch_spin.value())
@@ -1974,6 +1975,8 @@ class ExperimentControlWindow(QWidget):
             QTimer.singleShot(0, self._auto_connect_pump)
             QTimer.singleShot(0, self._auto_connect_valve)
             QTimer.singleShot(0, self._auto_connect_mswitch)
+        self._startup_ui_pending = False
+        self._set_switch_solution_mode(self._switch_solution_mode)
         _LOGGER.info("Flow bootstrap +%.1f ms: constructor finished", (perf_counter() - self._bootstrap_t0) * 1000.0)
 
     def _build_ui(self) -> None:
@@ -2456,7 +2459,7 @@ class ExperimentControlWindow(QWidget):
         self._switch_solution_mode = False
         self.step_switch_mode_button.setVisible(False)
         self.step_switch_spin.setVisible(False)
-        self.step_switch_combo.setVisible(True)
+        self.step_switch_combo.setVisible(not getattr(self, "_startup_ui_pending", False))
         self._refresh_switch_solution_controls()
         self._update_timeline_selection()
 
