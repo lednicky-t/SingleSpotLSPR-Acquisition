@@ -93,6 +93,7 @@ def downsample_trace_series_for_view(
     view_x_min: float | None = None,
     view_x_max: float | None = None,
     view_width_px: float | None = None,
+    enabled: bool = True,
     minimum_points: int = 256,
     oversample: float = 2.0,
     default_points: int = 4096,
@@ -114,6 +115,9 @@ def downsample_trace_series_for_view(
             y = y[start:stop]
 
     if len(x) == 0:
+        return x, y
+
+    if not enabled:
         return x, y
 
     if view_width_px is None or view_width_px <= 0:
@@ -222,6 +226,7 @@ def downsample_sensorgram_history_for_view(
     view_height_px: float | None = None,
     oversample: float = 2.0,
     minimum_rows: int = 256,
+    enabled: bool = True,
 ) -> list[tuple[float, np.ndarray]]:
     if not history:
         return history
@@ -229,6 +234,8 @@ def downsample_sensorgram_history_for_view(
         visible = [item for item in history if view_x_min <= float(item[0]) <= view_x_max]
         if visible:
             history = visible
+    if not enabled:
+        return history
     if view_height_px is not None and view_height_px > 0:
         target_rows = max(minimum_rows, int(view_height_px * oversample))
         max_rows = min(max_rows, target_rows)
@@ -476,7 +483,23 @@ def render_trace_series(
             return float(raw_x.timestamp())
         return float(raw_x)
 
-    view_x_min, view_x_max, view_width_px = _current_trace_view_state(window)
+    view_mode = getattr(window, "_sensorgram_view_mode", "absolute")
+    trace_view_locked = bool(getattr(window, "_trace_view_locked", False))
+    _, _, view_width_px = _current_trace_view_state(window)
+    view_x_min = view_x_max = None
+    if trace_view_locked:
+        view_x_min, view_x_max, view_width_px = _current_trace_view_state(window)
+    elif view_mode == "rolling" and len(history) > 0:
+        latest_x = None
+        for series in history.values():
+            for item in series:
+                x_value = _trace_x_value(item[0])
+                if latest_x is None or x_value > latest_x:
+                    latest_x = x_value
+        if latest_x is not None:
+            window_span = max(float(getattr(window, "_trace_display_window_s", 60.0)), 1e-9)
+            view_x_max = latest_x
+            view_x_min = latest_x - window_span
     active_series = {}
     for metric_name, curve in window.trace_curves.items():
         series = history.get(metric_name, [])
@@ -491,6 +514,7 @@ def render_trace_series(
             view_x_min=view_x_min,
             view_x_max=view_x_max,
             view_width_px=view_width_px,
+            enabled=bool(getattr(window, "_sensorgram_downsampling_enabled", True)),
         )
         curve.setData(x, y)
         active_series[metric_name] = (x, y)
@@ -524,16 +548,16 @@ def render_sensorgram_heatmap(
         return
 
     view_mode = getattr(window, "_sensorgram_view_mode", "absolute")
-    view_x_min, view_x_max, _view_width_px = _current_trace_view_state(window)
-    if not getattr(window, "_trace_view_locked", False) and len(history) > 0:
+    trace_view_locked = bool(getattr(window, "_trace_view_locked", False))
+    _, _, _view_width_px = _current_trace_view_state(window)
+    view_x_min = view_x_max = None
+    if trace_view_locked:
+        view_x_min, view_x_max, _view_width_px = _current_trace_view_state(window)
+    elif view_mode == "rolling" and len(history) > 0:
         latest_x = float(history[-1][0])
-        if view_mode == "rolling":
-            window_span = max(float(getattr(window, "_trace_display_window_s", 60.0)), 1e-9)
-            view_x_max = latest_x
-            view_x_min = max(float(history[0][0]), latest_x - window_span)
-        else:
-            view_x_min = float(history[0][0])
-            view_x_max = latest_x
+        window_span = max(float(getattr(window, "_trace_display_window_s", 60.0)), 1e-9)
+        view_x_max = latest_x
+        view_x_min = latest_x - window_span
     requested_view_x_min = view_x_min
     requested_view_x_max = view_x_max
     view_height_px = None
@@ -551,6 +575,7 @@ def render_sensorgram_heatmap(
         view_x_max=view_x_max,
         max_rows=int(getattr(window, "_sensorgram_heatmap_history_max_rows", 2000)),
         view_height_px=view_height_px,
+        enabled=bool(getattr(window, "_sensorgram_downsampling_enabled", True)),
     )
 
     times = np.asarray([float(item[0]) for item in history], dtype=np.float64)

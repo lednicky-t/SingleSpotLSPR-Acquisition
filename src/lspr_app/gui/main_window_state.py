@@ -24,6 +24,8 @@ def restore_ui_state(window) -> None:
     top_view_mode = ui_state.get("top_view_mode")
     sensorgram_view_mode = ui_state.get("sensorgram_view_mode")
     sensorgram_content_mode = ui_state.get("sensorgram_content_mode")
+    trace_display_window_s = ui_state.get("trace_display_window_s")
+    sensorgram_downsampling_enabled = ui_state.get("sensorgram_downsampling_enabled")
     left_controls_visible = ui_state.get("left_controls_visible")
     sensorgram_visible = ui_state.get("sensorgram_visible")
     trace_stats_metric_name = ui_state.get("trace_stats_metric_name")
@@ -97,6 +99,14 @@ def restore_ui_state(window) -> None:
     if isinstance(sensorgram_content_mode, str):
         window._sensorgram_content_mode = window._normalize_sensorgram_content_mode(sensorgram_content_mode)
         window._update_sensorgram_content_mode_button()
+    if isinstance(trace_display_window_s, (int, float)) and float(trace_display_window_s) > 0:
+        window._trace_display_window_s = window._normalize_sensorgram_display_window_s(trace_display_window_s)
+    if isinstance(sensorgram_downsampling_enabled, (bool, str)):
+        window._sensorgram_downsampling_enabled = window._normalize_sensorgram_downsampling_enabled(
+            sensorgram_downsampling_enabled
+        )
+    window._update_sensorgram_display_window_button()
+    window._update_sensorgram_downsampling_button()
     window._start_maximized = bool(maximized)
     window._sync_view_actions()
 
@@ -131,6 +141,8 @@ def save_ui_state(window) -> None:
             "top_view_mode": window._top_view_mode,
             "sensorgram_view_mode": window._sensorgram_view_mode,
             "sensorgram_content_mode": window._sensorgram_content_mode,
+            "trace_display_window_s": float(window._trace_display_window_s),
+            "sensorgram_downsampling_enabled": bool(window._sensorgram_downsampling_enabled),
             "left_controls_visible": window._left_controls_scroll.isVisible(),
             "sensorgram_visible": window._sensorgram_block.isVisible(),
             "trace_stats_metric_name": window._trace_stats_metric_name,
@@ -184,10 +196,8 @@ def acquisition_state_payload(window) -> dict[str, object]:
     )
     if window._experiment_control_window is not None:
         try:
-            experiment_control_payload["experiment_plan"] = to_core_experiment_plan(
-                window._experiment_control_window._read_experiment_control_steps()
-            )
             experiment_control_payload["plan_rows"] = window._experiment_control_window.current_pump_plan_hdf5_rows()
+            experiment_control_payload["selected_plan_row"] = window._experiment_control_window._selected_experiment_control_row()
         except Exception:
             pass
     return {
@@ -231,6 +241,7 @@ def persist_acquisition_state(window) -> None:
                     window._experiment_control_window._read_experiment_control_steps()
                 )
                 experiment_control["plan_rows"] = window._experiment_control_window.current_pump_plan_hdf5_rows()
+                experiment_control["selected_plan_row"] = window._experiment_control_window._selected_experiment_control_row()
             except Exception:
                 pass
         writer_payload["experiment_control"] = experiment_control

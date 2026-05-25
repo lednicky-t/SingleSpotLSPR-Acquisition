@@ -466,6 +466,7 @@ class MainWindow(QMainWindow):
         self._temporal_processed_history: list[Spectrum] = []
         self._temporal_history_key: tuple[object, ...] | None = None
         self._trace_display_window_s = 60.0
+        self._sensorgram_downsampling_enabled = True
         self._trace_display_cursor_s = 0.0
         self._trace_history_max_points = 6000
         self._recording_blink_visible = True
@@ -1186,6 +1187,13 @@ class MainWindow(QMainWindow):
         self.sensorgram_view_mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.sensorgram_view_mode_button.clicked.connect(self._cycle_sensorgram_view_mode)
         self._update_sensorgram_view_mode_button()
+        self.sensorgram_downsampling_button = QToolButton()
+        self.sensorgram_downsampling_button.setObjectName("sensorgramDownsamplingButton")
+        self.sensorgram_downsampling_button.setAutoRaise(True)
+        self.sensorgram_downsampling_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.sensorgram_downsampling_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sensorgram_downsampling_button.clicked.connect(self._cycle_sensorgram_downsampling_enabled)
+        self._update_sensorgram_downsampling_button()
         self.sensorgram_content_mode_button = QToolButton()
         self.sensorgram_content_mode_button.setObjectName("sensorgramContentModeButton")
         self.sensorgram_content_mode_button.setAutoRaise(True)
@@ -1193,13 +1201,23 @@ class MainWindow(QMainWindow):
         self.sensorgram_content_mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.sensorgram_content_mode_button.clicked.connect(self._cycle_sensorgram_content_mode)
         self._update_sensorgram_content_mode_button()
+        self.sensorgram_window_button = QToolButton()
+        self.sensorgram_window_button.setObjectName("sensorgramWindowButton")
+        self.sensorgram_window_button.setAutoRaise(True)
+        self.sensorgram_window_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.sensorgram_window_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sensorgram_window_button.clicked.connect(self._cycle_sensorgram_display_window)
+        self._update_sensorgram_display_window_button()
+        self._update_sensorgram_header_control_visibility()
 
         trace_title_row = QHBoxLayout()
         trace_title_row.setContentsMargins(0, 0, 0, 0)
         trace_title_row.setSpacing(6)
         trace_title_row.addWidget(trace_title)
         trace_title_row.addWidget(self.sensorgram_view_mode_button)
+        trace_title_row.addWidget(self.sensorgram_downsampling_button)
         trace_title_row.addWidget(self.sensorgram_content_mode_button)
+        trace_title_row.addWidget(self.sensorgram_window_button)
         trace_title_row.addStretch(1)
         trace_title_row_widget = QWidget()
         trace_title_row_widget.setLayout(trace_title_row)
@@ -1684,7 +1702,9 @@ class MainWindow(QMainWindow):
                 margin: 0px;
             }
             QToolButton#sensorgramViewModeButton,
-            QToolButton#sensorgramContentModeButton {
+            QToolButton#sensorgramContentModeButton,
+            QToolButton#sensorgramDownsamplingButton,
+            QToolButton#sensorgramWindowButton {
                 background: transparent;
                 border: none;
                 padding: 0px;
@@ -1693,12 +1713,16 @@ class MainWindow(QMainWindow):
                 font-weight: 600;
             }
             QToolButton#sensorgramViewModeButton:hover,
-            QToolButton#sensorgramContentModeButton:hover {
+            QToolButton#sensorgramContentModeButton:hover,
+            QToolButton#sensorgramDownsamplingButton:hover,
+            QToolButton#sensorgramWindowButton:hover {
                 background: transparent;
                 border: none;
             }
             QToolButton#sensorgramViewModeButton:pressed,
-            QToolButton#sensorgramContentModeButton:pressed {
+            QToolButton#sensorgramContentModeButton:pressed,
+            QToolButton#sensorgramDownsamplingButton:pressed,
+            QToolButton#sensorgramWindowButton:pressed {
                 background: transparent;
                 border: none;
             }
@@ -3763,6 +3787,24 @@ class MainWindow(QMainWindow):
         normalized = str(mode or "").strip().lower()
         return normalized if normalized in {"absolute", "rolling"} else "absolute"
 
+    def _normalize_sensorgram_downsampling_enabled(self, value: object | None = None) -> bool:
+        current = self._sensorgram_downsampling_enabled if value is None else value
+        if isinstance(current, str):
+            normalized = current.strip().lower()
+            return normalized not in {"0", "false", "no", "off"}
+        return bool(current)
+
+    def _normalize_sensorgram_display_window_s(self, value: object | None = None) -> float:
+        allowed_values = (60.0, 600.0, 1800.0, 3600.0)
+        current = self._trace_display_window_s if value is None else value
+        try:
+            seconds = float(current)
+        except (TypeError, ValueError):
+            return allowed_values[0]
+        if not np.isfinite(seconds) or seconds <= 0:
+            return allowed_values[0]
+        return min(allowed_values, key=lambda candidate: abs(candidate - seconds))
+
     def _sensorgram_view_mode_label(self, mode: str | None = None) -> str:
         normalized = self._normalize_sensorgram_view_mode(mode or self._sensorgram_view_mode)
         return "Absolute" if normalized == "absolute" else "Rolling"
@@ -3779,11 +3821,21 @@ class MainWindow(QMainWindow):
         label = self._sensorgram_view_mode_label()
         self.sensorgram_view_mode_button.setText(f"[{label}]")
         self.sensorgram_view_mode_button.setToolTip(self._sensorgram_view_mode_tooltip())
+        self._update_sensorgram_header_control_visibility()
+
+    def _update_sensorgram_header_control_visibility(self) -> None:
+        view_mode = self._normalize_sensorgram_view_mode(self._sensorgram_view_mode)
+        if hasattr(self, "sensorgram_downsampling_button"):
+            self.sensorgram_downsampling_button.setVisible(view_mode == "absolute")
+        if hasattr(self, "sensorgram_window_button"):
+            self.sensorgram_window_button.setVisible(view_mode == "rolling")
 
     def _apply_sensorgram_view_mode(self, *, save: bool = False) -> None:
         self._sensorgram_view_mode = self._normalize_sensorgram_view_mode(self._sensorgram_view_mode)
         self._trace_view_locked = False
         self._update_sensorgram_view_mode_button()
+        self._update_sensorgram_downsampling_button()
+        self._update_sensorgram_display_window_button()
         self._request_trace_autoscale()
         self._request_deferred_ui_refresh(trace_plot=True, stats=True)
         if save:
@@ -3793,6 +3845,75 @@ class MainWindow(QMainWindow):
         current = self._normalize_sensorgram_view_mode(self._sensorgram_view_mode)
         self._sensorgram_view_mode = "rolling" if current == "absolute" else "absolute"
         self._apply_sensorgram_view_mode(save=True)
+
+    def _sensorgram_downsampling_label(self, enabled: bool | None = None) -> str:
+        current = self._normalize_sensorgram_downsampling_enabled(enabled)
+        return "Downsampling: On" if current else "Downsampling: Off"
+
+    def _sensorgram_downsampling_tooltip(self, enabled: bool | None = None) -> str:
+        current = self._normalize_sensorgram_downsampling_enabled(enabled)
+        if current:
+            return "Current display: Downsampling is enabled. Click to disable resolution-based reduction."
+        return "Current display: Downsampling is disabled. Click to enable resolution-based reduction."
+
+    def _update_sensorgram_downsampling_button(self) -> None:
+        if not hasattr(self, "sensorgram_downsampling_button"):
+            return
+        label = self._sensorgram_downsampling_label()
+        self.sensorgram_downsampling_button.setText(f"[{label}]")
+        self.sensorgram_downsampling_button.setToolTip(self._sensorgram_downsampling_tooltip())
+        self._update_sensorgram_header_control_visibility()
+
+    def _cycle_sensorgram_downsampling_enabled(self) -> None:
+        self._sensorgram_downsampling_enabled = not self._normalize_sensorgram_downsampling_enabled()
+        self._update_sensorgram_downsampling_button()
+        self._request_trace_autoscale()
+        self._request_deferred_ui_refresh(trace_plot=True, stats=True)
+        self._schedule_acquisition_state_persist()
+
+    def _sensorgram_display_window_label(self, seconds: float | None = None) -> str:
+        current = self._normalize_sensorgram_display_window_s(seconds)
+        if current >= 3600.0:
+            return "Window: 1 h"
+        if current >= 1800.0:
+            return "Window: 30 min"
+        if current >= 600.0:
+            return "Window: 10 min"
+        return "Window: 1 min"
+
+    def _sensorgram_display_window_tooltip(self, seconds: float | None = None) -> str:
+        current = self._normalize_sensorgram_display_window_s(seconds)
+        current_label = self._sensorgram_display_window_label(current).replace("Window: ", "")
+        if current >= 3600.0:
+            next_label = "1 min"
+        elif current >= 1800.0:
+            next_label = "1 h"
+        elif current >= 600.0:
+            next_label = "30 min"
+        else:
+            next_label = "10 min"
+        return f"Current rolling window: {current_label}. Click to cycle to {next_label}."
+
+    def _update_sensorgram_display_window_button(self) -> None:
+        if not hasattr(self, "sensorgram_window_button"):
+            return
+        label = self._sensorgram_display_window_label()
+        self.sensorgram_window_button.setText(f"[{label}]")
+        self.sensorgram_window_button.setToolTip(self._sensorgram_display_window_tooltip())
+        self._update_sensorgram_header_control_visibility()
+
+    def _cycle_sensorgram_display_window(self) -> None:
+        current = self._normalize_sensorgram_display_window_s()
+        window_values = (60.0, 600.0, 1800.0, 3600.0)
+        try:
+            index = window_values.index(current)
+        except ValueError:
+            index = 0
+        self._trace_display_window_s = window_values[(index + 1) % len(window_values)]
+        self._update_sensorgram_display_window_button()
+        self._request_trace_autoscale()
+        self._request_deferred_ui_refresh(trace_plot=True, stats=True)
+        self._schedule_acquisition_state_persist()
 
     def _normalize_sensorgram_content_mode(self, mode: object) -> str:
         normalized = str(mode or "").strip().lower()
