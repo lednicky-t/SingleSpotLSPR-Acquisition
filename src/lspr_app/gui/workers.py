@@ -21,7 +21,7 @@ from lspr_app.domain.processing import (
     processing_debug_mode_enabled,
     set_processing_debug_mode_enabled,
 )
-from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter
+from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter, repack_measurement_hdf5_file
 
 
 @dataclass(slots=True)
@@ -88,6 +88,11 @@ class LiveProcessedEvent:
     produced_at_perf: float | None = None
 
 
+@dataclass(slots=True)
+class MeasurementCompressionResult:
+    path: Path
+
+
 class AcquisitionSignals(QObject):
     finished = pyqtSignal(str, object)
     failed = pyqtSignal(int, str)
@@ -95,6 +100,11 @@ class AcquisitionSignals(QObject):
 
 class ProcessingSignals(QObject):
     finished = pyqtSignal(object)
+
+
+class MeasurementCompressionSignals(QObject):
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
 
 
 class _QueueLogHandler(logging.Handler):
@@ -153,6 +163,25 @@ def _configure_child_logging(log_queue: mp.Queue) -> None:
     queue_handler.setFormatter(logging.Formatter("%(message)s"))
     root.addHandler(queue_handler)
     root.setLevel(logging.DEBUG)
+
+
+class MeasurementCompressionTask(QRunnable):
+    def __init__(self, path: Path) -> None:
+        super().__init__()
+        self._path = Path(path)
+        self.signals = MeasurementCompressionSignals()
+
+    def run(self) -> None:
+        logger = logging.getLogger("lspr_app.measurement_compression")
+        try:
+            logger.info("Measurement file compression started | path=%s", self._path)
+            result_path = repack_measurement_hdf5_file(self._path)
+        except Exception as exc:
+            logger.exception("Measurement file compression failed | path=%s", self._path)
+            self.signals.failed.emit(str(exc))
+            return
+        logger.info("Measurement file compression finished | path=%s", result_path)
+        self.signals.finished.emit(MeasurementCompressionResult(path=result_path))
 
 
 def _apply_temporal_smoothing(

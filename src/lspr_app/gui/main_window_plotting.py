@@ -370,34 +370,41 @@ def build_summary_text_for(window) -> str:
     state = window._session.state
     current = window._current_settings()
     processing = window._current_processing_settings()
+    smoothing_method = str(processing.smoothing_method).replace("_", " ")
+    crop_method = str(getattr(processing, "crop_method", "fixed_width")).replace("_", " ")
+    fit_method = str(getattr(processing, "fit_method", "none")).replace("_", " ")
+    peak_tracking_mode = str(getattr(processing, "peak_tracking_mode", "smoothed_max")).replace("_", " ")
     return "\n".join(
         [
-            f"Source: {'Spectrometer' if window._source_mode == 'spectrometer' else 'Simulation'}",
-            f"Backend: {window._spectrometer.device_name()}",
-            (
-                "Current acquisition: "
-                f"integration {current.integration_time_ms:.3f} ms | "
-                f"accumulation {current.averages} raw_spectra"
-            ),
-            (
-                "Current processing: "
-                f"range {processing.wavelength_min_nm:.2f}-{processing.wavelength_max_nm:.2f} nm | "
-                f"baseline {processing.baseline_method} | "
-                f"spectral smoothing {processing.smoothing_method} ({processing.smoothing_window}) | "
-                f"temporal smoothing {getattr(processing, 'temporal_smoothing', 1)} | "
-                f"crop {getattr(processing, 'crop_method', 'fixed_width')} ({getattr(processing, 'crop_fraction', 0.7):.2f}) | "
-                f"fit {getattr(processing, 'fit_method', 'none')} | "
-                f"poly order {processing.polynomial_order} | "
-                f"fit width {processing.fit_window_width_nm:.0f} nm | "
-                f"analysis step {getattr(processing, 'analysis_resolution_nm', 0.001):.4f} nm | "
-                f"noise window {processing.trace_noise_window_s:.1f} s | "
-                f"peak trace {processing.peak_tracking_mode} | "
-                f"trace metrics {', '.join(processing.trace_metrics)}"
-            ),
-            f"Dark: {window._describe_spectrum(state.dark)}",
-            f"Reference: {window._describe_spectrum(state.reference)}",
-            f"Sample: {window._describe_spectrum(state.sample)}",
-            f"Absorbance: {window._describe_spectrum(state.absorbance)}",
+            "Source",
+            f"  Mode: {'Spectrometer' if window._source_mode == 'spectrometer' else 'Simulation'}",
+            f"  Backend: {window._spectrometer.device_name()}",
+            "",
+            "Acquisition",
+            f"  Integration time: {current.integration_time_ms:.3f} ms",
+            f"  Accumulation: {current.averages} raw_spectra",
+            f"  Correct dark counts: {'yes' if current.correct_dark_counts else 'no'}",
+            f"  Correct nonlinearity: {'yes' if current.correct_nonlinearity else 'no'}",
+            "",
+            "Processing",
+            f"  Range: {processing.wavelength_min_nm:.2f}-{processing.wavelength_max_nm:.2f} nm",
+            f"  Baseline: {processing.baseline_method}",
+            f"  Spectral smoothing: {smoothing_method} ({processing.smoothing_window})",
+            f"  Temporal smoothing: {getattr(processing, 'temporal_smoothing', 1)}",
+            f"  Crop: {crop_method} ({getattr(processing, 'crop_fraction', 0.7):.2f})",
+            f"  Fit: {fit_method}",
+            f"  Polynomial order: {processing.polynomial_order}",
+            f"  Fit width: {processing.fit_window_width_nm:.0f} nm",
+            f"  Analysis step: {getattr(processing, 'analysis_resolution_nm', 0.001):.4f} nm",
+            f"  Noise window: {processing.trace_noise_window_s:.1f} s",
+            f"  Peak trace: {peak_tracking_mode}",
+            f"  Trace metrics: {', '.join(processing.trace_metrics)}",
+            "",
+            "Stored spectra",
+            f"  Dark: {window._describe_spectrum(state.dark)}",
+            f"  Reference: {window._describe_spectrum(state.reference)}",
+            f"  Sample: {window._describe_spectrum(state.sample)}",
+            f"  Absorbance: {window._describe_spectrum(state.absorbance)}",
         ]
     )
 

@@ -45,6 +45,21 @@ def _current_trace_view_state(window) -> tuple[float | None, float | None, float
         return None, None, None
 
 
+def _nearest_sorted_index(values: np.ndarray, target: float) -> int:
+    if len(values) <= 1:
+        return 0
+    index = int(np.searchsorted(values, target))
+    if index <= 0:
+        return 0
+    if index >= len(values):
+        return len(values) - 1
+    left_index = index - 1
+    right_index = index
+    left_distance = abs(float(values[left_index]) - target)
+    right_distance = abs(float(values[right_index]) - target)
+    return right_index if right_distance < left_distance else left_index
+
+
 def _peak_preserving_downsample_indices(y: np.ndarray, target_bins: int) -> np.ndarray:
     if target_bins <= 0 or len(y) == 0:
         return np.empty(0, dtype=np.int64)
@@ -249,6 +264,10 @@ def flush_deferred_ui_refreshes(window) -> None:
         window._update_spectrum_stats(window._last_processed_plot, window._last_fit_plot)
         window._update_trace_stats()
         window._ui_stats_dirty = False
+        did_work = True
+    if window._ui_session_stats_dirty:
+        window._refresh_session_statistics()
+        window._ui_session_stats_dirty = False
         did_work = True
     if did_work:
         window._log_throttled(
@@ -701,7 +720,7 @@ def handle_spectrum_mouse_moved(window, event) -> None:
     if processed is not None and len(processed.wavelengths_nm) > 0:
         wavelengths = np.asarray(processed.wavelengths_nm, dtype=np.float64)
         values = np.asarray(processed.values, dtype=np.float64)
-        index = int(np.argmin(np.abs(wavelengths - x)))
+        index = _nearest_sorted_index(wavelengths, x)
         x = float(wavelengths[index])
         y = float(values[index])
     else:
@@ -739,7 +758,8 @@ def handle_trace_mouse_moved(window, event) -> None:
     for x_values, y_values in window._active_trace_series().values():
         if len(x_values) == 0:
             continue
-        index = int(np.argmin(np.abs(x_values - mouse_x)))
+        x_array = np.asarray(x_values, dtype=np.float64)
+        index = _nearest_sorted_index(x_array, mouse_x)
         candidate_x = float(x_values[index])
         candidate_y = float(y_values[index])
         distance_sq = (candidate_x - mouse_x) ** 2 + (candidate_y - mouse_y) ** 2

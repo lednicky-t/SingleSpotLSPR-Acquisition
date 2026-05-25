@@ -3,6 +3,7 @@
 from PyQt6.QtCore import Qt, QRect
 from PyQt6.QtWidgets import QApplication
 
+from lspr_app.domain.pump_plan import to_core_experiment_plan
 from lspr_app.storage.app_config import save_acquisition_state, save_window_ui_state
 
 
@@ -18,6 +19,7 @@ def restore_ui_state(window) -> None:
     splitter_sizes = ui_state.get("splitter_sizes")
     plot_splitter_sizes = ui_state.get("plot_splitter_sizes")
     sensorgram_header_splitter_sizes = ui_state.get("sensorgram_header_splitter_sizes")
+    session_stats_splitter_sizes = ui_state.get("session_stats_splitter_sizes")
     maximized = ui_state.get("maximized")
     top_view_mode = ui_state.get("top_view_mode")
     sensorgram_view_mode = ui_state.get("sensorgram_view_mode")
@@ -71,6 +73,13 @@ def restore_ui_state(window) -> None:
         and all(isinstance(item, int) and item > 0 for item in sensorgram_header_splitter_sizes)
     ):
         window.sensorgram_header_splitter.setSizes(sensorgram_header_splitter_sizes)
+    if (
+        isinstance(session_stats_splitter_sizes, list)
+        and len(session_stats_splitter_sizes) == 2
+        and all(isinstance(item, int) and item > 0 for item in session_stats_splitter_sizes)
+        and getattr(window, "session_stats_splitter", None) is not None
+    ):
+        window.session_stats_splitter.setSizes(session_stats_splitter_sizes)
     if isinstance(top_view_mode, str) and top_view_mode in {"spectra", "flow"}:
         if top_view_mode == "flow":
             window._activate_flow_view()
@@ -116,6 +125,9 @@ def save_ui_state(window) -> None:
             "splitter_sizes": [int(size) for size in window.left_right_splitter.sizes()],
             "plot_splitter_sizes": [int(size) for size in window.plot_splitter.sizes()],
             "sensorgram_header_splitter_sizes": [int(size) for size in window.sensorgram_header_splitter.sizes()],
+            "session_stats_splitter_sizes": [int(size) for size in window.session_stats_splitter.sizes()]
+            if hasattr(window, "session_stats_splitter") and window.session_stats_splitter is not None
+            else [],
             "top_view_mode": window._top_view_mode,
             "sensorgram_view_mode": window._sensorgram_view_mode,
             "sensorgram_content_mode": window._sensorgram_content_mode,
@@ -161,6 +173,23 @@ def restore_collapsible_section_state(window) -> None:
 def acquisition_state_payload(window) -> dict[str, object]:
     acquisition = window._current_settings()
     simulation = window._simulation_backend.simulation_parameters()
+    experiment_control_payload = (
+        window._experiment_control_window.switch_solution_hdf5_payload()
+        if window._experiment_control_window is not None
+        else {
+            "switch_solution_mode": False,
+            "switch_solution_labels": [f"Solution {index}" for index in range(1, 13)],
+            "switch_solution_rows": [[str(index), f"Solution {index}"] for index in range(1, 13)],
+        }
+    )
+    if window._experiment_control_window is not None:
+        try:
+            experiment_control_payload["experiment_plan"] = to_core_experiment_plan(
+                window._experiment_control_window._read_experiment_control_steps()
+            )
+            experiment_control_payload["plan_rows"] = window._experiment_control_window.current_pump_plan_hdf5_rows()
+        except Exception:
+            pass
     return {
         "source_mode": window._source_mode,
         "plot_mode": window.plot_selector.currentText(),
@@ -183,15 +212,7 @@ def acquisition_state_payload(window) -> dict[str, object]:
             "wavelength_resolution_nm": float(simulation.wavelength_resolution_nm),
             "output_rate_hz": float(window.sim_output_rate_spin.value()),
         },
-        "experiment_control": (
-            window._experiment_control_window.switch_solution_hdf5_payload()
-            if window._experiment_control_window is not None
-            else {
-                "switch_solution_mode": False,
-                "switch_solution_labels": [f"Solution {index}" for index in range(1, 13)],
-                "switch_solution_rows": [[str(index), f"Solution {index}"] for index in range(1, 13)],
-            }
-        ),
+        "experiment_control": experiment_control_payload,
     }
 
 
@@ -202,7 +223,18 @@ def persist_acquisition_state(window) -> None:
     window._acquisition_state = payload
     save_acquisition_state(payload)
     if window._measurement_writer is not None:
-        window._measurement_writer.update_acquisition_state(payload)
+        writer_payload = dict(payload)
+        experiment_control = dict(payload.get("experiment_control", {}))
+        if window._experiment_control_window is not None:
+            try:
+                experiment_control["experiment_plan"] = to_core_experiment_plan(
+                    window._experiment_control_window._read_experiment_control_steps()
+                )
+                experiment_control["plan_rows"] = window._experiment_control_window.current_pump_plan_hdf5_rows()
+            except Exception:
+                pass
+        writer_payload["experiment_control"] = experiment_control
+        window._measurement_writer.update_acquisition_state(writer_payload)
 
 
 def schedule_acquisition_state_persist(window) -> None:

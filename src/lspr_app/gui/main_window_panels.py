@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PyQt6.QtCore import Qt
 
 
 def build_spectrometer_page(window) -> QWidget:
@@ -132,13 +133,16 @@ def build_processing_group(window) -> QGroupBox:
     processing_layout.setVerticalSpacing(8)
 
     range_row = QHBoxLayout()
+    range_row.setContentsMargins(0, 0, 0, 0)
+    range_row.setSpacing(6)
+    range_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
     range_row.addWidget(QLabel("Min"))
     range_row.addWidget(window.range_min_spin)
     range_row.addSpacing(10)
     range_row.addWidget(QLabel("Max"))
     range_row.addWidget(window.range_max_spin)
     range_row.addStretch(1)
-    range_label = QLabel("Range")
+    range_label = QLabel("Range (nm)")
     range_label.setToolTip("Wavelength range used for processing and fits.")
     processing_layout.addRow(range_label, range_row)
 
@@ -151,7 +155,7 @@ def build_processing_group(window) -> QGroupBox:
     smoothing_row.setSpacing(6)
     smoothing_row.addWidget(window.smoothing_method_combo, 1)
     smoothing_row.addWidget(window.smoothing_window_spin)
-    spectral_label = QLabel("Spectral")
+    spectral_label = QLabel("Spectral smooth")
     spectral_label.setToolTip("Spectral smoothing settings.")
     processing_layout.addRow(spectral_label, smoothing_row)
 
@@ -160,7 +164,7 @@ def build_processing_group(window) -> QGroupBox:
     temporal_row.setSpacing(6)
     temporal_row.addWidget(window.temporal_smoothing_spin)
     temporal_row.addStretch(1)
-    temporal_label = QLabel("Temporal")
+    temporal_label = QLabel("Temporal smooth")
     temporal_label.setToolTip("Temporal smoothing of displayed processed spectra.")
     processing_layout.addRow(temporal_label, temporal_row)
 

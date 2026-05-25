@@ -26,6 +26,8 @@ from lspr_app.gui.workers import (
     LiveAcquisitionWorker,
     LiveProcessedEvent,
     LiveProcessingWorker,
+    MeasurementCompressionResult,
+    MeasurementCompressionTask,
 )
 from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter
 
@@ -45,6 +47,45 @@ def _flush_live_processing_logs(window) -> None:
             window._log_event(int(levelno), str(message), source=str(source))
         except Exception:
             continue
+
+
+def _start_measurement_file_compression(window, path: Path) -> None:
+    task = MeasurementCompressionTask(path)
+    task.signals.finished.connect(window._handle_measurement_file_compression_finished)
+    task.signals.failed.connect(window._handle_measurement_file_compression_failed)
+    window._measurement_compression_task = task
+    window._thread_pool.start(task)
+
+
+def _handle_measurement_file_compression_finished(window, result: object) -> None:
+    window._measurement_compression_task = None
+    if not isinstance(result, MeasurementCompressionResult):
+        window._measurement_path = None
+        window.status_label.setText("Measurement stopped.")
+        window._log_warning("Measurement file compression finished with an unexpected result payload.")
+        window._log_success("Measurement recording stopped.")
+        window._refresh_plot()
+        window._refresh_session_summary(force=True)
+        window._update_window_mode_label()
+        return
+    window._measurement_path = None
+    window.status_label.setText("Measurement stopped.")
+    window._log_success("Measurement file compression finished.")
+    window._log_success("Measurement recording stopped.")
+    window._refresh_plot()
+    window._refresh_session_summary(force=True)
+    window._update_window_mode_label()
+
+
+def _handle_measurement_file_compression_failed(window, message: str) -> None:
+    window._measurement_compression_task = None
+    window._measurement_path = None
+    window.status_label.setText("Measurement stopped.")
+    window._log_warning(f"Measurement file compression failed: {message}")
+    window._log_success("Measurement recording stopped.")
+    window._refresh_plot()
+    window._refresh_session_summary(force=True)
+    window._update_window_mode_label()
 
 
 def _archive_live_sample_if_needed(window, spectrum: Spectrum) -> None:
@@ -713,6 +754,12 @@ def start_measurement_run(window) -> None:
             window.experiment_name_edit.setText(experiment_name)
             if hasattr(window, "_remember_recording_experiment_name"):
                 window._remember_recording_experiment_name()
+    original_destination = destination
+    destination = _reserve_unique_measurement_destination(destination)
+    if destination != original_destination:
+        window._log_warning(
+            f"Measurement file already existed; saved as {destination.name} instead of {original_destination.name}."
+        )
     destination.parent.mkdir(parents=True, exist_ok=True)
     started_at = datetime.now(timezone.utc)
     # Recording follows the execution state, but it is not stopped by flow HOLD.
@@ -734,6 +781,9 @@ def start_measurement_run(window) -> None:
     window._measurement_path = destination
     window._measurement_started_at = started_at
     window._measurement_experiment_name = experiment_name
+    window._session_stats_log.clear()
+    window._session_stats_log_last_text = ""
+    window._session_stats_log_last_capture_ts = 0.0
     if window._live_worker is not None and window._live_worker.is_alive():
         window._live_worker.update_archive_context(window._measurement_writer, True, window._measurement_started_at)
     set_measurement_ui_locked(window, True)
@@ -755,6 +805,7 @@ def start_measurement_run(window) -> None:
     window._trace_display_cursor_s = 0.0
     window._live_trace_started_at = None
     window._peak_reference_processed = None
+    window._refresh_session_statistics(force=True)
     set_measurement_buttons_enabled(window, True)
     window.status_label.setText(f"Recording to {destination.name}")
     window._log_success(f"Measurement recording started: {destination.name}.")
@@ -778,6 +829,7 @@ def stop_measurement_run(window) -> None:
         return
     # STOP is the only state that finalizes the recording file.
     started_at = window._measurement_started_at
+    measurement_path = window._measurement_path
     flush_measurement_frames(window, force=True)
     if window._live_worker is not None and window._live_worker.is_alive():
         window._live_worker.update_archive_context(None, False, None)
@@ -786,7 +838,6 @@ def stop_measurement_run(window) -> None:
     window._measurement_writer = None
     window._measurement_active = False
     window._measurement_paused = False
-    window._measurement_path = None
     window._measurement_started_at = None
     window._measurement_axis_lock = None
     set_measurement_ui_locked(window, False)
@@ -812,12 +863,20 @@ def stop_measurement_run(window) -> None:
     window._trace_display_cursor_s = 0.0
     window._live_trace_started_at = None
     window._peak_reference_processed = None
+    window._refresh_session_statistics(force=True)
     set_measurement_buttons_enabled(window, True)
-    window.status_label.setText("Measurement stopped.")
-    window._log_success("Measurement recording stopped.")
-    window._refresh_plot()
-    window._refresh_session_summary(force=True)
-    window._update_window_mode_label()
+    if measurement_path is not None and bool(getattr(window, "measurement_hdf5_compression_enabled", lambda: True)()):
+        window.status_label.setText("Measurement stopped. Compressing file...")
+        window._log_success("Measurement recording stopped. Compressing file...")
+        if hasattr(window, "_start_measurement_file_compression"):
+            window._start_measurement_file_compression(measurement_path)
+    else:
+        window._measurement_path = None
+        window.status_label.setText("Measurement stopped.")
+        window._log_success("Measurement recording stopped.")
+        window._refresh_plot()
+        window._refresh_session_summary(force=True)
+        window._update_window_mode_label()
 
 
 def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | None) -> None:
@@ -912,4 +971,19 @@ def _safe_folder_name(value: str) -> str:
     cleaned = "".join("_" if ch in '<>:"/\\|?*' else ch for ch in str(value).strip())
     cleaned = cleaned.rstrip(" .")
     return cleaned or "experiment"
+
+
+def _reserve_unique_measurement_destination(destination: Path) -> Path:
+    destination = Path(destination).expanduser()
+    if destination.suffix.lower() != ".h5":
+        destination = destination.with_suffix(".h5")
+    if not destination.exists():
+        return destination
+    stem = destination.stem
+    suffix = destination.suffix
+    for index in range(1, 1000):
+        candidate = destination.with_name(f"{stem}_{index:02d}{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError(f"Unable to reserve a unique measurement file name under {destination.parent}")
 

@@ -95,6 +95,7 @@ from lspr_app.gui.icon_helpers import (
     residual_icon,
     flow_tabler_icon,
     snowflake_icon,
+    storage_compression_icon,
     transport_icon,
     tint_tabler_icon,
 )
@@ -171,6 +172,7 @@ from lspr_app.gui.main_window_logging import (
     append_log_record_now,
     clear_log_terminal,
     copy_log_terminal,
+    copy_session_stats_log_for,
     describe_spectrum_for,
     flush_log_buffer,
     log_debug,
@@ -181,6 +183,7 @@ from lspr_app.gui.main_window_logging import (
     log_throttled,
     log_warning,
     refresh_session_summary_for,
+    refresh_session_statistics_for,
     set_log_following,
 )
 from lspr_app.gui.acquisition_controller import (
@@ -395,6 +398,7 @@ class MainWindow(QMainWindow):
         self._measurement_paused = False
         self._measurement_writer: AsyncHDF5MeasurementWriter | None = None
         self._measurement_path: Path | None = None
+        self._measurement_compression_task: MeasurementCompressionTask | None = None
         self._measurement_signal_mode = "absorbance"
         self._measurement_started_at: datetime | None = None
         self._measurement_experiment_name = ""
@@ -467,6 +471,11 @@ class MainWindow(QMainWindow):
         self._recording_blink_visible = True
         self._processing_debug_mode_enabled = bool(load_app_setting("processing_debug_mode", False))
         set_processing_debug_mode_enabled(self._processing_debug_mode_enabled)
+        hdf5_compression_setting = load_app_setting("measurement_hdf5_compression_enabled", True)
+        if isinstance(hdf5_compression_setting, str):
+            self._hdf5_compression_enabled = hdf5_compression_setting.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            self._hdf5_compression_enabled = bool(hdf5_compression_setting)
         self._sensorgram_view_mode = "absolute"
         self._sensorgram_content_mode = "metric"
         self._sensorgram_heatmap_history: list[tuple[float, np.ndarray]] = []
@@ -481,6 +490,7 @@ class MainWindow(QMainWindow):
         self._ui_telemetry_dirty = False
         self._ui_live_estimate_dirty = False
         self._ui_stats_dirty = False
+        self._ui_session_stats_dirty = False
         self._ui_trace_plot_dirty = False
         self._plot_render_dirty = False
         self._visible_processed_plot: Spectrum | None = None
@@ -514,7 +524,15 @@ class MainWindow(QMainWindow):
         self._initial_mswitch_devices: list[object] = []
         self._hardware_init_ready_emitted = False
         self._hardware_status_overrides: dict[str, tuple[bool, str]] = {}
+        self.session_statistics_text: QTextEdit | None = None
+        self.session_settings_text: QTextEdit | None = None
         self.session_summary: QTextEdit | None = None
+        self.session_stats_splitter: QSplitter | None = None
+        self._last_session_stats_text = ""
+        self._last_session_stats_refresh_ts = 0.0
+        self._session_stats_log: list[str] = []
+        self._session_stats_log_last_text = ""
+        self._session_stats_log_last_capture_ts = 0.0
         self._title_bar_widget: QWidget | None = None
         self._title_bar_drag_active = False
         self._title_bar_drag_offset = QPoint(0, 0)
@@ -577,6 +595,14 @@ class MainWindow(QMainWindow):
         self.experiment_name_edit.setToolTip("Experiment folder name and part of the HDF5 file name.")
         self.experiment_name_edit.setFrame(False)
         self.experiment_name_edit.setFixedHeight(24)
+        self.measurement_compression_button = self._make_frameless_icon_button(
+            storage_compression_icon(self._hdf5_compression_enabled),
+            "Enable or disable gzip compression for new HDF5 measurement files.",
+            size=24,
+        )
+        self.measurement_compression_button.setCheckable(True)
+        self.measurement_compression_button.setChecked(self._hdf5_compression_enabled)
+        self.measurement_compression_button.clicked.connect(self._set_measurement_hdf5_compression_enabled)
         self.project_destination_edit.installEventFilter(self)
         self.project_destination_browse_button.clicked.connect(self._open_recording_project_destination_in_explorer)
         self.project_destination_edit.editingFinished.connect(self._remember_recording_project_destination)
@@ -747,9 +773,9 @@ class MainWindow(QMainWindow):
         self.range_max_spin.setToolTip("Maximum wavelength used for processing and fit range.")
 
         self.smoothing_method_combo = QComboBox()
-        self.smoothing_method_combo.addItems(
-            ["none", "moving_average", "savitzky_golay"]
-        )
+        self.smoothing_method_combo.addItem("none", "none")
+        self.smoothing_method_combo.addItem("moving average", "moving_average")
+        self.smoothing_method_combo.addItem("savitzky golay", "savitzky_golay")
         self.smoothing_method_combo.setToolTip("Method used to smooth the spectrum before analysis.")
         self.baseline_method_combo = QComboBox()
         self.baseline_method_combo.addItems(["none", "linear"])
@@ -939,7 +965,7 @@ class MainWindow(QMainWindow):
         self.spectrum_plot.addItem(self.spectrum_hline, ignoreBounds=True)
         self.spectrum_proxy = pg.SignalProxy(
             self.spectrum_plot.scene().sigMouseMoved,
-            rateLimit=60,
+            rateLimit=180,
             slot=self._handle_spectrum_mouse_moved,
         )
 
@@ -972,7 +998,7 @@ class MainWindow(QMainWindow):
         self.trace_plot.addItem(self.trace_hline, ignoreBounds=True)
         self.trace_proxy = pg.SignalProxy(
             self.trace_plot.scene().sigMouseMoved,
-            rateLimit=60,
+            rateLimit=180,
             slot=self._handle_trace_mouse_moved,
         )
         self.trace_plot.getPlotItem().vb.sigRangeChanged.connect(self._handle_trace_view_range_changed)
@@ -980,9 +1006,33 @@ class MainWindow(QMainWindow):
         self._apply_sensorgram_display_style()
         _startup_mark("plot widgets styled")
 
-        self.session_summary = QTextEdit()
-        self.session_summary.setReadOnly(True)
-        self.session_summary.setMaximumHeight(220)
+        session_font = QFont("Consolas", 9)
+
+        self.session_statistics_text = QTextEdit()
+        self.session_statistics_text.setObjectName("sessionStatisticsText")
+        self.session_statistics_text.setReadOnly(True)
+        self.session_statistics_text.setAcceptRichText(False)
+        self.session_statistics_text.setUndoRedoEnabled(False)
+        self.session_statistics_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.session_statistics_text.setFont(session_font)
+        self.session_statistics_text.document().setDefaultFont(session_font)
+        self.session_statistics_text.setToolTip("Live timing and performance statistics. Scroll without the view jumping back to the top.")
+
+        self.session_settings_text = QTextEdit()
+        self.session_settings_text.setObjectName("sessionSettingsText")
+        self.session_settings_text.setReadOnly(True)
+        self.session_settings_text.setAcceptRichText(False)
+        self.session_settings_text.setUndoRedoEnabled(False)
+        self.session_settings_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.session_settings_text.setFont(session_font)
+        self.session_settings_text.document().setDefaultFont(session_font)
+        self.session_settings_text.setToolTip("Current acquisition and processing settings for the active session.")
+
+        self.session_summary = self.session_settings_text
+
+        self.session_stats_copy_button = QPushButton("Copy stats log")
+        self.session_stats_copy_button.setToolTip("Copy the recording-period statistics log to the clipboard.")
+        self.session_stats_copy_button.clicked.connect(self._copy_session_stats_log)
 
         self._apply_control_sizing()
         _startup_mark("control sizing applied")
@@ -1018,6 +1068,8 @@ class MainWindow(QMainWindow):
         self.trace_noise_window_spin.valueChanged.connect(self._handle_processing_setting_change)
         self._update_live_estimate()
         self._refresh_telemetry()
+        self._refresh_session_statistics(force=True)
+        self._refresh_session_summary(force=True)
         self._log_info(
             f"Ready | source={self._source_mode} | backend={self._spectrometer.device_name()}"
         )
@@ -1239,11 +1291,54 @@ class MainWindow(QMainWindow):
 
         source_section = CollapsibleSection("Light source", source_block, expanded=True)
         processing_section = CollapsibleSection("Processing", processing_group, expanded=False)
+        session_stats_header = QHBoxLayout()
+        session_stats_header.setContentsMargins(0, 0, 0, 0)
+        session_stats_header.setSpacing(6)
+        session_stats_title = QLabel("Statistics")
+        session_stats_title.setStyleSheet("font-size: 13px; font-weight: 800; letter-spacing: 0.8px; color: #5b6775;")
+        session_stats_header.addWidget(session_stats_title)
+        session_stats_header.addStretch(1)
+        session_stats_header.addWidget(self.session_stats_copy_button)
+        session_stats_header_widget = QWidget()
+        session_stats_header_widget.setLayout(session_stats_header)
+
+        session_stats_block = QWidget()
+        session_stats_layout = QVBoxLayout()
+        session_stats_layout.setContentsMargins(0, 0, 0, 0)
+        session_stats_layout.setSpacing(4)
+        session_stats_layout.addWidget(session_stats_header_widget)
+        session_stats_layout.addWidget(self.session_statistics_text)
+        session_stats_block.setLayout(session_stats_layout)
+
+        session_settings_header = QLabel("Settings")
+        session_settings_header.setStyleSheet("font-size: 13px; font-weight: 800; letter-spacing: 0.8px; color: #5b6775;")
+        session_settings_header.setToolTip("Current acquisition and processing parameters.")
+
+        session_settings_block = QWidget()
+        session_settings_layout = QVBoxLayout()
+        session_settings_layout.setContentsMargins(0, 0, 0, 0)
+        session_settings_layout.setSpacing(4)
+        session_settings_layout.addWidget(session_settings_header)
+        session_settings_layout.addWidget(self.session_settings_text)
+        session_settings_block.setLayout(session_settings_layout)
+
+        session_splitter = CompactSplitter(Qt.Orientation.Vertical)
+        session_splitter.setObjectName("sessionStatsSplitter")
+        session_splitter.setChildrenCollapsible(False)
+        session_splitter.setOpaqueResize(True)
+        session_splitter.setHandleWidth(10)
+        session_splitter.addWidget(session_stats_block)
+        session_splitter.addWidget(session_settings_block)
+        session_splitter.setStretchFactor(0, 1)
+        session_splitter.setStretchFactor(1, 1)
+        session_splitter.setSizes([220, 220])
+        self.session_stats_splitter = session_splitter
+
         session_block = QWidget()
         session_layout = QVBoxLayout()
         session_layout.setContentsMargins(0, 0, 0, 0)
         session_layout.setSpacing(4)
-        session_layout.addWidget(self.session_summary)
+        session_layout.addWidget(session_splitter)
         session_block.setLayout(session_layout)
         session_section = CollapsibleSection("Session", session_block, expanded=False)
 
@@ -1379,6 +1474,8 @@ class MainWindow(QMainWindow):
         controls_row.addSpacing(6)
         controls_row.addWidget(experiment_label)
         controls_row.addWidget(self.experiment_name_edit, 2)
+        controls_row.addSpacing(4)
+        controls_row.addWidget(self.measurement_compression_button)
         layout.addLayout(controls_row)
         panel.setLayout(layout)
         panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -1395,6 +1492,7 @@ class MainWindow(QMainWindow):
         self.project_destination_edit.setEnabled(enabled)
         self.project_destination_browse_button.setEnabled(enabled)
         self.experiment_name_edit.setEnabled(enabled)
+        self.measurement_compression_button.setEnabled(enabled)
 
     def _choose_recording_project_destination(self) -> None:
         current = self.recording_project_destination()
@@ -1419,6 +1517,22 @@ class MainWindow(QMainWindow):
 
     def _remember_recording_experiment_name(self) -> None:
         save_app_setting("recording_experiment_name", self.recording_experiment_name())
+
+    def measurement_hdf5_compression_enabled(self) -> bool:
+        return bool(self._hdf5_compression_enabled)
+
+    def _set_measurement_hdf5_compression_enabled(self, enabled: bool) -> None:
+        self._hdf5_compression_enabled = bool(enabled)
+        save_app_setting("measurement_hdf5_compression_enabled", self._hdf5_compression_enabled)
+        if hasattr(self, "measurement_compression_button"):
+            self.measurement_compression_button.blockSignals(True)
+            self.measurement_compression_button.setChecked(self._hdf5_compression_enabled)
+            self.measurement_compression_button.blockSignals(False)
+            self.measurement_compression_button.setIcon(
+                storage_compression_icon(self._hdf5_compression_enabled)
+            )
+        state_text = "enabled" if self._hdf5_compression_enabled else "disabled"
+        self._log_info(f"HDF5 compression {state_text}.")
 
     def _set_status_indicator(
         self,
@@ -1759,6 +1873,14 @@ class MainWindow(QMainWindow):
                 padding: 4px;
                 color: %(fg)s;
                 border-radius: 10px;
+            }
+            QTextEdit#sessionStatisticsText,
+            QTextEdit#sessionSettingsText {
+                padding: 4px;
+                color: %(fg)s;
+                border-radius: 10px;
+                background: %(field)s;
+                border: 1px solid %(border)s;
             }
             QCheckBox {
                 spacing: 6px;
@@ -2242,6 +2364,9 @@ class MainWindow(QMainWindow):
         self._top_view_mode = "flow"
         self._sync_view_actions()
 
+    def _activate_experiment_control_view(self) -> None:
+        self._activate_flow_view()
+
     def _toggle_left_controls(self, checked: bool | None = None) -> None:
         visible = self._left_controls_scroll.isVisible() if checked is None else bool(checked)
         self._left_controls_scroll.setVisible(visible)
@@ -2381,6 +2506,12 @@ class MainWindow(QMainWindow):
             combo.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
             combo.setMinimumContentsLength(1)
             combo.view().setTextElideMode(Qt.TextElideMode.ElideRight)
+
+        range_width = max(self.range_min_spin.sizeHint().width(), self.range_max_spin.sizeHint().width())
+        self.range_min_spin.setMinimumWidth(range_width)
+        self.range_max_spin.setMinimumWidth(range_width)
+        self.smoothing_window_spin.setMinimumWidth(range_width)
+        self.smoothing_method_combo.setMinimumWidth(range_width * 2)
 
         for button in (
             self.measurement_toggle_button,
@@ -2664,6 +2795,21 @@ class MainWindow(QMainWindow):
     def _stop_measurement_run(self) -> None:
         stop_measurement_run(self)
 
+    def _start_measurement_file_compression(self, path: Path) -> None:
+        from lspr_app.gui.acquisition_controller import _start_measurement_file_compression
+
+        _start_measurement_file_compression(self, path)
+
+    def _handle_measurement_file_compression_finished(self, result: object) -> None:
+        from lspr_app.gui.acquisition_controller import _handle_measurement_file_compression_finished
+
+        _handle_measurement_file_compression_finished(self, result)
+
+    def _handle_measurement_file_compression_failed(self, message: str) -> None:
+        from lspr_app.gui.acquisition_controller import _handle_measurement_file_compression_failed
+
+        _handle_measurement_file_compression_failed(self, message)
+
     def _append_processed_trace_history(self, processed: Spectrum, fit: Spectrum | None) -> None:
         append_processed_trace_history(self, processed, fit)
 
@@ -2734,6 +2880,12 @@ class MainWindow(QMainWindow):
 
     def _refresh_session_summary(self, force: bool = False) -> None:
         refresh_session_summary_for(self, force=force)
+
+    def _refresh_session_statistics(self, force: bool = False) -> None:
+        refresh_session_statistics_for(self, force=force)
+
+    def _copy_session_stats_log(self) -> None:
+        copy_session_stats_log_for(self)
 
     def _hardware_init_steps(self) -> list[HardwareInitStep]:
         return [
@@ -3216,6 +3368,7 @@ class MainWindow(QMainWindow):
         summary: bool = False,
         telemetry: bool = False,
         live_estimate: bool = False,
+        session_stats: bool = False,
         trace_label: str | None = None,
     ) -> None:
         if stats:
@@ -3228,6 +3381,8 @@ class MainWindow(QMainWindow):
             self._ui_telemetry_dirty = True
         if live_estimate:
             self._ui_live_estimate_dirty = True
+        if session_stats or stats or trace_plot or summary or telemetry or live_estimate or trace_label is not None:
+            self._ui_session_stats_dirty = True
         if trace_label is not None:
             self._pending_trace_label = trace_label
         delay_ms = self._live_ui_refresh_delay_ms if self._live_active else self._stats_refresh_delay_ms

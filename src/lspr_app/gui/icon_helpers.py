@@ -52,6 +52,11 @@ def math_function_tab_icon(color: QColor | None = None) -> QIcon:
         return tint_tabler_icon(tabler_icon("math"), tint)
 
 
+def storage_compression_icon(active: bool) -> QIcon:
+    tint = QColor("#2f80c1" if active else "#8a98a8")
+    return tint_tabler_icon(flow_tabler_icon("archive", "database", "box"), tint)
+
+
 __all__ = [
     "bulb_icon",
     "dark_icon",
@@ -63,6 +68,7 @@ __all__ = [
     "reference_icon",
     "residual_icon",
     "snowflake_icon",
+    "storage_compression_icon",
     "tabler_icon",
     "tint_tabler_icon",
     "transport_icon",

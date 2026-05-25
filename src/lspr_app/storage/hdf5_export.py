@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import threading
+import tempfile
 from pathlib import Path
 from time import monotonic
 from datetime import datetime, timezone
@@ -14,6 +16,7 @@ from lspr_core import ExperimentPlan
 from lspr_io import (
     LSPR_EXPERIMENT_PLAN_DATASET_NAME,
     LSPR_EXPERIMENT_PLAN_TMP_DATASET_NAME,
+    LSPR_MEASUREMENT_FLOW_EVENTS_DATASET_NAME,
     LSPR_MEASUREMENT_FLOW_STATE_COLUMNS,
     LSPR_MEASUREMENT_PEAK_COLUMNS,
     LSPR_MEASUREMENT_PLAN_COLUMNS,
@@ -23,11 +26,83 @@ from lspr_io import (
     LSPR_SESSION_SCHEMA_VERSION,
     standard_measurement_metadata,
     standard_session_identity,
+    write_measurement_manifest_metadata,
     write_measurement_root_metadata,
     write_session_metadata,
 )
 from lspr_app.domain.models import ProcessingSettings, Spectrum
 from lspr_app.domain.pump_plan import to_core_experiment_plan
+
+
+def repack_measurement_hdf5_file(source_path: Path) -> Path:
+    source_path = Path(source_path)
+    if not source_path.exists():
+        raise FileNotFoundError(source_path)
+
+    temp_dir = source_path.parent
+    temp_handle = tempfile.NamedTemporaryFile(
+        mode="wb",
+        suffix=".tmp",
+        prefix=f".{source_path.stem}.gzip-",
+        dir=temp_dir,
+        delete=False,
+    )
+    temp_handle.close()
+    temp_path = Path(temp_handle.name)
+
+    try:
+        with h5py.File(source_path, "r") as source_handle, h5py.File(temp_path, "w") as destination_handle:
+            _copy_hdf5_node(source_handle, destination_handle, compression="gzip")
+            destination_handle.attrs["hdf5_compression_enabled"] = np.bool_(True)
+            destination_handle.attrs["hdf5_compression_filter"] = "gzip"
+            if "metadata" in destination_handle:
+                destination_handle["metadata"].attrs["hdf5_compression_enabled"] = np.bool_(True)
+                destination_handle["metadata"].attrs["hdf5_compression_filter"] = "gzip"
+            destination_handle.flush()
+        os.replace(temp_path, source_path)
+    except Exception:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except Exception:
+            pass
+        raise
+    return source_path
+
+
+def _copy_hdf5_node(source_node, destination_node, *, compression: str | None = None) -> None:
+    destination_node.attrs.update(source_node.attrs)
+    for name, item in source_node.items():
+        if isinstance(item, h5py.Group):
+            child = destination_node.create_group(name)
+            _copy_hdf5_node(item, child, compression=compression)
+            continue
+        _copy_hdf5_dataset(item, destination_node, name, compression=compression)
+
+
+def _copy_hdf5_dataset(source_dataset, destination_parent, name: str, *, compression: str | None = None) -> None:
+    create_kwargs: dict[str, object] = {}
+    if source_dataset.ndim > 0:
+        create_kwargs["chunks"] = source_dataset.chunks or True
+        if compression is not None:
+            create_kwargs["compression"] = compression
+            if compression == "gzip":
+                create_kwargs["compression_opts"] = 4
+            if np.issubdtype(source_dataset.dtype, np.number):
+                create_kwargs["shuffle"] = True
+    destination_dataset = destination_parent.create_dataset(
+        name,
+        shape=source_dataset.shape,
+        maxshape=source_dataset.maxshape,
+        dtype=source_dataset.dtype,
+        fillvalue=source_dataset.fillvalue,
+        **create_kwargs,
+    )
+    if source_dataset.ndim == 0:
+        destination_dataset[...] = source_dataset[()]
+    elif source_dataset.size:
+        destination_dataset[...] = source_dataset[...]
+    destination_dataset.attrs.update(source_dataset.attrs)
 
 
 class HDF5MeasurementWriter:
@@ -39,11 +114,21 @@ class HDF5MeasurementWriter:
         processing: ProcessingSettings,
         experiment_name: str = "",
         started_at_utc: datetime | None = None,
+        *,
+        compression_enabled: bool = False,
     ) -> None:
         self.path = path
         self.signal_kind = signal_kind
         self._wavelengths_nm = np.asarray(wavelengths_nm, dtype=np.float64)
         self._started_at_utc = started_at_utc or datetime.now(timezone.utc)
+        self._compression_enabled = bool(compression_enabled)
+        self._compression_kwargs: dict[str, object] = {}
+        if self._compression_enabled:
+            self._compression_kwargs = {
+                "compression": "gzip",
+                "compression_opts": 4,
+                "shuffle": True,
+            }
         self._dark_index = -1
         self._reference_index = -1
         self._last_dark_key: tuple[object, ...] | None = None
@@ -59,12 +144,30 @@ class HDF5MeasurementWriter:
                 experiment_name=experiment_name,
             ),
         )
+        self._manifest = self._handle.create_group("manifest")
+        write_measurement_manifest_metadata(
+            self._manifest,
+            **standard_measurement_metadata(
+                created_by="LSPR Acquisition",
+                started_at_utc=self._started_at_utc,
+                app_name="LSPR Acquisition",
+                app_version="0.1.0",
+                experiment_name=experiment_name,
+            ),
+            storage_compression_enabled=self._compression_enabled,
+            storage_compression_filter="gzip" if self._compression_enabled else "none",
+            storage_compression_level=4 if self._compression_enabled else 0,
+            extra_attrs={
+                "manifest_kind": "measurement",
+            },
+        )
         self._data = self._handle.create_group("data")
         self._metadata = self._handle.create_group("metadata")
+        self._plans = self._handle.create_group("plans")
+        self._runs = self._handle.create_group("runs")
         self._axes = self._handle.create_group("axes")
         self._spectra = self._handle.create_group("spectra")
         self._processed = self._handle.create_group("processed")
-        self._flow = self._handle.create_group("flow")
         self._devices = self._handle.create_group("devices")
         self._session_identity = standard_session_identity(app_name="LSPR Acquisition", app_version="0.1.0")
         write_session_metadata(
@@ -78,11 +181,17 @@ class HDF5MeasurementWriter:
                 "experiment_name": str(experiment_name or ""),
             },
         )
+        self._handle.attrs["storage_compression_enabled"] = self._compression_enabled
+        self._handle.attrs["storage_compression_filter"] = "gzip" if self._compression_enabled else "none"
+        self._handle.attrs["storage_compression_level"] = 4 if self._compression_enabled else 0
+        self._metadata.attrs["storage_compression_enabled"] = self._compression_enabled
+        self._metadata.attrs["storage_compression_filter"] = "gzip" if self._compression_enabled else "none"
+        self._metadata.attrs["storage_compression_level"] = 4 if self._compression_enabled else 0
         self._write_processing_metadata(processing)
 
-        ds = self._data.create_dataset("wavelengths", data=self._wavelengths_nm)
+        ds = self._data.create_dataset("wavelengths", data=self._wavelengths_nm, **self._compression_kwargs)
         ds.attrs["columns"] = _string_array(LSPR_MEASUREMENT_SPECTRUM_COLUMNS)
-        axis_ds = self._axes.create_dataset("wavelengths_nm", data=self._wavelengths_nm)
+        axis_ds = self._axes.create_dataset("wavelengths_nm", data=self._wavelengths_nm, **self._compression_kwargs)
         axis_ds.attrs["units"] = "nm"
         axis_ds.attrs["description"] = "Wavelength axis shared by spectra matrices."
         axis_ds.attrs["schema_version_added"] = "3.0"
@@ -91,7 +200,7 @@ class HDF5MeasurementWriter:
         self._dark_group = self._create_spectrum_group("dark")
         self._reference_group = self._create_spectrum_group("reference")
         self._metrics_group = self._create_metrics_group()
-        self._flow_state = self._create_flow_state_dataset()
+        self._flow_events = self._create_flow_state_dataset()
 
         self._raw = self._data.create_dataset(
             "raw_spectra_extinction",
@@ -99,6 +208,7 @@ class HDF5MeasurementWriter:
             maxshape=(None, len(self._wavelengths_nm)),
             dtype=np.float32,
             chunks=True,
+            **self._compression_kwargs,
         )
         self._raw.attrs["signal_type"] = signal_kind
         self._time = self._data.create_dataset(
@@ -107,6 +217,7 @@ class HDF5MeasurementWriter:
             maxshape=(None,),
             dtype=np.float64,
             chunks=True,
+            **self._compression_kwargs,
         )
         self._time.attrs["columns"] = _string_array(LSPR_MEASUREMENT_TIME_COLUMNS)
         self._time.attrs["prepend_zero"] = np.True_
@@ -116,15 +227,13 @@ class HDF5MeasurementWriter:
             maxshape=(None,),
             dtype=np.float64,
             chunks=True,
+            **self._compression_kwargs,
         )
         self._peak.attrs["columns"] = _string_array(LSPR_MEASUREMENT_PEAK_COLUMNS)
 
         columns = list(LSPR_MEASUREMENT_PLAN_COLUMNS)
-        empty = np.empty((0, len(columns)), dtype=h5py.string_dtype(encoding="utf-8"))
-        ds = self._metadata.create_dataset(LSPR_EXPERIMENT_PLAN_DATASET_NAME, data=empty)
-        ds.attrs["columns"] = _string_array(columns)
-        ds = self._metadata.create_dataset(LSPR_EXPERIMENT_PLAN_TMP_DATASET_NAME, data=empty)
-        ds.attrs["columns"] = _string_array(columns)
+        self._plan_table_columns = columns
+        self._write_plan_tables([])
         self._metadata.attrs["schema_name"] = LSPR_SESSION_SCHEMA_NAME
         self._metadata.attrs["schema_version"] = LSPR_SESSION_SCHEMA_VERSION
         self._metadata.attrs["app_name"] = "LSPR Acquisition"
@@ -137,6 +246,7 @@ class HDF5MeasurementWriter:
             maxshape=(None, len(switch_columns)),
             dtype=h5py.string_dtype(encoding="utf-8"),
             chunks=True,
+            **self._compression_kwargs,
         )
         ds.attrs["columns"] = _string_array(switch_columns)
 
@@ -147,6 +257,10 @@ class HDF5MeasurementWriter:
         self._write_acquisition_state_metadata(state)
         self._write_switch_solution_metadata(state)
         plan = state.get("experiment_plan")
+        if plan is None:
+            experiment_control = state.get("experiment_control")
+            if isinstance(experiment_control, dict):
+                plan = experiment_control.get("experiment_plan")
         if plan is not None:
             try:
                 if isinstance(plan, ExperimentPlan):
@@ -156,6 +270,7 @@ class HDF5MeasurementWriter:
                 write_session_metadata(self._metadata, identity=self._session_identity, experiment_plan=core_plan)
             except Exception:
                 pass
+        self._write_plan_tables_from_state(state)
 
     def update_baselines(self, dark: Spectrum | None, reference: Spectrum | None) -> None:
         if dark is not None:
@@ -214,15 +329,16 @@ class HDF5MeasurementWriter:
             return
         columns = [
             column.decode("utf-8") if isinstance(column, bytes) else str(column)
-            for column in self._flow_state.attrs["columns"]
+            for column in self._flow_events.attrs["columns"]
         ]
-        start = self._flow_state.shape[0]
+        start = self._flow_events.shape[0]
         end = start + len(rows)
-        self._flow_state.resize((end, len(columns)))
+        self._flow_events.resize((end, len(columns)))
         table = []
         for row in rows:
             table.append([str(row.get(column, "")) for column in columns])
-        self._flow_state[start:end, :] = np.asarray(table, dtype=h5py.string_dtype(encoding="utf-8"))
+        table_array = np.asarray(table, dtype=h5py.string_dtype(encoding="utf-8"))
+        self._flow_events[start:end, :] = table_array
 
     def flush(self) -> None:
         self._handle.flush()
@@ -241,22 +357,31 @@ class HDF5MeasurementWriter:
 
     def _create_spectrum_group(self, name: str, *, include_baseline_indices: bool = False):
         group = self._spectra.create_group(name)
-        group.create_dataset("t_ms", shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True)
-        group.create_dataset("acquired_at_unix_ms", shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True)
+        group.create_dataset("t_ms", shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True, **self._compression_kwargs)
+        group.create_dataset(
+            "acquired_at_unix_ms", shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True, **self._compression_kwargs
+        )
         group.create_dataset(
             "intensity",
             shape=(0, len(self._wavelengths_nm)),
             maxshape=(None, len(self._wavelengths_nm)),
             dtype=np.float32,
             chunks=True,
+            **self._compression_kwargs,
         )
-        group.create_dataset("integration_time_ms", shape=(0,), maxshape=(None,), dtype=np.float32, chunks=True)
-        group.create_dataset("averages", shape=(0,), maxshape=(None,), dtype=np.int32, chunks=True)
-        group.create_dataset("source_epoch", shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True)
-        group.create_dataset("flags", shape=(0,), maxshape=(None,), dtype=np.uint32, chunks=True)
+        group.create_dataset(
+            "integration_time_ms", shape=(0,), maxshape=(None,), dtype=np.float32, chunks=True, **self._compression_kwargs
+        )
+        group.create_dataset("averages", shape=(0,), maxshape=(None,), dtype=np.int32, chunks=True, **self._compression_kwargs)
+        group.create_dataset("source_epoch", shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True, **self._compression_kwargs)
+        group.create_dataset("flags", shape=(0,), maxshape=(None,), dtype=np.uint32, chunks=True, **self._compression_kwargs)
         if include_baseline_indices:
-            group.create_dataset("dark_index", shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True)
-            group.create_dataset("reference_index", shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True)
+            group.create_dataset(
+                "dark_index", shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True, **self._compression_kwargs
+            )
+            group.create_dataset(
+                "reference_index", shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True, **self._compression_kwargs
+            )
         return group
 
     def _create_metrics_group(self):
@@ -272,18 +397,19 @@ class HDF5MeasurementWriter:
             ("mse", np.float64),
             ("snr", np.float64),
         ):
-            ds = group.create_dataset(name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=True)
+            ds = group.create_dataset(name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=True, **self._compression_kwargs)
             ds.attrs["schema_version_added"] = "3.0"
         return group
 
     def _create_flow_state_dataset(self):
         columns = list(LSPR_MEASUREMENT_FLOW_STATE_COLUMNS)
-        ds = self._flow.create_dataset(
-            "state",
+        ds = self._runs.create_dataset(
+            LSPR_MEASUREMENT_FLOW_EVENTS_DATASET_NAME,
             shape=(0, len(columns)),
             maxshape=(None, len(columns)),
             dtype=h5py.string_dtype(encoding="utf-8"),
             chunks=True,
+            **self._compression_kwargs,
         )
         ds.attrs["columns"] = _string_array(columns)
         ds.attrs["schema_version_added"] = "3.0"
@@ -345,7 +471,10 @@ class HDF5MeasurementWriter:
         )
 
     def _upsert_table(self, group, name: str, rows: list[list[str]], columns: list[str]) -> None:
-        table = np.asarray(rows, dtype=h5py.string_dtype(encoding="utf-8"))
+        if rows:
+            table = np.asarray(rows, dtype=h5py.string_dtype(encoding="utf-8"))
+        else:
+            table = np.empty((0, len(columns)), dtype=h5py.string_dtype(encoding="utf-8"))
         if name in group:
             dataset = group[name]
             needs_recreate = dataset.chunks is None or dataset.shape != table.shape or dataset.ndim != table.ndim
@@ -357,6 +486,7 @@ class HDF5MeasurementWriter:
                     maxshape=(None, table.shape[1] if table.ndim > 1 else None),
                     dtype=table.dtype,
                     chunks=True,
+                    **self._compression_kwargs,
                 )
             elif dataset.shape != table.shape:
                 dataset.resize(table.shape)
@@ -368,6 +498,7 @@ class HDF5MeasurementWriter:
             data=table,
             maxshape=(None, table.shape[1] if table.ndim == 2 else 0),
             chunks=True,
+            **self._compression_kwargs,
         )
         ds.attrs["columns"] = _string_array(columns)
 
@@ -445,6 +576,38 @@ class HDF5MeasurementWriter:
                     cleaned_rows,
                     ["switch_port", "solution_label"],
                 )
+                self._upsert_table(
+                    self._plans,
+                    "switch_solution_map",
+                    cleaned_rows,
+                    ["switch_port", "solution_label"],
+                )
+
+    def _plan_rows_from_state(self, state: dict[str, object]) -> list[list[str]]:
+        experiment_control = state.get("experiment_control")
+        if not isinstance(experiment_control, dict):
+            return []
+        rows = experiment_control.get("plan_rows")
+        if not isinstance(rows, list):
+            return []
+        cleaned_rows: list[list[str]] = []
+        for row in rows:
+            if not isinstance(row, list):
+                continue
+            cleaned_rows.append([str(cell) for cell in row[: len(self._plan_table_columns)]])
+        return cleaned_rows
+
+    def _write_plan_tables_from_state(self, state: dict[str, object]) -> None:
+        rows = self._plan_rows_from_state(state)
+        if not rows:
+            return
+        self._write_plan_tables(rows)
+
+    def _write_plan_tables(self, rows: list[list[str]]) -> None:
+        self._upsert_table(self._metadata, LSPR_EXPERIMENT_PLAN_DATASET_NAME, rows, self._plan_table_columns)
+        self._upsert_table(self._metadata, LSPR_EXPERIMENT_PLAN_TMP_DATASET_NAME, rows, self._plan_table_columns)
+        self._upsert_table(self._plans, LSPR_EXPERIMENT_PLAN_DATASET_NAME, rows, self._plan_table_columns)
+        self._upsert_table(self._plans, LSPR_EXPERIMENT_PLAN_TMP_DATASET_NAME, rows, self._plan_table_columns)
 
 
 class AsyncHDF5MeasurementWriter:
@@ -458,6 +621,7 @@ class AsyncHDF5MeasurementWriter:
         started_at_utc: datetime | None = None,
         *,
         flush_interval_s: float = 2.0,
+        compression_enabled: bool = False,
     ) -> None:
         self._path = path
         self._signal_kind = signal_kind
@@ -465,6 +629,7 @@ class AsyncHDF5MeasurementWriter:
         self._processing = processing
         self._experiment_name = str(experiment_name or "")
         self._started_at_utc = started_at_utc or datetime.now(timezone.utc)
+        self._compression_enabled = bool(compression_enabled)
         self._dark: Spectrum | None = None
         self._reference: Spectrum | None = None
         self._acquisition_state: dict[str, object] | None = None
@@ -535,6 +700,7 @@ class AsyncHDF5MeasurementWriter:
             self._processing,
             self._experiment_name,
             self._started_at_utc,
+            compression_enabled=self._compression_enabled,
         )
         pending_spectra: list[Spectrum] = []
         pending_times: list[float] = []

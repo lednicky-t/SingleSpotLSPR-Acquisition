@@ -57,6 +57,9 @@ attrs["app_version"] = "<application version>"
 attrs["created_by"] = "LSPR Acquisition"
 attrs["created_at_utc"] = "YYYY-MM-DDTHH:MM:SS.sssZ"
 attrs["started_at_utc"] = "YYYY-MM-DDTHH:MM:SS.sssZ"
+attrs["storage_compression_enabled"] = true|false
+attrs["storage_compression_filter"] = "gzip"|"none"
+attrs["storage_compression_level"] = 0..9
 ```
 
 Compatibility rules:
@@ -72,20 +75,31 @@ Recommended manifest group:
 
 ```text
 /manifest
+  manifest_kind
   schema_name
   schema_version
   schema_major
   schema_minor
   format_name
+  format_version
+  app_name
   app_version
   created_by
   created_at_utc
   started_at_utc
   export_host
   export_user
+  storage_compression_enabled
+  storage_compression_filter
+  storage_compression_level
 ```
 
 The root attributes are the fast compatibility check. The manifest group is the human-readable summary that can hold extra exporter details later.
+
+Exporter-side compression is optional and does not change the logical schema. When enabled, appendable datasets should remain chunked and use a standard HDF5 compression filter such as gzip.
+
+Reader-side validation should check the root schema first, then optionally inspect `/manifest` for exporter details, compression metadata, and warnings about older or newer minor versions.
+The `/manifest` group should be human-readable and may be omitted by legacy files, but new exporters should populate it for easier inspection and migration tooling.
 
 Dataset-level additions should include:
 
@@ -152,6 +166,11 @@ Recommended semantic split:
 - `raw`: append-only raw spectra and baselines
 - `processed`: derived spectra, metrics, and provenance
 - `events`: human-readable event log
+
+Current exporters keep compatibility copies of the authored plan under `metadata/experiment_plan`
+while writing the canonical data to `/plans` and the runtime flow events to `/runs/flow_events`.
+Legacy files may still contain `flow/state`, but new exports should prefer `runs/flow_events`.
+Readers should prefer the canonical locations and treat the legacy copies as migration support.
 
 ## Axes
 
@@ -309,7 +328,7 @@ Recommended groups:
 
 ```text
 /runs/executed_sequence
-/runs/flow_state
+/runs/flow_events
 /runs/device_events
 /runs/recording_events
 ```

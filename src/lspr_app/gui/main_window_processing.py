@@ -7,6 +7,31 @@ from PyQt6.QtWidgets import QFileDialog
 from lspr_app.domain.models import ProcessingSettings
 from lspr_app.storage.app_config import DEFAULT_CONFIG_PATH, load_processing_settings, save_processing_settings
 
+SMOOTHING_METHOD_LABELS = {
+    "none": "none",
+    "moving_average": "moving average",
+    "savitzky_golay": "savitzky golay",
+}
+
+def _combo_value(combo) -> str:
+    value = combo.currentData()
+    if value is None or value == "":
+        return combo.currentText()
+    return str(value)
+
+
+def _set_combo_value(combo, value: str, *, fallback: str | None = None) -> None:
+    index = combo.findData(value)
+    if index >= 0:
+        combo.setCurrentIndex(index)
+        return
+    if fallback is not None:
+        index = combo.findText(fallback)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+            return
+    combo.setCurrentText(value)
+
 
 def current_processing_settings(window) -> ProcessingSettings:
     low = min(window.range_min_spin.value(), window.range_max_spin.value())
@@ -15,7 +40,7 @@ def current_processing_settings(window) -> ProcessingSettings:
         wavelength_min_nm=low,
         wavelength_max_nm=high,
         baseline_method=window.baseline_method_combo.currentText(),
-        smoothing_method=window.smoothing_method_combo.currentText(),
+        smoothing_method=_combo_value(window.smoothing_method_combo),
         smoothing_window=window.smoothing_window_spin.value(),
         temporal_smoothing=window.temporal_smoothing_spin.value(),
         crop_method=window.crop_method_combo.currentText(),
@@ -48,7 +73,11 @@ def apply_processing_settings_to_widgets(window, settings: ProcessingSettings) -
     window.range_min_spin.setValue(int(round(settings.wavelength_min_nm)))
     window.range_max_spin.setValue(int(round(settings.wavelength_max_nm)))
     window.baseline_method_combo.setCurrentText(settings.baseline_method)
-    window.smoothing_method_combo.setCurrentText(settings.smoothing_method)
+    _set_combo_value(
+        window.smoothing_method_combo,
+        settings.smoothing_method,
+        fallback=SMOOTHING_METHOD_LABELS.get(settings.smoothing_method, settings.smoothing_method),
+    )
     window.smoothing_window_spin.setValue(settings.smoothing_window)
     window.temporal_smoothing_spin.setValue(getattr(settings, "temporal_smoothing", 1))
     crop_method = getattr(settings, "crop_method", "fixed_width")
