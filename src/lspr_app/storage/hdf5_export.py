@@ -340,6 +340,9 @@ class HDF5MeasurementWriter:
         table_array = np.asarray(table, dtype=h5py.string_dtype(encoding="utf-8"))
         self._flow_events[start:end, :] = table_array
 
+    def append_device_state(self, row: dict[str, object]) -> None:
+        self.append_flow_state([row])
+
     def flush(self) -> None:
         self._handle.flush()
 
@@ -678,6 +681,11 @@ class AsyncHDF5MeasurementWriter:
             return
         self._queue.put(("flow_state", row))
 
+    def append_device_state(self, row: dict[str, object]) -> None:
+        if self._closed:
+            return
+        self._queue.put(("device_state", row))
+
     def flush(self) -> None:
         if self._closed:
             return
@@ -734,6 +742,8 @@ class AsyncHDF5MeasurementWriter:
                     writer.append_metrics(payload)
                 elif kind == "flow_state" and isinstance(payload, dict):
                     writer.append_flow_state([payload])
+                elif kind == "device_state" and isinstance(payload, dict):
+                    writer.append_device_state(payload)
                 elif kind == "flush":
                     if pending_spectra:
                         writer.append_batch(pending_spectra, pending_times, pending_peaks)

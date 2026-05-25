@@ -10,6 +10,11 @@ from datetime import datetime, timedelta
 from time import monotonic, perf_counter
 
 try:
+    import h5py
+except ImportError:  # pragma: no cover - optional dependency guard
+    h5py = None
+
+try:
     import yaml
 except ImportError:  # pragma: no cover - optional dependency guard
     yaml = None
@@ -104,7 +109,11 @@ from lspr_app.gui.shortcut_help import build_shortcuts_help_text
 from lspr_app.gui.icon_helpers import flow_tabler_icon, tint_tabler_icon, transport_icon
 from lspr_app.gui.ui_helpers import make_compact_spinbox, make_info_button
 from lspr_app.storage.app_config import load_app_setting, save_app_setting, save_window_ui_state
-from lspr_io import build_legacy_experiment_plan_row_table
+from lspr_io import (
+    LSPR_MEASUREMENT_PLAN_COLUMNS,
+    build_legacy_experiment_plan_row_table,
+    validate_measurement_file,
+)
 
 
 _LOGGER = logging.getLogger("lspr_app.flow")
@@ -407,6 +416,9 @@ class ExperimentPlanImportData:
     uses_lr_valves: bool
     native_document: dict[str, object] | None = None
     steps: list[PumpPlanStep] | None = None
+    switch_solution_rows: list[list[str]] | None = None
+    switch_solution_mode: bool | None = None
+    selected_row: int | None = None
 
 
 def _experiment_plan_cell(row: list[str], index: object | None, default: str = "") -> str:
@@ -534,22 +546,131 @@ def build_experiment_plan_steps_from_native_document(document: dict[str, object]
     return recompute_plan_timing(steps)
 
 
+def build_experiment_plan_steps_from_hdf5_rows(columns: list[str], rows: list[list[str]]) -> list[PumpPlanStep]:
+    column_map = {str(column): index for index, column in enumerate(columns)}
+    steps: list[PumpPlanStep] = []
+    for row_index, row in enumerate(rows, start=1):
+        if not any(str(cell).strip() for cell in row):
+            continue
+        channels: list[PumpChannelStep] = []
+        for channel_index in range(1, ACTIVE_PUMP_CHANNELS + 1):
+            flow_index = column_map.get(f"ch{channel_index}_flow_ul_min")
+            direction_index = column_map.get(f"ch{channel_index}_direction")
+            flow_text = _experiment_plan_cell(row, flow_index, "0")
+            direction_text = _experiment_plan_cell(row, direction_index, "CW")
+            flow_ul_min = max(round(_safe_float(flow_text)), 0)
+            direction = "CCW" if str(direction_text).casefold() == "ccw" else "CW"
+            channels.append(PumpChannelStep(flow_ul_min=flow_ul_min, direction=direction))
+        duration_text = _experiment_plan_cell(row, column_map.get("duration_s"), "0")
+        valve = _experiment_plan_cell(row, column_map.get("valve"), "Open")
+        color = _experiment_plan_cell(row, column_map.get("color"), "").strip().upper() or "#4E79A7"
+        if color and not QColor(color).isValid():
+            color = "#4E79A7"
+        description = _experiment_plan_cell(row, column_map.get("description"), "").strip()
+        switch_text = _experiment_plan_cell(row, column_map.get("switch_position"), "")
+        if not switch_text:
+            switch_text = _experiment_plan_cell(row, column_map.get("solution"), "")
+        switch_position = _experiment_plan_switch_position_from_text(switch_text) if switch_text else 1
+        steps.append(
+            PumpPlanStep(
+                step=row_index,
+                duration_s=max(_safe_float(duration_text), 0.0),
+                color=color,
+                valve=str(valve or "Open"),
+                switch_position=switch_position,
+                description=description,
+                channels=channels,
+            )
+        )
+    return recompute_plan_timing(steps)
+
+
+def _decode_hdf5_text(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _read_hdf5_string_table(dataset: object) -> tuple[list[str], list[list[str]]]:
+    if dataset is None:
+        return [], []
+    columns: list[str] = []
+    if hasattr(dataset, "attrs") and "columns" in dataset.attrs:
+        columns = [_decode_hdf5_text(value) for value in dataset.attrs["columns"]]
+    raw = getattr(dataset, "shape", ())
+    if not raw or len(raw) != 2 or int(raw[0]) <= 0:
+        return columns, []
+    table: list[list[str]] = []
+    for row in dataset[...]:
+        table.append([_decode_hdf5_text(cell) for cell in row])
+    return columns, table
+
+
+def _hdf5_table_column_map(columns: list[str]) -> dict[object, int]:
+    column_map: dict[object, int] = {}
+    for index, column in enumerate(columns):
+        normalized = str(column or "").strip().casefold()
+        if not normalized:
+            continue
+        if normalized == "duration_s":
+            column_map["time"] = index
+            continue
+        if normalized == "description":
+            column_map["description"] = index
+            continue
+        if normalized == "valve":
+            column_map["valve"] = index
+            continue
+        if normalized == "color":
+            column_map["color"] = index
+            continue
+        if normalized == "switch_position":
+            column_map["solution"] = index
+            continue
+        match = re.match(r"ch(\d+)_(flow_ul_min|direction)", normalized)
+        if match:
+            channel = int(match.group(1))
+            field = match.group(2)
+            if field == "flow_ul_min":
+                column_map[("flow", channel)] = index
+            else:
+                column_map[("direction", channel)] = index
+    return column_map
+
+
 class ExperimentPlanImportSignals(QObject):
     finished = pyqtSignal(int, object)
     failed = pyqtSignal(int, str)
 
 
 class ExperimentPlanImportTask(QRunnable):
-    def __init__(self, generation: int, path: Path) -> None:
+    def __init__(
+        self,
+        generation: int,
+        path: Path,
+        *,
+        import_hdf5_plan: bool = True,
+        import_hdf5_runtime: bool = True,
+    ) -> None:
         super().__init__()
         self._generation = generation
         self._path = path
+        self._import_hdf5_plan = bool(import_hdf5_plan)
+        self._import_hdf5_runtime = bool(import_hdf5_runtime)
         self.signals = ExperimentPlanImportSignals()
 
     def run(self) -> None:
         try:
+            suffix = self._path.suffix.casefold()
+            if suffix in {".h5", ".hdf5"}:
+                if h5py is None:
+                    raise RuntimeError("h5py is required to import HDF5 experiment plans.")
+                payload = self._load_hdf5_payload()
+                self.signals.finished.emit(self._generation, payload)
+                return
+
             text = self._path.read_text(encoding="utf-8-sig")
-            if self._path.suffix.casefold() in {".yaml", ".yml"}:
+            if suffix in {".yaml", ".yml"}:
                 if yaml is None:
                     raise RuntimeError("PyYAML is required to import native YAML experiment plans.")
                 document = yaml.safe_load(text) or {}
@@ -706,6 +827,79 @@ class ExperimentPlanImportTask(QRunnable):
             payload.steps = build_experiment_plan_steps_from_import_data(payload, l_is_open=True)
         except Exception as exc:
             self.signals.failed.emit(self._generation, str(exc))
+
+    def _load_hdf5_payload(self) -> ExperimentPlanImportData:
+        if h5py is None:
+            raise RuntimeError("h5py is required to import HDF5 experiment plans.")
+        with h5py.File(self._path, "r") as handle:
+            validation = validate_measurement_file(handle)
+            if not validation.is_valid:
+                raise ValueError("; ".join(validation.errors))
+
+            switch_solution_rows: list[list[str]] | None = None
+            switch_solution_mode: bool | None = None
+            metadata = handle["metadata"] if "metadata" in handle else None
+            if metadata is not None and "switch_solution_map" in metadata:
+                _, switch_solution_rows = _read_hdf5_string_table(metadata["switch_solution_map"])
+                if "switch_solution_mode" in metadata.attrs:
+                    switch_solution_mode = bool(metadata.attrs["switch_solution_mode"])
+
+            selected_row: int | None = None
+            if self._import_hdf5_runtime and "runs" in handle:
+                runs_group = handle["runs"]
+                runtime_dataset = None
+                if "flow_events" in runs_group:
+                    runtime_dataset = runs_group["flow_events"]
+                elif "flow_state" in runs_group:
+                    runtime_dataset = runs_group["flow_state"]
+                if runtime_dataset is not None:
+                    runtime_columns, runtime_rows = _read_hdf5_string_table(runtime_dataset)
+                    if runtime_columns:
+                        try:
+                            step_index = runtime_columns.index("step_index")
+                        except ValueError:
+                            step_index = -1
+                        if step_index >= 0:
+                            for runtime_row in reversed(runtime_rows):
+                                if step_index >= len(runtime_row):
+                                    continue
+                                try:
+                                    value = int(float(runtime_row[step_index]))
+                                except (TypeError, ValueError):
+                                    continue
+                                if value > 0:
+                                    selected_row = value - 1
+                                    break
+
+            if self._import_hdf5_plan and "plans" in handle and "experiment_plan" in handle["plans"]:
+                plan_dataset = handle["plans"]["experiment_plan"]
+            elif "metadata" in handle and "experiment_plan" in handle["metadata"]:
+                plan_dataset = handle["metadata"]["experiment_plan"]
+            else:
+                raise ValueError("The selected HDF5 file does not contain an experiment plan table.")
+
+            plan_columns, plan_rows = _read_hdf5_string_table(plan_dataset)
+            if not plan_columns:
+                plan_columns = list(LSPR_MEASUREMENT_PLAN_COLUMNS)
+            payload = ExperimentPlanImportData(
+                path=self._path,
+                headers=list(plan_columns),
+                rows=[list(row) for row in plan_rows],
+                column_map=_hdf5_table_column_map(plan_columns),
+                imported_colors=[],
+                tube_mm_by_channel=[DEFAULT_TUBE_MM] * ACTIVE_PUMP_CHANNELS,
+                uses_lr_valves=False,
+                native_document=None,
+                steps=build_experiment_plan_steps_from_hdf5_rows(plan_columns, plan_rows),
+                switch_solution_rows=switch_solution_rows,
+                switch_solution_mode=switch_solution_mode,
+                selected_row=selected_row,
+            )
+            payload.imported_colors = []
+            for step in payload.steps or []:
+                if step.color not in payload.imported_colors:
+                    payload.imported_colors.append(step.color)
+            return payload
             return
         self.signals.finished.emit(self._generation, payload)
 
@@ -2879,6 +3073,34 @@ class ExperimentControlWindow(QWidget):
             changed = True
         return changed
 
+    def _prompt_hdf5_experiment_plan_import_options(self, path: Path) -> tuple[bool, bool] | None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Import HDF5 experiment plan")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        label = QLabel(f"Import data from:\n{path.name}")
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        plan_checkbox = QCheckBox("Import authored plan (required)")
+        plan_checkbox.setChecked(True)
+        plan_checkbox.setEnabled(False)
+        runtime_checkbox = QCheckBox("Import runtime state")
+        runtime_checkbox.setChecked(True)
+        layout.addWidget(plan_checkbox)
+        layout.addWidget(runtime_checkbox)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return bool(plan_checkbox.isChecked()), bool(runtime_checkbox.isChecked())
+
     def _start_experiment_plan_import(self, path: Path) -> None:
         if self._experiment_plan_import_in_progress:
             return
@@ -2890,7 +3112,19 @@ class ExperimentControlWindow(QWidget):
             self._experiment_plan_import_pending_step_index = 0
             self._experiment_plan_import_generation += 1
             generation = self._experiment_plan_import_generation
-            task = ExperimentPlanImportTask(generation, path)
+            import_hdf5_plan = True
+            import_hdf5_runtime = True
+            if path.suffix.casefold() in {".h5", ".hdf5"}:
+                options = self._prompt_hdf5_experiment_plan_import_options(path)
+                if options is None:
+                    return
+                import_hdf5_plan, import_hdf5_runtime = options
+            task = ExperimentPlanImportTask(
+                generation,
+                path,
+                import_hdf5_plan=import_hdf5_plan,
+                import_hdf5_runtime=import_hdf5_runtime,
+            )
             self._experiment_plan_import_task = task
             self._set_experiment_plan_import_running(True)
             self._set_status_message(f"Importing experiment plan from {path.name}...")
@@ -2910,6 +3144,26 @@ class ExperimentControlWindow(QWidget):
             self._set_experiment_plan_import_running(False)
             self._show_error("Imported experiment plan data had an unexpected format.")
             return
+        if payload.switch_solution_rows:
+            labels = ["empty" for _ in range(12)]
+            for row in payload.switch_solution_rows:
+                if not isinstance(row, list) or len(row) < 2:
+                    continue
+                try:
+                    port = int(float(str(row[0]).strip()))
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= port <= 12:
+                    labels[port - 1] = str(row[1] or "empty").strip() or "empty"
+            self._switch_solution_labels = labels
+            self._refresh_switch_solution_controls()
+        if payload.switch_solution_mode is not None:
+            self.step_switch_mode_button.blockSignals(True)
+            try:
+                self.step_switch_mode_button.setChecked(bool(payload.switch_solution_mode))
+            finally:
+                self.step_switch_mode_button.blockSignals(False)
+            self._set_switch_solution_mode(bool(payload.switch_solution_mode))
         if payload.native_document is not None:
             unsupported_devices = self._native_experiment_plan_unsupported_devices(payload.native_document)
             if unsupported_devices:
@@ -2949,7 +3203,10 @@ class ExperimentControlWindow(QWidget):
     def _begin_experiment_plan_import_population(self, payload: ExperimentPlanImportData, steps: list[PumpPlanStep]) -> None:
         self._experiment_plan_import_pending_payload = payload
         self._experiment_plan_import_pending_steps = list(steps)
-        self._experiment_plan_import_pending_selected_row = 0
+        selected_row = payload.selected_row if payload.selected_row is not None else 0
+        if steps:
+            selected_row = min(max(int(selected_row), 0), len(steps) - 1)
+        self._experiment_plan_import_pending_selected_row = selected_row
         self._experiment_plan_import_pending_step_index = 0
         self.plan_table.blockSignals(True)
         self.plan_table.setUpdatesEnabled(False)
@@ -3014,7 +3271,7 @@ class ExperimentControlWindow(QWidget):
             self,
             "Import experiment plan",
             str(start_dir),
-            "Experiment plan files (*.flow.yaml *.yaml *.yml *.csv *.txt);;Native YAML (*.flow.yaml *.yaml *.yml);;Compatibility CSV/TXT (*.csv *.txt);;All files (*)",
+            "Experiment plan files (*.flow.yaml *.yaml *.yml *.csv *.txt *.h5 *.hdf5);;Native YAML (*.flow.yaml *.yaml *.yml);;HDF5 measurement (*.h5 *.hdf5);;Compatibility CSV/TXT (*.csv *.txt);;All files (*)",
         )
         if not file_path:
             return
