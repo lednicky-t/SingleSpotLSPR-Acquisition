@@ -105,9 +105,8 @@ from lspr_app.gui.experiment_control_table import (
 )
 from lspr_app.gui.experiment_control_editing import ExperimentControlEditingController
 from lspr_app.gui.experiment_control_dialogs import ExperimentControlDialogs
-from lspr_app.gui.shortcut_help import build_shortcuts_help_text
 from lspr_app.gui.icon_helpers import flow_tabler_icon, tint_tabler_icon, transport_icon
-from lspr_app.gui.ui_helpers import make_compact_spinbox, make_info_button
+from lspr_app.gui.ui_helpers import make_compact_spinbox
 from lspr_app.storage.app_config import load_app_setting, save_app_setting, save_window_ui_state
 from lspr_io import (
     LSPR_MEASUREMENT_PLAN_COLUMNS,
@@ -2080,8 +2079,6 @@ class ExperimentControlWindow(QWidget):
             " font-weight: 700;"
             "}"
         )
-        editor_header_info = make_info_button(build_shortcuts_help_text())
-        editor_header_info.setToolTip(build_shortcuts_help_text())
         editor_header_row = QWidget()
         editor_header_row_layout = QHBoxLayout()
         editor_header_row_layout.setContentsMargins(0, 0, 0, 0)
@@ -2097,7 +2094,6 @@ class ExperimentControlWindow(QWidget):
         self._update_experiment_control_view_mode_button()
         editor_header_row_layout.addWidget(self._experiment_control_view_mode_button)
         editor_header_row_layout.addStretch(1)
-        editor_header_row_layout.addWidget(editor_header_info)
         editor_header_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         editor_header_row.setLayout(editor_header_row_layout)
         self._experiment_control_header_row = editor_header_row

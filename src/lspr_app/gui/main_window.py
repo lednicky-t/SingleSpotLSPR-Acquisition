@@ -1205,6 +1205,7 @@ class MainWindow(QMainWindow):
 
         trace_title = QLabel("Sensorgram")
         trace_title.setObjectName("sensorgramHeaderLabel")
+        trace_title.setStyleSheet("color: #8FE3A1;")
         self.sensorgram_view_mode_button = QToolButton()
         self.sensorgram_view_mode_button.setObjectName("sensorgramViewModeButton")
         self.sensorgram_view_mode_button.setAutoRaise(True)
@@ -1241,8 +1242,8 @@ class MainWindow(QMainWindow):
         trace_title_row.addWidget(trace_title)
         trace_title_row.addWidget(self.sensorgram_view_mode_button)
         trace_title_row.addWidget(self.sensorgram_downsampling_button)
-        trace_title_row.addWidget(self.sensorgram_content_mode_button)
         trace_title_row.addWidget(self.sensorgram_window_button)
+        trace_title_row.addWidget(self.sensorgram_content_mode_button)
         trace_title_row.addStretch(1)
         trace_title_row_widget = QWidget()
         trace_title_row_widget.setLayout(trace_title_row)
@@ -1474,9 +1475,9 @@ class MainWindow(QMainWindow):
         plot_splitter.setChildrenCollapsible(False)
         plot_splitter.addWidget(self._top_content_stack)
         plot_splitter.addWidget(trace_block)
-        plot_splitter.setStretchFactor(0, 3)
-        plot_splitter.setStretchFactor(1, 2)
-        plot_splitter.setSizes([560, 320])
+        plot_splitter.setStretchFactor(0, 2)
+        plot_splitter.setStretchFactor(1, 3)
+        plot_splitter.setSizes([430, 470])
         self.plot_splitter = plot_splitter
 
         right_panel = QVBoxLayout()
@@ -3918,6 +3919,10 @@ class MainWindow(QMainWindow):
         normalized = self._normalize_sensorgram_view_mode(mode or self._sensorgram_view_mode)
         return "Absolute" if normalized == "absolute" else "Rolling"
 
+    def _sensorgram_view_mode_color(self, mode: str | None = None) -> str:
+        normalized = self._normalize_sensorgram_view_mode(mode or self._sensorgram_view_mode)
+        return "#E39B2D" if normalized == "absolute" else "#4DA3FF"
+
     def _sensorgram_view_mode_tooltip(self, mode: str | None = None) -> str:
         normalized = self._normalize_sensorgram_view_mode(mode or self._sensorgram_view_mode)
         if normalized == "absolute":
@@ -3929,6 +3934,9 @@ class MainWindow(QMainWindow):
             return
         label = self._sensorgram_view_mode_label()
         self.sensorgram_view_mode_button.setText(f"[{label}]")
+        self.sensorgram_view_mode_button.setStyleSheet(
+            f"QToolButton {{ color: {self._sensorgram_view_mode_color()}; font-weight: 400; }}"
+        )
         self.sensorgram_view_mode_button.setToolTip(self._sensorgram_view_mode_tooltip())
         self._update_sensorgram_header_control_visibility()
 
@@ -3956,8 +3964,11 @@ class MainWindow(QMainWindow):
         self._apply_sensorgram_view_mode(save=True)
 
     def _sensorgram_downsampling_label(self, enabled: bool | None = None) -> str:
+        return "Downsampling"
+
+    def _sensorgram_downsampling_color(self, enabled: bool | None = None) -> str:
         current = self._normalize_sensorgram_downsampling_enabled(enabled)
-        return "Downsampling: On" if current else "Downsampling: Off"
+        return "#4CAF50" if current else "#8D96A3"
 
     def _sensorgram_downsampling_tooltip(self, enabled: bool | None = None) -> str:
         current = self._normalize_sensorgram_downsampling_enabled(enabled)
@@ -3970,6 +3981,9 @@ class MainWindow(QMainWindow):
             return
         label = self._sensorgram_downsampling_label()
         self.sensorgram_downsampling_button.setText(f"[{label}]")
+        self.sensorgram_downsampling_button.setStyleSheet(
+            f"QToolButton {{ color: {self._sensorgram_downsampling_color()}; font-weight: 400; }}"
+        )
         self.sensorgram_downsampling_button.setToolTip(self._sensorgram_downsampling_tooltip())
         self._update_sensorgram_header_control_visibility()
 
@@ -3983,12 +3997,12 @@ class MainWindow(QMainWindow):
     def _sensorgram_display_window_label(self, seconds: float | None = None) -> str:
         current = self._normalize_sensorgram_display_window_s(seconds)
         if current >= 3600.0:
-            return "Window: 1 h"
+            return "1 h"
         if current >= 1800.0:
-            return "Window: 30 min"
+            return "30 min"
         if current >= 600.0:
-            return "Window: 10 min"
-        return "Window: 1 min"
+            return "10 min"
+        return "1 min"
 
     def _sensorgram_display_window_tooltip(self, seconds: float | None = None) -> str:
         current = self._normalize_sensorgram_display_window_s(seconds)
@@ -4030,17 +4044,21 @@ class MainWindow(QMainWindow):
 
     def _sensorgram_content_mode_label(self, mode: str | None = None) -> str:
         normalized = self._normalize_sensorgram_content_mode(mode or self._sensorgram_content_mode)
-        return "Metric time plot" if normalized == "metric" else "Extinction heatmap"
+        return "Metric time plot" if normalized == "metric" else "Heatmap"
+
+    def _sensorgram_content_mode_color(self, mode: str | None = None) -> str:
+        normalized = self._normalize_sensorgram_content_mode(mode or self._sensorgram_content_mode)
+        return "#9B6DFF" if normalized == "metric" else "#D9544D"
 
     def _sensorgram_content_mode_tooltip(self, mode: str | None = None) -> str:
         normalized = self._normalize_sensorgram_content_mode(mode or self._sensorgram_content_mode)
         if normalized == "metric":
             return (
-                "Current display: Metric time plot. Click to switch to Extinction heatmap. "
+                "Current display: Metric time plot. Click to switch to Heatmap. "
                 "The plot will change from time-tracked metrics to a wavelength-vs-time heatmap."
             )
         return (
-            "Current display: Extinction heatmap. Click to switch to Metric time plot. "
+            "Current display: Heatmap. Click to switch to Metric time plot. "
             "The plot will change from a heatmap back to time-tracked metrics."
         )
 
@@ -4049,6 +4067,9 @@ class MainWindow(QMainWindow):
             return
         label = self._sensorgram_content_mode_label()
         self.sensorgram_content_mode_button.setText(f"[{label}]")
+        self.sensorgram_content_mode_button.setStyleSheet(
+            f"QToolButton {{ color: {self._sensorgram_content_mode_color()}; font-weight: 400; }}"
+        )
         self.sensorgram_content_mode_button.setToolTip(self._sensorgram_content_mode_tooltip())
 
     def _apply_sensorgram_content_mode(self, *, save: bool = False) -> None:

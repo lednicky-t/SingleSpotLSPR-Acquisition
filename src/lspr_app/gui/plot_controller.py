@@ -311,7 +311,7 @@ def autoscale_spectrum_plot(window) -> None:
         return
     y = y[finite]
     x_finite = x[finite]
-    x_pad = max((float(np.max(x_finite)) - float(np.min(x_finite))) * 0.02, 1e-6)
+    x_pad = max((float(np.max(x_finite)) - float(np.min(x_finite))) * 0.01, 1e-6)
     y_span = float(np.max(y) - np.min(y))
     y_pad = max(y_span * 0.08, 1e-6)
     window.spectrum_plot.setXRange(float(np.min(x_finite)) - x_pad, float(np.max(x_finite)) + x_pad, padding=0.0)
@@ -348,11 +348,11 @@ def autoscale_trace_plot(window) -> None:
         window_span = max(float(window._trace_display_window_s), 1e-9)
         x_min = max(float(np.min(x)), latest_x - window_span)
         x_max = latest_x
-        x_pad = max(window_span * 0.03, 1.0 if window.trace_time_axis._mode == "clock" else 1e-3)
+        x_pad = max(window_span * 0.005, 0.25 if window.trace_time_axis._mode == "clock" else 1e-3)
     else:
         x_min = float(np.min(x))
         x_max = latest_x
-        x_pad = max(x_span * 0.03, 1.0 if window.trace_time_axis._mode == "clock" else 1e-3)
+        x_pad = max(x_span * 0.005, 0.25 if window.trace_time_axis._mode == "clock" else 1e-3)
     y_pad = max(y_span * 0.12, 1e-6)
     if getattr(window, "_trace_view_locked", False):
         return
@@ -580,6 +580,8 @@ def render_sensorgram_heatmap(
     )
 
     times = np.asarray([float(item[0]) for item in history], dtype=np.float64)
+    if view_mode == "rolling" and len(times) > 0:
+        times = times - float(times[0])
     wavelengths = np.asarray(window._sensorgram_heatmap_wavelengths, dtype=np.float64)
     if len(times) == 0 or len(wavelengths) == 0:
         window.trace_heatmap_image.setVisible(False)
@@ -612,7 +614,7 @@ def render_sensorgram_heatmap(
         view_span = requested_view_x_max - requested_view_x_min
     else:
         view_span = right - left
-    x_pad = max(view_span * 0.03, 1.0 if clock_mode else 1e-3)
+    x_pad = max(view_span * 0.005, 0.25 if clock_mode else 1e-3)
     if not getattr(window, "_trace_view_locked", False):
         window._trace_view_autoscaling = True
         try:
