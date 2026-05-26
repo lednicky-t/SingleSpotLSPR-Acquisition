@@ -378,9 +378,12 @@ def update_residual_view_geometry(window) -> None:
 def autoscale_residual_axis(window) -> None:
     if not hasattr(window, "residual_view") or not window.show_residual_button.isChecked():
         return
+    if bool(getattr(window, "_residual_axis_autoscaled", False)):
+        return
     residual = window.residual_curve.yData
     if residual is None or len(residual) == 0:
         window.residual_view.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+        window._residual_axis_autoscaled = True
         return
     y = np.asarray(residual, dtype=np.float64)
     finite = np.isfinite(y)
@@ -392,7 +395,9 @@ def autoscale_residual_axis(window) -> None:
     pad = max(amplitude * 0.15, 1e-6)
     if not np.isfinite(pad):
         pad = 1e-6
-    window.residual_view.setYRange(-(amplitude + pad), amplitude + pad, padding=0.0)
+    half_span = min(amplitude + pad, 100.0)
+    window.residual_view.setYRange(-half_span, half_span, padding=0.0)
+    window._residual_axis_autoscaled = True
 
 
 def update_residual_axis_visibility(window, visible: bool | None = None) -> None:

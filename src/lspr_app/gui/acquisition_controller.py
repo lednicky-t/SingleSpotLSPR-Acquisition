@@ -51,6 +51,8 @@ def _flush_live_processing_logs(window) -> None:
 
 
 def _start_measurement_file_compression(window, path: Path) -> None:
+    if hasattr(window, "_set_measurement_compression_busy_indicator"):
+        window._set_measurement_compression_busy_indicator(True)
     task = MeasurementCompressionTask(path)
     task.signals.finished.connect(window._handle_measurement_file_compression_finished)
     task.signals.failed.connect(window._handle_measurement_file_compression_failed)
@@ -60,12 +62,16 @@ def _start_measurement_file_compression(window, path: Path) -> None:
 
 def _handle_measurement_file_compression_finished(window, result: object) -> None:
     window._measurement_compression_task = None
+    if hasattr(window, "_set_measurement_compression_busy_indicator"):
+        window._set_measurement_compression_busy_indicator(False)
     if not isinstance(result, MeasurementCompressionResult):
         window._measurement_path = None
         window.status_label.setText("Measurement stopped.")
         window._log_warning("Measurement file compression finished with an unexpected result payload.")
         window._log_success("Measurement recording stopped.")
         window._refresh_plot()
+        window._refresh_trace_plot("Peak position (nm)")
+        window._request_trace_autoscale()
         window._refresh_session_summary(force=True)
         window._update_window_mode_label()
         return
@@ -74,17 +80,23 @@ def _handle_measurement_file_compression_finished(window, result: object) -> Non
     window._log_success("Measurement file compression finished.")
     window._log_success("Measurement recording stopped.")
     window._refresh_plot()
+    window._refresh_trace_plot("Peak position (nm)")
+    window._request_trace_autoscale()
     window._refresh_session_summary(force=True)
     window._update_window_mode_label()
 
 
 def _handle_measurement_file_compression_failed(window, message: str) -> None:
     window._measurement_compression_task = None
+    if hasattr(window, "_set_measurement_compression_busy_indicator"):
+        window._set_measurement_compression_busy_indicator(False)
     window._measurement_path = None
     window.status_label.setText("Measurement stopped.")
     window._log_warning(f"Measurement file compression failed: {message}")
     window._log_success("Measurement recording stopped.")
     window._refresh_plot()
+    window._refresh_trace_plot("Peak position (nm)")
+    window._request_trace_autoscale()
     window._refresh_session_summary(force=True)
     window._update_window_mode_label()
 
@@ -796,8 +808,6 @@ def start_measurement_run(window) -> None:
         window._sensorgram_view_mode = "absolute"
     if hasattr(window, "_apply_sensorgram_view_mode"):
         window._apply_sensorgram_view_mode(save=False)
-    if hasattr(window, "_sensorgram_content_mode"):
-        window._sensorgram_content_mode = "metric"
     if hasattr(window, "_apply_sensorgram_content_mode"):
         window._apply_sensorgram_content_mode(save=False)
     window._peak_history.clear()
@@ -811,6 +821,8 @@ def start_measurement_run(window) -> None:
     window._live_trace_started_at = None
     window._peak_reference_processed = None
     window._refresh_session_statistics(force=True)
+    window._refresh_trace_plot("Peak position (nm)")
+    window._request_trace_autoscale()
     set_measurement_buttons_enabled(window, True)
     window.status_label.setText(f"Recording to {destination.name}")
     window._log_success(f"Measurement recording started: {destination.name}.")
@@ -859,16 +871,32 @@ def stop_measurement_run(window) -> None:
             if converted_series:
                 converted_history[metric_name] = converted_series
         window._peak_history = converted_history
+        peak_history_buffers = getattr(window, "_peak_history_buffers", None)
+        if peak_history_buffers:
+            converted_buffers: dict[str, TraceHistoryBuffer] = {}
+            max_points = int(getattr(window, "_trace_history_max_points", 6000))
+            for metric_name, buffer in peak_history_buffers.items():
+                times, values = buffer.to_arrays()
+                converted_buffer = TraceHistoryBuffer(max_points)
+                for elapsed_s, value in zip(times.tolist(), values.tolist(), strict=False):
+                    local_timestamp = (started_at + timedelta(seconds=float(elapsed_s))).astimezone().timestamp()
+                    converted_buffer.append(float(local_timestamp), float(value))
+                if len(converted_buffer) > 0:
+                    converted_buffers[metric_name] = converted_buffer
+            window._peak_history_buffers = converted_buffers
     if started_at is not None and getattr(window, "_sensorgram_heatmap_history", None):
         converted_heatmap_history: list[tuple[float, np.ndarray]] = []
         for elapsed_s, values in window._sensorgram_heatmap_history:
             local_timestamp = (started_at + timedelta(seconds=float(elapsed_s))).astimezone().timestamp()
             converted_heatmap_history.append((float(local_timestamp), np.asarray(values, dtype=np.float64).copy()))
         window._sensorgram_heatmap_history = converted_heatmap_history
+    window._trace_view_locked = False
     window._trace_display_cursor_s = 0.0
     window._live_trace_started_at = None
     window._peak_reference_processed = None
     window._refresh_session_statistics(force=True)
+    window._refresh_trace_plot("Peak position (nm)")
+    window._request_trace_autoscale()
     set_measurement_buttons_enabled(window, True)
     if measurement_path is not None and bool(getattr(window, "measurement_hdf5_compression_enabled", lambda: True)()):
         window.status_label.setText("Measurement stopped. Compressing file...")
@@ -928,7 +956,10 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
 
     if updated:
         if window._measurement_writer is not None and measurement_active:
+            # Store the derived metric with its absolute UTC timestamp so it can be joined later without ambiguity.
+            acquired_at_unix_ms = int(round(processed.acquired_at.astimezone(timezone.utc).timestamp() * 1000.0))
             metric_row = {
+                "acquired_at_unix_ms": acquired_at_unix_ms,
                 "t_ms": int(round(elapsed_s * 1000.0)),
                 "sample_index": -1,
                 "centroid_nm": metrics.get("centroid", np.nan),

@@ -306,8 +306,35 @@ def refresh_plot_for(window) -> None:
 
 
 def handle_residual_toggle_for(window, visible: bool) -> None:
+    if hasattr(window, "residual_view"):
+        if not visible:
+            current_range = window.residual_view.viewRange()[1]
+            y_min = float(current_range[0])
+            y_max = float(current_range[1])
+            if np.isfinite(y_min) and np.isfinite(y_max) and y_max > y_min:
+                window._residual_y_range = [y_min, y_max]
+        window.residual_view._manual_y_zoom = False
     window._update_residual_axis_visibility(visible)
     window._update_residual_button_icon()
+    if visible:
+        window._update_residual_view_geometry()
+        saved_range = getattr(window, "_residual_y_range", None)
+        if (
+            isinstance(saved_range, list)
+            and len(saved_range) == 2
+            and all(isinstance(item, (int, float)) for item in saved_range)
+        ):
+            y_min = float(saved_range[0])
+            y_max = float(saved_range[1])
+            if y_max > y_min:
+                window.residual_view.setYRange(y_min, y_max, padding=0.0)
+                window._residual_axis_autoscaled = True
+            else:
+                window._residual_axis_autoscaled = False
+        else:
+            window._residual_axis_autoscaled = False
+    else:
+        window._residual_axis_autoscaled = False
     window._refresh_plot()
     window._schedule_acquisition_state_persist()
 

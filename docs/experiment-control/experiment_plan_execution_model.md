@@ -200,6 +200,31 @@ Rules:
 
 The timeline can therefore diverge from the original designed plan if the user holds, pauses, or skips steps.
 
+## Timing Contract
+
+The GUI and runtime controller should use three distinct timing concepts:
+
+- `step runtime`: wall-clock time since the current step started, including hold time
+- `step ETA`: remaining active step time, excluding hold time
+- `total runtime`: wall-clock time since measurement recording started, including hold time and step changes
+
+Rules:
+
+- when the user presses play, the selected step starts at runtime `0`
+- step runtime and total runtime reset to `0` for a new measurement run
+- hold freezes step ETA and automatic step progression
+- hold does not stop the wall-clock runtime counters
+- step skipping or step switching must not reset total runtime
+- step skipping or step switching does reset the current step runtime to `0`
+- the next step starts only when the active step timer reaches its duration
+
+Implementation note:
+
+- automatic step switching should use elapsed active time only
+- timeline cursor movement should reflect active step progress
+- displayed runtime counters should continue to show wall-clock elapsed time while the plan is running or held
+- when measurement recording stops, the displayed values should freeze until the next play event
+
 ## Useful Implementation Separation
 
 Recommended separation for the codebase:

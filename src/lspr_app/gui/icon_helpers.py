@@ -53,8 +53,11 @@ def math_function_tab_icon(color: QColor | None = None) -> QIcon:
 
 
 def storage_compression_icon(active: bool) -> QIcon:
-    tint = QColor("#2f80c1" if active else "#8a98a8")
-    return tint_tabler_icon(flow_tabler_icon("archive", "database", "box"), tint)
+    tint = QColor("#f2c94c" if active else "#b9a24b")
+    try:
+        return tint_tabler_icon(tabler_icon("file_zip"), tint)
+    except Exception:
+        return tint_tabler_icon(flow_tabler_icon("archive", "database", "box"), tint)
 
 
 __all__ = [

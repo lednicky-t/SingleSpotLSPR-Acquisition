@@ -6,6 +6,7 @@ import queue
 import threading
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from time import perf_counter
 
 import numpy as np

@@ -111,6 +111,7 @@ from lspr_app.gui.ui_helpers import make_compact_spinbox, make_info_button
 from lspr_app.storage.app_config import load_app_setting, save_app_setting, save_window_ui_state
 from lspr_io import (
     LSPR_MEASUREMENT_PLAN_COLUMNS,
+    LSPR_MEASUREMENT_RUNTIME_DATASET_NAME,
     build_legacy_experiment_plan_row_table,
     validate_measurement_file,
 )
@@ -417,6 +418,9 @@ class ExperimentPlanImportData:
     switch_solution_rows: list[list[str]] | None = None
     switch_solution_mode: bool | None = None
     selected_row: int | None = None
+    valve_state_labels: dict[str, str] | None = None
+    valve_state_colors: dict[str, str] | None = None
+    color_palette_entries: list[dict[str, str]] | None = None
 
 
 def _experiment_plan_cell(row: list[str], index: object | None, default: str = "") -> str:
@@ -836,20 +840,90 @@ class ExperimentPlanImportTask(QRunnable):
 
             switch_solution_rows: list[list[str]] | None = None
             switch_solution_mode: bool | None = None
+            valve_state_labels: dict[str, str] | None = None
+            valve_state_colors: dict[str, str] | None = None
+            color_palette_entries: list[dict[str, str]] | None = None
             metadata = handle["metadata"] if "metadata" in handle else None
-            if metadata is not None and "switch_solution_map" in metadata:
-                _, switch_solution_rows = _read_hdf5_string_table(metadata["switch_solution_map"])
+            assignment_tables = None
+            if metadata is not None and "assignment_tables" in metadata:
+                assignment_tables = metadata["assignment_tables"]
+            if assignment_tables is not None:
+                if "switch_solution_map" in assignment_tables:
+                    _, switch_solution_rows = _read_hdf5_string_table(assignment_tables["switch_solution_map"])
                 if "switch_solution_mode" in metadata.attrs:
                     switch_solution_mode = bool(metadata.attrs["switch_solution_mode"])
+                if "valve_state_map" in assignment_tables:
+                    _, rows = _read_hdf5_string_table(assignment_tables["valve_state_map"])
+                    labels: dict[str, str] = {}
+                    colors: dict[str, str] = {}
+                    for row in rows:
+                        if len(row) < 3:
+                            continue
+                        state_name = str(row[0]).strip()
+                        label = str(row[1]).strip()
+                        color = str(row[2]).strip().upper()
+                        if state_name:
+                            labels[state_name] = label or state_name
+                            if color:
+                                colors[state_name] = color
+                    if labels:
+                        valve_state_labels = labels
+                    if colors:
+                        valve_state_colors = colors
+                if "color_palette_entries" in assignment_tables:
+                    _, rows = _read_hdf5_string_table(assignment_tables["color_palette_entries"])
+                    entries: list[dict[str, str]] = []
+                    for row in rows:
+                        if len(row) < 2:
+                            continue
+                        name = str(row[0]).strip()
+                        color = str(row[1]).strip().upper()
+                        if color:
+                            entries.append({"name": name, "color": color})
+                    if entries:
+                        color_palette_entries = entries
+            if metadata is not None and "switch_solution_map" in metadata and switch_solution_rows is None:
+                _, switch_solution_rows = _read_hdf5_string_table(metadata["switch_solution_map"])
+            if metadata is not None and "switch_solution_mode" in metadata.attrs and switch_solution_mode is None:
+                switch_solution_mode = bool(metadata.attrs["switch_solution_mode"])
+            if metadata is not None and "valve_state_labels" in metadata and valve_state_labels is None:
+                _, rows = _read_hdf5_string_table(metadata["valve_state_labels"])
+                labels: dict[str, str] = {}
+                for row in rows:
+                    if len(row) < 2:
+                        continue
+                    state_name = str(row[0]).strip()
+                    label = str(row[1]).strip()
+                    if state_name:
+                        labels[state_name] = label or state_name
+                if labels:
+                    valve_state_labels = labels
+            if metadata is not None and "valve_state_colors" in metadata and valve_state_colors is None:
+                _, rows = _read_hdf5_string_table(metadata["valve_state_colors"])
+                colors: dict[str, str] = {}
+                for row in rows:
+                    if len(row) < 2:
+                        continue
+                    state_name = str(row[0]).strip()
+                    color = str(row[1]).strip().upper()
+                    if state_name and color:
+                        colors[state_name] = color
+                if colors:
+                    valve_state_colors = colors
 
             selected_row: int | None = None
-            if self._import_hdf5_runtime and "runs" in handle:
-                runs_group = handle["runs"]
+            if self._import_hdf5_runtime:
                 runtime_dataset = None
-                if "flow_events" in runs_group:
-                    runtime_dataset = runs_group["flow_events"]
-                elif "flow_state" in runs_group:
-                    runtime_dataset = runs_group["flow_state"]
+                if "data" in handle and LSPR_MEASUREMENT_RUNTIME_DATASET_NAME in handle["data"]:
+                    runtime_dataset = handle["data"][LSPR_MEASUREMENT_RUNTIME_DATASET_NAME]
+                elif "runs" in handle:
+                    runs_group = handle["runs"]
+                    if "flow_events" in runs_group:
+                        runtime_dataset = runs_group["flow_events"]
+                    elif "flow_state" in runs_group:
+                        runtime_dataset = runs_group["flow_state"]
+                elif "flow" in handle and "state" in handle["flow"]:
+                    runtime_dataset = handle["flow"]["state"]
                 if runtime_dataset is not None:
                     runtime_columns, runtime_rows = _read_hdf5_string_table(runtime_dataset)
                     if runtime_columns:
@@ -869,12 +943,12 @@ class ExperimentPlanImportTask(QRunnable):
                                     selected_row = value - 1
                                     break
 
-            if self._import_hdf5_plan and "plans" in handle and "experiment_plan" in handle["plans"]:
-                plan_dataset = handle["plans"]["experiment_plan"]
-            elif "metadata" in handle and "experiment_plan" in handle["metadata"]:
+            if self._import_hdf5_plan and "metadata" in handle and "experiment_plan" in handle["metadata"]:
                 plan_dataset = handle["metadata"]["experiment_plan"]
+            elif self._import_hdf5_plan and "plans" in handle and "experiment_plan" in handle["plans"]:
+                plan_dataset = handle["plans"]["experiment_plan"]
             else:
-                raise ValueError("The selected HDF5 file does not contain an experiment plan table.")
+                raise ValueError("The selected HDF5 file does not contain an experiment plan table in metadata.")
 
             plan_columns, plan_rows = _read_hdf5_string_table(plan_dataset)
             if not plan_columns:
@@ -892,6 +966,9 @@ class ExperimentPlanImportTask(QRunnable):
                 switch_solution_rows=switch_solution_rows,
                 switch_solution_mode=switch_solution_mode,
                 selected_row=selected_row,
+                valve_state_labels=valve_state_labels,
+                valve_state_colors=valve_state_colors,
+                color_palette_entries=color_palette_entries,
             )
             payload.imported_colors = []
             for step in payload.steps or []:
@@ -958,6 +1035,9 @@ class PumpPlanTimelineWidget(QWidget):
         self._segment_rects: list[QRectF] = []
         self._bar_rect = QRectF()
         self._progress_s: float | None = None
+        self._runtime_s: float | None = None
+        self._step_runtime_s: float | None = None
+        self._plan_active_row: int | None = None
         self._dragging = False
         self._drag_start_row: int | None = None
         self._drag_target_row: int | None = None
@@ -1000,10 +1080,14 @@ class PumpPlanTimelineWidget(QWidget):
         steps: list[PumpPlanStep],
         selected_row: int | None = None,
         progress_s: float | None = None,
+        runtime_s: float | None = None,
+        step_runtime_s: float | None = None,
     ) -> None:
         self._steps = recompute_plan_timing(steps)
         self._selected_row = selected_row
         self._progress_s = progress_s
+        self._runtime_s = runtime_s
+        self._step_runtime_s = step_runtime_s
         self._recalculate_zoom_floor()
         self._zoom_factor = max(1.0, min(float(self._zoom_factor), self._max_zoom))
         if not self._steps or self._zoom_factor <= 1.0 + 1e-6:
@@ -1058,6 +1142,7 @@ class PumpPlanTimelineWidget(QWidget):
     def _timeline_status_parts(self) -> list[dict[str, object]]:
         total_end_s = self._steps[-1].end_s if self._steps else 0.0
         step_count = len(self._steps)
+        plan_active_row = getattr(self, "_plan_active_row", None)
         current_step_index: int | None = None
         step_runtime_s: float | None = None
         step_eta_s: float | None = None
@@ -1066,26 +1151,24 @@ class PumpPlanTimelineWidget(QWidget):
         total_eta_s: float | None = None
         total_eta_clock: str | None = None
 
-        if self._steps and self._progress_s is not None:
+        if self._steps and self._progress_s is not None and plan_active_row is not None and 0 <= plan_active_row < step_count:
             progress_s = min(max(float(self._progress_s), 0.0), total_end_s)
-            total_runtime_s = progress_s
-            total_eta_s = max(total_end_s - progress_s, 0.0)
+            current_step = self._steps[plan_active_row]
+            active_elapsed_s = max(float(self._plan_elapsed_s), 0.0)
+            total_runtime_s = max(float(self._runtime_s if self._runtime_s is not None else 0.0), 0.0)
+            step_runtime_s = max(float(self._step_runtime_s if self._step_runtime_s is not None else active_elapsed_s), 0.0)
+            step_eta_s = max(current_step.duration_s - active_elapsed_s, 0.0)
+            total_eta_s = step_eta_s + sum(max(step.duration_s, 0.0) for step in self._steps[plan_active_row + 1 :])
             total_eta_clock = (datetime.now() + timedelta(seconds=total_eta_s)).strftime("%H:%M")
-            for index, step in enumerate(self._steps):
-                if progress_s < step.end_s or index == step_count - 1:
-                    current_step_index = index + 1
-                    step_runtime_s = max(progress_s - step.start_s, 0.0)
-                    step_eta_s = max(step.end_s - progress_s, 0.0)
-                    step_eta_clock = (datetime.now() + timedelta(seconds=step_eta_s)).strftime("%H:%M")
-                    break
+            step_eta_clock = (datetime.now() + timedelta(seconds=step_eta_s)).strftime("%H:%M")
+            current_step_index = plan_active_row + 1
         elif self._steps and self._selected_row is not None and 0 <= self._selected_row < step_count:
             current_step_index = self._selected_row + 1
-            selected_start_s = float(self._steps[self._selected_row].start_s)
-            total_runtime_s = selected_start_s
-            total_eta_s = max(total_end_s - selected_start_s, 0.0)
+            total_runtime_s = max(float(self._runtime_s or 0.0), 0.0)
+            total_eta_s = max(total_end_s, 0.0)
             total_eta_clock = (datetime.now() + timedelta(seconds=total_eta_s)).strftime("%H:%M")
             current_step = self._steps[self._selected_row]
-            step_runtime_s = 0.0
+            step_runtime_s = max(float(self._step_runtime_s or 0.0), 0.0)
             step_eta_s = max(current_step.duration_s, 0.0)
             step_eta_clock = (datetime.now() + timedelta(seconds=step_eta_s)).strftime("%H:%M")
 
@@ -1117,11 +1200,14 @@ class PumpPlanTimelineWidget(QWidget):
 
     def _scaled_font(self, base_font: QFont, *, delta: float = 0.0, minimum: float = 1.0, bold: bool | None = None) -> QFont:
         font_info = QFontInfo(base_font)
-        base_size = float(font_info.pointSizeF())
+        font = QFont(base_font)
+        base_size = float(font.pointSizeF())
         if base_size <= 0:
-            base_size = float(font_info.pointSize()) if font_info.pointSize() > 0 else 10.0
-        font = QFont(font_info.family())
-        font.setPointSizeF(max(base_size + delta, minimum))
+            base_size = float(font.pointSize()) if font.pointSize() > 0 else float(font_info.pointSize())
+        if base_size <= 0:
+            base_size = 10.0
+        new_size = max(base_size + delta, minimum, 1.0)
+        font.setPointSizeF(new_size)
         if bold is not None:
             font.setBold(bold)
         return font
@@ -1563,7 +1649,11 @@ class ExperimentControlWindow(QWidget):
         self._plan_hold_blink_timer.timeout.connect(self._advance_plan_hold_blink_indicator)
         self._plan_elapsed_s = 0.0
         self._plan_resume_elapsed_s = 0.0
+        self._plan_runtime_s = 0.0
+        self._plan_resume_runtime_s = 0.0
         self._plan_started_monotonic: float | None = None
+        self._step_started_monotonic: float | None = None
+        self._measurement_started_monotonic: float | None = None
         self._plan_active_row: int | None = None
         self._applied_plan_step: PumpPlanStep | None = None
         self._status_message_base = "Pump not connected."
@@ -1945,8 +2035,9 @@ class ExperimentControlWindow(QWidget):
         )
         self.record_with_flow_button.setCheckable(True)
         self.record_with_flow_button.setChecked(True)
-        self.record_with_flow_button.toggled.connect(self._update_record_with_flow_button_icon)
+        self.record_with_flow_button.toggled.connect(self._handle_record_with_flow_button_toggled)
         self._record_with_flow_recording_active = False
+        self._record_with_flow_locked_checked = bool(self.record_with_flow_button.isChecked())
         self._update_record_with_flow_button_icon()
         self.timeline_widget = PumpPlanTimelineWidget()
         self.timeline_widget.set_theme(self._theme_mode)
@@ -3166,6 +3257,27 @@ class ExperimentControlWindow(QWidget):
             finally:
                 self.step_switch_mode_button.blockSignals(False)
             self._set_switch_solution_mode(bool(payload.switch_solution_mode))
+        if payload.valve_state_labels is not None:
+            self._valve_state_labels = self._load_valve_state_labels({"valve_state_labels": payload.valve_state_labels})
+            set_step_valve_button_state_for_button(
+                self,
+                self.step_valve_button,
+                str(self.step_valve_button.property("valve") or "Open"),
+            )
+        if payload.valve_state_colors is not None:
+            self._valve_state_colors = self._load_valve_state_colors({"valve_state_colors": payload.valve_state_colors})
+        if payload.color_palette_entries is not None:
+            payload_entries: list[tuple[str, str]] = []
+            for index, entry in enumerate(payload.color_palette_entries):
+                name = str(entry.get("name", "")).strip()
+                color = str(entry.get("color", "")).strip().upper()
+                normalized = self._normalize_color_entry(name, color, index)
+                if normalized is not None:
+                    payload_entries.append(normalized)
+            if payload_entries:
+                self._color_palette_entries = payload_entries
+                self._sync_custom_plan_colors_from_palette()
+                self._refresh_color_palette_widgets()
         if payload.native_document is not None:
             unsupported_devices = self._native_experiment_plan_unsupported_devices(payload.native_document)
             if unsupported_devices:
@@ -3193,6 +3305,7 @@ class ExperimentControlWindow(QWidget):
             self.manual_tube_spins[index].blockSignals(True)
             self.manual_tube_spins[index].setValue(float(tube_mm))
             self.manual_tube_spins[index].blockSignals(False)
+        self.save_ui_state()
         self._begin_experiment_plan_import_population(payload, steps)
 
     def _handle_experiment_plan_import_failed(self, generation: int, message: str) -> None:
@@ -3998,15 +4111,48 @@ class ExperimentControlWindow(QWidget):
             return
         active = self.record_with_flow_button.isChecked()
         recording_active = bool(getattr(self, "_record_with_flow_recording_active", False))
-        color = QColor("#47a861" if active and not recording_active else "#8a98a8")
+        color = QColor("#47a861" if active else "#8a98a8")
         self.record_with_flow_button.setIcon(tint_tabler_icon(flow_tabler_icon("file_pencil"), color))
         if recording_active:
-            self.record_with_flow_button.setToolTip("Sensorgram recording is active.")
+            self.record_with_flow_button.setToolTip("Sensorgram recording is active. The setting is locked while recording.")
         else:
             self.record_with_flow_button.setToolTip("Record measurement data while the experiment plan runs.")
 
+    def _handle_record_with_flow_button_toggled(self, checked: bool) -> None:
+        recording_active = bool(getattr(self, "_record_with_flow_recording_active", False))
+        if recording_active:
+            locked_checked = bool(getattr(self, "_record_with_flow_locked_checked", True))
+            if bool(checked) != locked_checked:
+                self.record_with_flow_button.blockSignals(True)
+                try:
+                    self.record_with_flow_button.setChecked(locked_checked)
+                finally:
+                    self.record_with_flow_button.blockSignals(False)
+            self._update_record_with_flow_button_icon()
+            return
+        self._record_with_flow_locked_checked = bool(checked)
+        self._update_record_with_flow_button_icon()
+
     def _set_record_with_flow_recording_active(self, active: bool) -> None:
         self._record_with_flow_recording_active = bool(active)
+        if active:
+            self._record_with_flow_locked_checked = bool(self.record_with_flow_button.isChecked())
+        if not active:
+            if self._measurement_started_monotonic is not None:
+                self._plan_runtime_s = self._plan_runtime_for_display()
+            if self._step_started_monotonic is not None:
+                self._plan_resume_runtime_s = self._step_runtime_for_display()
+            self._measurement_started_monotonic = None
+            self._step_started_monotonic = None
+            self._refresh_status_line()
+            if self._read_experiment_control_steps():
+                self.timeline_widget.set_steps(
+                    self._read_experiment_control_steps(),
+                    self._selected_experiment_control_row(),
+                    self._timeline_progress_for_display(),
+                    self._plan_runtime_for_display(),
+                    self._step_runtime_for_display(),
+                )
         self._update_record_with_flow_button_icon()
 
     def _toggle_experiment_control_run_hold(self) -> None:
@@ -6113,7 +6259,8 @@ class ExperimentControlWindow(QWidget):
         self.timeline_widget.set_steps(
             recomputed_steps,
             self._selected_experiment_control_row(),
-            self._plan_elapsed_s if (self._plan_running or self._plan_holding or self._plan_elapsed_s > 0.0) else self._selected_step_start_s(),
+            self._timeline_progress_for_display(),
+            self._plan_runtime_for_display(),
         )
         if recomputed_steps:
             row_to_select = 0 if selected_row is None else min(max(selected_row, 0), len(recomputed_steps) - 1)
@@ -6320,7 +6467,8 @@ class ExperimentControlWindow(QWidget):
         self.timeline_widget.set_steps(
             self._read_experiment_control_steps(),
             self._selected_experiment_control_row(),
-            self._plan_elapsed_s if (self._plan_running or self._plan_holding or self._plan_elapsed_s > 0.0) else self._selected_step_start_s(),
+            self._timeline_progress_for_display(),
+            self._plan_runtime_for_display(),
         )
         self._update_plan_table_height()
 
@@ -6587,9 +6735,18 @@ class ExperimentControlWindow(QWidget):
             return
         self._select_experiment_control_plan_row(row)
         self._plan_active_row = row
-        self._plan_elapsed_s = steps[row].start_s
-        self._plan_resume_elapsed_s = self._plan_elapsed_s
-        self._plan_started_monotonic = monotonic() if self._plan_running else None
+        if self._plan_running or self._plan_holding:
+            self._plan_elapsed_s = 0.0
+            self._plan_resume_elapsed_s = 0.0
+            self._plan_started_monotonic = monotonic() if self._plan_running else None
+            self._step_started_monotonic = monotonic() if self._plan_running else None
+        else:
+            self._plan_elapsed_s = 0.0
+            self._plan_resume_elapsed_s = 0.0
+            self._plan_started_monotonic = None
+            self._step_started_monotonic = None
+            self._plan_runtime_s = 0.0
+            self._plan_resume_runtime_s = 0.0
         self._update_timeline_selection()
         self._load_selected_step_into_editor()
         if not (self._plan_running or self._plan_holding):
@@ -6617,12 +6774,18 @@ class ExperimentControlWindow(QWidget):
             row = 0
             self._select_experiment_control_plan_row(0)
         if not self._plan_running:
-            self._plan_elapsed_s = steps[row].start_s if self._plan_elapsed_s <= 0.0 else self._plan_elapsed_s
+            self._plan_elapsed_s = 0.0
+            self._plan_resume_elapsed_s = 0.0
+        if self._measurement_started_monotonic is None:
+            self._measurement_started_monotonic = monotonic()
+        self._step_started_monotonic = monotonic()
+        self._plan_runtime_s = 0.0
+        self._plan_resume_runtime_s = 0.0
         self._plan_running = True
-        self._plan_resume_elapsed_s = self._plan_elapsed_s
+        self._plan_active_row = row
         self._plan_started_monotonic = monotonic()
         self._update_experiment_control_toggle_button()
-        self._activate_experiment_control_step_for_elapsed(self._plan_elapsed_s, force=True)
+        self._activate_experiment_control_step_for_elapsed(0.0, force=True)
         self._plan_timer.start()
         self._set_status_message(f"Running experiment plan from step {self._plan_active_row + 1 if self._plan_active_row is not None else 1}.")
         _LOGGER.info("Experiment plan started | step=%s", self._plan_active_row + 1 if self._plan_active_row is not None else 1)
@@ -6640,7 +6803,7 @@ class ExperimentControlWindow(QWidget):
         self._plan_running = False
         self._plan_holding = True
         self._plan_started_monotonic = None
-        self._plan_timer.stop()
+        self._plan_runtime_s = self._step_runtime_for_display()
         pause_applied = self._apply_pause_state()
         self._update_experiment_control_toggle_button()
         if pause_applied:
@@ -6661,13 +6824,27 @@ class ExperimentControlWindow(QWidget):
         if steps and target_row is not None:
             target_row = min(max(int(target_row), 0), len(steps) - 1)
             self._plan_active_row = target_row
-            self._plan_elapsed_s = steps[target_row].start_s
+            if not (self._plan_running or self._plan_holding):
+                self._plan_elapsed_s = 0.0
             self._plan_resume_elapsed_s = self._plan_elapsed_s
             self._select_experiment_control_plan_row(target_row)
-            self.timeline_widget.set_steps(steps, target_row, self._plan_elapsed_s)
+            self.timeline_widget.set_steps(
+                steps,
+                target_row,
+                self._timeline_progress_for_display(),
+                self._plan_runtime_for_display(),
+                self._step_runtime_for_display(),
+            )
+        if self._plan_running and self._plan_started_monotonic is not None:
+            self._plan_elapsed_s = self._plan_resume_elapsed_s + max(monotonic() - self._plan_started_monotonic, 0.0)
+            self._plan_resume_elapsed_s = self._plan_elapsed_s
         self._plan_running = False
         self._plan_holding = False
         self._plan_started_monotonic = None
+        self._step_started_monotonic = None
+        self._measurement_started_monotonic = None
+        self._plan_runtime_s = self._plan_runtime_for_display()
+        self._plan_resume_runtime_s = self._step_runtime_for_display()
         self._applied_plan_step = None
         self._plan_timer.stop()
         self._update_experiment_control_toggle_button()
@@ -6692,8 +6869,30 @@ class ExperimentControlWindow(QWidget):
         if running:
             self._apply_experiment_control_step_to_pump(steps[target], start=True)
             self._emit_experimental_control_state("step_jump", steps[target])
+            self._step_started_monotonic = monotonic()
+            self._plan_runtime_s = self._step_runtime_for_display()
+            self._plan_resume_runtime_s = self._plan_runtime_s
         if not (self._plan_running or self._plan_holding):
             self._set_status_message(f"Selected experiment-plan step {target + 1}.")
+
+    def _timeline_progress_for_display(self) -> float | None:
+        if self._plan_running or self._plan_holding:
+            row = self._plan_active_row if self._plan_active_row is not None else self._selected_experiment_control_row()
+            steps = self._read_experiment_control_steps()
+            if row is not None and 0 <= row < len(steps):
+                return max(float(steps[row].start_s) + max(float(self._plan_elapsed_s), 0.0), 0.0)
+            return max(float(self._plan_elapsed_s), 0.0)
+        return None
+
+    def _plan_runtime_for_display(self) -> float:
+        if self._measurement_started_monotonic is not None:
+            return max(monotonic() - self._measurement_started_monotonic, 0.0)
+        return max(float(self._plan_runtime_s), 0.0)
+
+    def _step_runtime_for_display(self) -> float:
+        if self._step_started_monotonic is not None:
+            return max(monotonic() - self._step_started_monotonic, 0.0)
+        return max(float(self._plan_resume_runtime_s), 0.0)
 
     def _emit_experimental_control_state(self, event: str, step: PumpPlanStep | None = None, *, status: str = "") -> None:
         if step is None:
@@ -6722,6 +6921,18 @@ class ExperimentControlWindow(QWidget):
         self._emit_experimental_control_state(event, step, status=status)
 
     def _advance_experiment_control_progress(self) -> None:
+        if self._plan_holding:
+            steps = self._read_experiment_control_steps()
+            if steps:
+                self.timeline_widget.set_steps(
+                    steps,
+                    self._plan_active_row,
+                    self._timeline_progress_for_display(),
+                    self._plan_runtime_for_display(),
+                    self._step_runtime_for_display(),
+                )
+            self._refresh_status_line()
+            return
         if not self._plan_running or self._plan_started_monotonic is None:
             return
         steps = self._read_experiment_control_steps()
@@ -6729,17 +6940,44 @@ class ExperimentControlWindow(QWidget):
             self._stop_experiment_control()
             return
         elapsed = self._plan_resume_elapsed_s + max(monotonic() - self._plan_started_monotonic, 0.0)
-        total = steps[-1].end_s
-        if elapsed >= total:
-            self._plan_elapsed_s = total
-            self._plan_resume_elapsed_s = total
-            self._activate_experiment_control_step_for_elapsed(total, force=False)
-            self._stop_experiment_control()
-            self._set_status_message("Experiment plan finished.")
-            _LOGGER.info("Experiment plan finished.")
+        current_row = self._plan_active_row if self._plan_active_row is not None else self._selected_experiment_control_row()
+        if current_row is None or not (0 <= current_row < len(steps)):
+            current_row = 0
+        current_step = steps[current_row]
+        if elapsed >= max(float(current_step.duration_s), 0.0):
+            next_row = current_row + 1
+            if next_row >= len(steps):
+                self._plan_elapsed_s = max(float(current_step.duration_s), 0.0)
+                self._plan_resume_elapsed_s = self._plan_elapsed_s
+                self._stop_experiment_control()
+                self._set_status_message("Experiment plan finished.")
+                _LOGGER.info("Experiment plan finished.")
+                return
+            self._plan_active_row = next_row
+            self._select_experiment_control_plan_row(next_row)
+            self._apply_experiment_control_step_to_pump(steps[next_row], start=True)
+            self._plan_elapsed_s = 0.0
+            self._plan_resume_elapsed_s = 0.0
+            self._plan_started_monotonic = monotonic()
+            self._step_started_monotonic = monotonic()
+            self.timeline_widget.set_steps(
+                steps,
+                next_row,
+                self._timeline_progress_for_display(),
+                self._plan_runtime_for_display(),
+                self._step_runtime_for_display(),
+            )
+            self._refresh_status_line()
             return
-        self._activate_experiment_control_step_for_elapsed(elapsed, force=False)
+        self._plan_elapsed_s = elapsed
         self._refresh_status_line()
+        self.timeline_widget.set_steps(
+            steps,
+            current_row,
+            self._timeline_progress_for_display(),
+            self._plan_runtime_for_display(),
+            self._step_runtime_for_display(),
+        )
 
     def _activate_experiment_control_step_for_elapsed(self, elapsed_s: float, *, force: bool) -> None:
         steps = self._read_experiment_control_steps()
@@ -6748,16 +6986,20 @@ class ExperimentControlWindow(QWidget):
             self._plan_elapsed_s = 0.0
             return
         self._plan_elapsed_s = max(float(elapsed_s), 0.0)
-        target_row = 0
-        for index, step in enumerate(steps):
-            if step.start_s <= self._plan_elapsed_s < step.end_s or index == len(steps) - 1:
-                target_row = index
-                break
+        target_row = self._plan_active_row if self._plan_active_row is not None else self._selected_experiment_control_row()
+        if target_row is None or not (0 <= target_row < len(steps)):
+            target_row = 0
         if force or target_row != self._plan_active_row:
             self._plan_active_row = target_row
             self._select_experiment_control_plan_row(target_row)
             self._apply_experiment_control_step_to_pump(steps[target_row], start=True)
-        self.timeline_widget.set_steps(steps, target_row, self._plan_elapsed_s)
+        self.timeline_widget.set_steps(
+            steps,
+            target_row,
+            self._plan_elapsed_s,
+            self._plan_runtime_for_display(),
+            self._step_runtime_for_display(),
+        )
 
     def _stop_all_channels(self) -> None:
         if not self._client.is_connected():
@@ -6841,6 +7083,11 @@ class ExperimentControlWindow(QWidget):
             "switch_solution_mode": bool(self._switch_solution_mode),
             "switch_solution_labels": list(self._switch_solution_labels),
             "switch_solution_rows": self.switch_solution_hdf5_rows(),
+            "valve_state_labels": dict(self._valve_state_labels),
+            "valve_state_colors": dict(self._valve_state_colors),
+            "color_palette_entries": [
+                {"name": name, "color": color} for name, color in self._color_palette_entries
+            ],
         }
 
     def _tube_mm_values(self) -> list[float]:
@@ -7085,7 +7332,8 @@ class ExperimentControlWindow(QWidget):
                 self.timeline_widget.set_steps(
                     steps,
                     self._selected_experiment_control_row(),
-                    self._plan_elapsed_s if (self._plan_running or self._plan_holding or self._plan_elapsed_s > 0.0) else self._selected_step_start_s(),
+                    self._timeline_progress_for_display(),
+                    self._plan_runtime_for_display(),
                 )
                 if self.plan_table.rowCount() > 0:
                     self._load_selected_step_into_editor()

@@ -5,7 +5,12 @@ from pathlib import Path
 from PyQt6.QtWidgets import QFileDialog
 
 from lspr_app.domain.models import ProcessingSettings
-from lspr_app.storage.app_config import DEFAULT_CONFIG_PATH, load_processing_settings, save_processing_settings
+from lspr_app.storage.app_config import (
+    DEFAULT_CONFIG_PATH,
+    load_processing_settings,
+    load_processing_settings_from_hdf5,
+    save_processing_settings,
+)
 
 SMOOTHING_METHOD_LABELS = {
     "none": "None",
@@ -167,11 +172,15 @@ def load_processing_settings_dialog(window) -> None:
         window,
         "Load processing settings",
         str(DEFAULT_CONFIG_PATH),
-        "JSON files (*.json)",
+        "Settings files (*.json *.h5 *.hdf5)",
     )
     if not path_str:
         return
-    settings = load_processing_settings(Path(path_str))
+    path = Path(path_str)
+    if path.suffix.lower() in {".h5", ".hdf5"}:
+        settings = load_processing_settings_from_hdf5(path)
+    else:
+        settings = load_processing_settings(path)
     window._processing_settings = settings
     apply_processing_settings_to_widgets(window, settings)
     save_processing_settings(settings)

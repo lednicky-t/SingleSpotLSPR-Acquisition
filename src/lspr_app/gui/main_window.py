@@ -19,7 +19,6 @@ from PyQt6.QtCore import QEvent
 from PyQt6.QtGui import (
     QDesktopServices,
     QFont,
-    QFontInfo,
     QColor,
     QGuiApplication,
     QIcon,
@@ -220,9 +219,12 @@ from lspr_app.gui.plot_controller import flush_deferred_ui_refreshes, flush_plot
 from lspr_app.gui.spectrum_plot_controller import (
     autoscale_residual_axis,
     autoscale_spectrum_plot,
+    clear_residual_display,
     clip_series_to_window,
     downsample_spectrum_series_for_view,
     handle_spectrum_mouse_moved,
+    ResidualViewBox,
+    render_residual_display,
     spectrum_render_cache_key,
     update_residual_axis_visibility,
     update_residual_view_geometry,
@@ -299,42 +301,22 @@ class LogTerminalTextEdit(QTextEdit):
                 event.ignore()
                 return
             factor = 1.1 if delta_y > 0 else 1 / 1.1
-            font_info = QFontInfo(self.font())
-            current_size = float(font_info.pointSizeF())
+            current_font = QFont(self.font())
+            current_size = float(current_font.pointSizeF())
             if current_size <= 0:
-                current_size = float(font_info.pointSize()) if font_info.pointSize() > 0 else 9.0
-            font = QFont(font_info.family())
+                current_size = float(current_font.pointSize()) if current_font.pointSize() > 0 else 9.0
+            if current_size <= 0:
+                current_size = 9.0
+            font = QFont(current_font)
             new_size = max(self._min_font_size, min(current_size * factor, self._max_font_size))
+            if new_size <= 0:
+                new_size = self._min_font_size
             font.setPointSizeF(new_size)
             self.setFont(font)
             self.document().setDefaultFont(font)
             event.accept()
             return
         super().wheelEvent(event)
-
-
-class ResidualViewBox(pg.ViewBox):
-    def wheelEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
-        angle_delta = getattr(event, "angleDelta", None)
-        if angle_delta is None:
-            event.ignore()
-            return
-        delta_y = angle_delta().y()
-        if delta_y == 0:
-            event.ignore()
-            return
-        view_range = self.viewRange()
-        y_range = view_range[1]
-        y_min = float(y_range[0])
-        y_max = float(y_range[1])
-        if not np.isfinite(y_min) or not np.isfinite(y_max) or y_max <= y_min:
-            event.ignore()
-            return
-        factor = 1.12 if delta_y > 0 else 1 / 1.12
-        center = (y_min + y_max) * 0.5
-        half_span = max((y_max - y_min) * 0.5 * factor, 1e-9)
-        self.setYRange(center - half_span, center + half_span, padding=0.0)
-        event.accept()
 
 
 class MainWindow(QMainWindow):
@@ -529,6 +511,10 @@ class MainWindow(QMainWindow):
         self._visible_trace_mode = "elapsed"
         self._plots_frozen = False
         self._sensorgram_frozen = False
+        self._measurement_compression_blink_visible = True
+        self._measurement_compression_blink_timer = QTimer(self)
+        self._measurement_compression_blink_timer.setInterval(650)
+        self._measurement_compression_blink_timer.timeout.connect(self._advance_measurement_compression_blink_indicator)
         self._closing = False
         self._screen_fitted = False
         self._source_epoch = 0
@@ -539,6 +525,10 @@ class MainWindow(QMainWindow):
         self._acquisition_state_timer.setSingleShot(True)
         self._acquisition_state_timer.setInterval(250)
         self._acquisition_state_timer.timeout.connect(self._persist_acquisition_state)
+        self._ui_state_timer = QTimer(self)
+        self._ui_state_timer.setSingleShot(True)
+        self._ui_state_timer.setInterval(250)
+        self._ui_state_timer.timeout.connect(self._save_ui_state)
         self._hardware_init_task: HardwareInitTask | None = None
         self._hardware_init_scheduled = False
         self._spectrum_cursor_text = "cursor: -"
@@ -626,7 +616,7 @@ class MainWindow(QMainWindow):
         self.experiment_name_edit.setFixedHeight(24)
         self.measurement_compression_button = self._make_frameless_icon_button(
             storage_compression_icon(self._hdf5_compression_enabled),
-            "Enable or disable gzip compression for new HDF5 measurement files.",
+            "Toggle post-recording gzip compression for the finished HDF5 measurement file.",
             size=24,
         )
         self.measurement_compression_button.setCheckable(True)
@@ -945,10 +935,14 @@ class MainWindow(QMainWindow):
         self.residual_axis.enableAutoSIPrefix(False)
         self.residual_axis.setTextPen(pg.mkPen("#7a7a7a"))
         self.residual_axis.setPen(pg.mkPen("#7a7a7a"))
-        self.residual_view = ResidualViewBox()
+        self.residual_view = ResidualViewBox(self)
+        self.residual_view._manual_y_zoom = False
+        self._residual_axis_autoscaled = False
+        self._residual_y_range: list[float] | None = None
         spectrum_plot_item.scene().addItem(self.residual_view)
         self.residual_curve = pg.PlotDataItem(pen=pg.mkPen("#888888", width=1))
         self.residual_view.addItem(self.residual_curve)
+        self._residual_segment_items: list[pg.PlotCurveItem] = []
         spectrum_plot_item.getAxis("right").linkToView(self.residual_view)
         self.residual_view.setXLink(spectrum_plot_item.vb)
         self.residual_view.setMouseEnabled(x=False, y=False)
@@ -960,6 +954,7 @@ class MainWindow(QMainWindow):
             curve.setDownsampling(auto=True, method="peak")
         self.residual_curve.setClipToView(True)
         self.residual_curve.setDownsampling(auto=False, ds=1)
+        self.residual_curve.setPen(pg.mkPen((0, 0, 0, 0), width=0))
         self.processing_region_item = pg.LinearRegionItem(values=(0, 1), movable=False, brush=pg.mkBrush(90, 160, 255, 30), pen=pg.mkPen(None))
         self.fit_region_item = pg.LinearRegionItem(values=(0, 1), movable=False, brush=pg.mkBrush(255, 180, 80, 40), pen=pg.mkPen(None))
         self.spectrum_plot.addItem(self.processing_region_item)
@@ -1202,8 +1197,6 @@ class MainWindow(QMainWindow):
         plot_bar.addWidget(self.show_residual_button)
         plot_bar.addWidget(self.freeze_plots_button)
         plot_bar.addStretch(1)
-        plot_bar.addWidget(QLabel("Refresh Rate"))
-        plot_bar.addWidget(self.live_rate_spin)
 
         spectrum_stats_bar = QHBoxLayout()
         spectrum_stats_bar.setSpacing(8)
@@ -1370,6 +1363,15 @@ class MainWindow(QMainWindow):
         session_settings_layout.setContentsMargins(0, 0, 0, 0)
         session_settings_layout.setSpacing(4)
         session_settings_layout.addWidget(session_settings_header)
+        session_rate_row = QHBoxLayout()
+        session_rate_row.setContentsMargins(0, 0, 0, 0)
+        session_rate_row.setSpacing(6)
+        session_rate_label = QLabel("Refresh rate")
+        session_rate_label.setToolTip("GUI display refresh rate for live spectra and sensorgram updates.")
+        session_rate_row.addWidget(session_rate_label)
+        session_rate_row.addWidget(self.live_rate_spin)
+        session_rate_row.addStretch(1)
+        session_settings_layout.addLayout(session_rate_row)
         session_settings_layout.addWidget(self.session_settings_text)
         session_settings_block.setLayout(session_settings_layout)
 
@@ -1544,7 +1546,6 @@ class MainWindow(QMainWindow):
         self.project_destination_edit.setEnabled(enabled)
         self.project_destination_browse_button.setEnabled(enabled)
         self.experiment_name_edit.setEnabled(enabled)
-        self.measurement_compression_button.setEnabled(enabled)
 
     def _choose_recording_project_destination(self) -> None:
         current = self.recording_project_destination()
@@ -1580,11 +1581,48 @@ class MainWindow(QMainWindow):
             self.measurement_compression_button.blockSignals(True)
             self.measurement_compression_button.setChecked(self._hdf5_compression_enabled)
             self.measurement_compression_button.blockSignals(False)
-            self.measurement_compression_button.setIcon(
-                storage_compression_icon(self._hdf5_compression_enabled)
-            )
+            if not bool(getattr(self, "_measurement_compression_task", None)):
+                self.measurement_compression_button.setIcon(
+                    storage_compression_icon(self._hdf5_compression_enabled)
+                )
         state_text = "enabled" if self._hdf5_compression_enabled else "disabled"
         self._log_info(f"HDF5 compression {state_text}.")
+
+    def _set_measurement_compression_busy_indicator(self, active: bool) -> None:
+        timer = getattr(self, "_measurement_compression_blink_timer", None)
+        if timer is None:
+            return
+        if active:
+            if not timer.isActive():
+                self._measurement_compression_blink_visible = True
+                self._render_measurement_compression_blink_indicator()
+                timer.start()
+        else:
+            timer.stop()
+            self._measurement_compression_blink_visible = True
+            self._render_measurement_compression_blink_indicator()
+
+    def _advance_measurement_compression_blink_indicator(self) -> None:
+        timer = getattr(self, "_measurement_compression_blink_timer", None)
+        if timer is None or not timer.isActive():
+            return
+        self._measurement_compression_blink_visible = not bool(getattr(self, "_measurement_compression_blink_visible", True))
+        self._render_measurement_compression_blink_indicator()
+
+    def _render_measurement_compression_blink_indicator(self) -> None:
+        button = getattr(self, "measurement_compression_button", None)
+        if button is None:
+            return
+        if bool(getattr(self, "_measurement_compression_task", None)):
+            if bool(getattr(self, "_measurement_compression_blink_visible", True)):
+                button.setIcon(storage_compression_icon(self._hdf5_compression_enabled))
+            else:
+                blank = QIcon()
+                button.setIcon(blank)
+            button.setToolTip("Compressing finished measurement file...")
+            return
+        button.setIcon(storage_compression_icon(self._hdf5_compression_enabled))
+        button.setToolTip("Toggle post-recording gzip compression for the finished HDF5 measurement file.")
 
     def _set_status_indicator(
         self,
@@ -2154,7 +2192,7 @@ class MainWindow(QMainWindow):
             self.poly_marker.setPen(pg.mkPen("#11161c", width=1.4))
             self.gaussian_marker.setPen(pg.mkPen("#11161c", width=1.4))
             self.centroid_marker.setPen(pg.mkPen("#11161c", width=1.4))
-            self.residual_curve.setPen(pg.mkPen("#b6b6b6", width=1))
+            self.residual_curve.setPen(pg.mkPen((0, 0, 0, 0), width=0))
         else:
             self.processing_region_item.setBrush(pg.mkBrush(90, 160, 255, 30))
             self.fit_region_item.setBrush(pg.mkBrush(255, 180, 80, 40))
@@ -2162,7 +2200,7 @@ class MainWindow(QMainWindow):
             self.poly_marker.setPen(pg.mkPen("w", width=1.4))
             self.gaussian_marker.setPen(pg.mkPen("w", width=1.4))
             self.centroid_marker.setPen(pg.mkPen("w", width=1.4))
-            self.residual_curve.setPen(pg.mkPen("#7d7d7d", width=1))
+            self.residual_curve.setPen(pg.mkPen((0, 0, 0, 0), width=0))
         self._update_freeze_button_icon()
         self._update_residual_button_icon()
         self._update_dark_reference_button_icons()
@@ -2332,6 +2370,9 @@ class MainWindow(QMainWindow):
 
     def _save_ui_state(self) -> None:
         save_ui_state(self)
+
+    def _schedule_ui_state_persist(self) -> None:
+        self._ui_state_timer.start()
 
     def _collapsible_section_state(self) -> dict[str, bool]:
         return collapsible_section_state(self)
@@ -2524,6 +2565,9 @@ class MainWindow(QMainWindow):
         if not isinstance(payload, dict):
             return
         row = dict(payload)
+        # Persist the event on an absolute UTC axis for file stability; the GUI still shows relative time.
+        timestamp_utc_ms = int(round(datetime.now(timezone.utc).timestamp() * 1000.0))
+        row["timestamp_utc_ms"] = max(timestamp_utc_ms, 0)
         if self._measurement_started_at is not None:
             elapsed_ms = int(round((datetime.now(timezone.utc) - self._measurement_started_at).total_seconds() * 1000.0))
         else:
@@ -3627,13 +3671,19 @@ class MainWindow(QMainWindow):
         autoscale_trace_plot_for(self)
 
     def _update_residual_view_geometry(self) -> None:
-        update_residual_view_geometry_for(self)
+        update_residual_view_geometry(self)
 
     def _autoscale_residual_axis(self) -> None:
-        autoscale_residual_axis_for(self)
+        autoscale_residual_axis(self)
 
     def _update_residual_axis_visibility(self, visible: bool | None = None) -> None:
-        update_residual_axis_visibility_for(self, visible)
+        update_residual_axis_visibility(self, visible)
+
+    def _clear_residual_display(self) -> None:
+        clear_residual_display(self)
+
+    def _render_residual_display(self, x_values: np.ndarray, residual_values: np.ndarray) -> None:
+        render_residual_display(self, x_values, residual_values)
 
     def _request_trace_autoscale(self) -> None:
         request_trace_autoscale_for(self)
@@ -3682,7 +3732,7 @@ class MainWindow(QMainWindow):
         if processed is None:
             self.spectrum_curve.setData([], [])
             self.fit_curve.setData([], [])
-            self.residual_curve.setData([], [])
+            self._clear_residual_display()
             self.max_marker.setData([], [])
             self.poly_marker.setData([], [])
             self.gaussian_marker.setData([], [])
@@ -3735,14 +3785,15 @@ class MainWindow(QMainWindow):
                         ((residual_base - display_fit_y) / display_fit_y) * 100.0,
                         np.nan,
                     )
-                self.residual_curve.setData(display_fit_x, residual_values)
-                self._autoscale_residual_axis()
+                self._render_residual_display(display_fit_x, residual_values)
+                if not getattr(self, "_residual_axis_autoscaled", False):
+                    self._autoscale_residual_axis()
             else:
-                self.residual_curve.setData([], [])
+                self._clear_residual_display()
             self.fit_region_item.setRegion((fit_low, fit_high))
         else:
             self.fit_curve.setData([], [])
-            self.residual_curve.setData([], [])
+            self._clear_residual_display()
             self.fit_region_item.setRegion((low, low))
         self._update_residual_axis_visibility(residual_visible)
         self.spectrum_plot.setLabel("left", processed.y_label)

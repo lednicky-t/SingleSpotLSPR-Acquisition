@@ -30,6 +30,8 @@ def restore_ui_state(window) -> None:
     left_controls_visible = ui_state.get("left_controls_visible")
     sensorgram_visible = ui_state.get("sensorgram_visible")
     trace_stats_metric_name = ui_state.get("trace_stats_metric_name")
+    residual_y_range = ui_state.get("residual_y_range")
+    residual_visible = bool(ui_state.get("show_residual", False))
 
     if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
         app = QApplication.instance()
@@ -99,7 +101,7 @@ def restore_ui_state(window) -> None:
         window._update_sensorgram_view_mode_button()
     if isinstance(sensorgram_content_mode, str):
         window._sensorgram_content_mode = window._normalize_sensorgram_content_mode(sensorgram_content_mode)
-        window._update_sensorgram_content_mode_button()
+        window._apply_sensorgram_content_mode(save=False)
     if isinstance(trace_display_window_s, (int, float)) and float(trace_display_window_s) > 0:
         window._trace_display_window_s = window._normalize_sensorgram_display_window_s(trace_display_window_s)
     if isinstance(sensorgram_downsampling_enabled, (bool, str)):
@@ -109,6 +111,18 @@ def restore_ui_state(window) -> None:
     if isinstance(sensorgram_frozen, bool):
         window._sensorgram_frozen = bool(sensorgram_frozen)
         window._update_sensorgram_freeze_button_icon()
+    if (
+        isinstance(residual_y_range, list)
+        and len(residual_y_range) == 2
+        and all(isinstance(item, (int, float)) for item in residual_y_range)
+    ):
+        y_min = float(residual_y_range[0])
+        y_max = float(residual_y_range[1])
+        if y_max > y_min:
+            window._residual_y_range = [y_min, y_max]
+            if residual_visible and hasattr(window, "residual_view"):
+                window.residual_view.setYRange(y_min, y_max, padding=0.0)
+                window._residual_axis_autoscaled = True
     window._update_sensorgram_display_window_button()
     window._update_sensorgram_downsampling_button()
     window._start_maximized = bool(maximized)
@@ -127,6 +141,21 @@ def save_ui_state(window) -> None:
         height = window.height()
         x_pos = window.x()
         y_pos = window.y()
+
+    residual_y_range: list[float] = []
+    if hasattr(window, "residual_view") and window.residual_view.isVisible():
+        try:
+            current_range = window.residual_view.viewRange()[1]
+            y_min = float(current_range[0])
+            y_max = float(current_range[1])
+            if y_max > y_min:
+                residual_y_range = [y_min, y_max]
+        except Exception:
+            residual_y_range = []
+    elif isinstance(getattr(window, "_residual_y_range", None), list):
+        saved_range = window._residual_y_range
+        if len(saved_range) == 2 and all(isinstance(item, (int, float)) for item in saved_range):
+            residual_y_range = [float(saved_range[0]), float(saved_range[1])]
 
     save_window_ui_state(
         "main_window",
@@ -151,6 +180,7 @@ def save_ui_state(window) -> None:
             "left_controls_visible": window._left_controls_scroll.isVisible(),
             "sensorgram_visible": window._sensorgram_block.isVisible(),
             "trace_stats_metric_name": window._trace_stats_metric_name,
+            "residual_y_range": residual_y_range,
             "collapsible_sections": collapsible_section_state(window),
         },
     )
@@ -197,6 +227,8 @@ def acquisition_state_payload(window) -> dict[str, object]:
             "switch_solution_mode": False,
             "switch_solution_labels": [f"Solution {index}" for index in range(1, 13)],
             "switch_solution_rows": [[str(index), f"Solution {index}"] for index in range(1, 13)],
+            "valve_state_labels": {"Open": "Open", "Close": "Close"},
+            "valve_state_colors": {"Open": "#4E79A7", "Close": "#B44A4A"},
         }
     )
     if window._experiment_control_window is not None:

@@ -5,6 +5,7 @@ import os
 import queue
 import threading
 import tempfile
+from dataclasses import asdict
 from pathlib import Path
 from time import monotonic
 from datetime import datetime, timezone
@@ -14,18 +15,24 @@ import numpy as np
 
 from lspr_core import ExperimentPlan
 from lspr_io import (
+    LSPR_MEASUREMENT_ASSIGNMENT_TABLES_GROUP_NAME,
+    LSPR_MEASUREMENT_COLOR_PALETTE_ENTRIES_DATASET_NAME,
     LSPR_EXPERIMENT_PLAN_DATASET_NAME,
-    LSPR_EXPERIMENT_PLAN_TMP_DATASET_NAME,
-    LSPR_MEASUREMENT_FLOW_EVENTS_DATASET_NAME,
-    LSPR_MEASUREMENT_FLOW_STATE_COLUMNS,
-    LSPR_MEASUREMENT_PEAK_COLUMNS,
     LSPR_MEASUREMENT_PLAN_COLUMNS,
-    LSPR_MEASUREMENT_SPECTRUM_COLUMNS,
+    LSPR_MEASUREMENT_RUNTIME_COLUMNS,
+    LSPR_MEASUREMENT_RUNTIME_DATASET_NAME,
+    LSPR_MEASUREMENT_RUNTIME_TIMESTAMP_UTC_COLUMN,
     LSPR_MEASUREMENT_TIME_COLUMNS,
+    LSPR_MEASUREMENT_WAVELENGTHS_DATASET_NAME,
+    LSPR_MEASUREMENT_SWITCH_SOLUTION_MAP_DATASET_NAME,
+    LSPR_MEASUREMENT_VALVE_STATE_MAP_DATASET_NAME,
+    LSPR_PROCESSED_METRICS_ACQUIRED_AT_UNIX_MS_DATASET_NAME,
     LSPR_SESSION_SCHEMA_NAME,
     LSPR_SESSION_SCHEMA_VERSION,
     standard_measurement_metadata,
     standard_session_identity,
+    write_processing_settings_metadata,
+    write_processed_metrics_metadata,
     write_measurement_manifest_metadata,
     write_measurement_root_metadata,
     write_session_metadata,
@@ -54,11 +61,17 @@ def repack_measurement_hdf5_file(source_path: Path) -> Path:
     try:
         with h5py.File(source_path, "r") as source_handle, h5py.File(temp_path, "w") as destination_handle:
             _copy_hdf5_node(source_handle, destination_handle, compression="gzip")
-            destination_handle.attrs["hdf5_compression_enabled"] = np.bool_(True)
-            destination_handle.attrs["hdf5_compression_filter"] = "gzip"
+            destination_handle.attrs["storage_compression_enabled"] = np.bool_(True)
+            destination_handle.attrs["storage_compression_filter"] = "gzip"
+            destination_handle.attrs["storage_compression_level"] = 4
             if "metadata" in destination_handle:
-                destination_handle["metadata"].attrs["hdf5_compression_enabled"] = np.bool_(True)
-                destination_handle["metadata"].attrs["hdf5_compression_filter"] = "gzip"
+                destination_handle["metadata"].attrs["storage_compression_enabled"] = np.bool_(True)
+                destination_handle["metadata"].attrs["storage_compression_filter"] = "gzip"
+                destination_handle["metadata"].attrs["storage_compression_level"] = 4
+            if "manifest" in destination_handle:
+                destination_handle["manifest"].attrs["storage_compression_enabled"] = np.bool_(True)
+                destination_handle["manifest"].attrs["storage_compression_filter"] = "gzip"
+                destination_handle["manifest"].attrs["storage_compression_level"] = 4
             destination_handle.flush()
         os.replace(temp_path, source_path)
     except Exception:
@@ -124,12 +137,6 @@ class HDF5MeasurementWriter:
         self._started_at_utc = started_at_utc or datetime.now(timezone.utc)
         self._compression_enabled = bool(compression_enabled)
         self._compression_kwargs: dict[str, object] = {}
-        if self._compression_enabled:
-            self._compression_kwargs = {
-                "compression": "gzip",
-                "compression_opts": 4,
-                "shuffle": True,
-            }
         self._dark_index = -1
         self._reference_index = -1
         self._last_dark_key: tuple[object, ...] | None = None
@@ -155,21 +162,18 @@ class HDF5MeasurementWriter:
                 app_version=APP_VERSION,
                 experiment_name=experiment_name,
             ),
-            storage_compression_enabled=self._compression_enabled,
-            storage_compression_filter="gzip" if self._compression_enabled else "none",
-            storage_compression_level=4 if self._compression_enabled else 0,
+            storage_compression_enabled=False,
+            storage_compression_filter="none",
+            storage_compression_level=0,
             extra_attrs={
                 "manifest_kind": "measurement",
             },
         )
         self._data = self._handle.create_group("data")
         self._metadata = self._handle.create_group("metadata")
-        self._plans = self._handle.create_group("plans")
-        self._runs = self._handle.create_group("runs")
-        self._axes = self._handle.create_group("axes")
-        self._spectra = self._handle.create_group("spectra")
         self._processed = self._handle.create_group("processed")
         self._devices = self._handle.create_group("devices")
+        self._data_spectra = self._data.create_group("spectra")
         self._session_identity = standard_session_identity(app_name="LSPR Acquisition", app_version=APP_VERSION)
         write_session_metadata(
             self._metadata,
@@ -182,36 +186,30 @@ class HDF5MeasurementWriter:
                 "experiment_name": str(experiment_name or ""),
             },
         )
-        self._handle.attrs["storage_compression_enabled"] = self._compression_enabled
-        self._handle.attrs["storage_compression_filter"] = "gzip" if self._compression_enabled else "none"
-        self._handle.attrs["storage_compression_level"] = 4 if self._compression_enabled else 0
-        self._metadata.attrs["storage_compression_enabled"] = self._compression_enabled
-        self._metadata.attrs["storage_compression_filter"] = "gzip" if self._compression_enabled else "none"
-        self._metadata.attrs["storage_compression_level"] = 4 if self._compression_enabled else 0
+        self._handle.attrs["storage_compression_enabled"] = False
+        self._handle.attrs["storage_compression_filter"] = "none"
+        self._handle.attrs["storage_compression_level"] = 0
+        self._metadata.attrs["storage_compression_enabled"] = False
+        self._metadata.attrs["storage_compression_filter"] = "none"
+        self._metadata.attrs["storage_compression_level"] = 0
+        self._assignment_tables = self._metadata.create_group(LSPR_MEASUREMENT_ASSIGNMENT_TABLES_GROUP_NAME)
         self._write_processing_metadata(processing)
 
-        ds = self._data.create_dataset("wavelengths", data=self._wavelengths_nm, **self._compression_kwargs)
-        ds.attrs["columns"] = _string_array(LSPR_MEASUREMENT_SPECTRUM_COLUMNS)
-        axis_ds = self._axes.create_dataset("wavelengths_nm", data=self._wavelengths_nm, **self._compression_kwargs)
-        axis_ds.attrs["units"] = "nm"
-        axis_ds.attrs["description"] = "Wavelength axis shared by spectra matrices."
-        axis_ds.attrs["schema_version_added"] = "3.0"
+        wavelength_ds = self._data.create_dataset(
+            LSPR_MEASUREMENT_WAVELENGTHS_DATASET_NAME,
+            data=self._wavelengths_nm,
+            **self._compression_kwargs,
+        )
+        wavelength_ds.attrs["units"] = "nm"
+        wavelength_ds.attrs["description"] = "Wavelength axis shared by spectra matrices."
 
         self._sample_group = self._create_spectrum_group("sample", include_baseline_indices=True)
         self._dark_group = self._create_spectrum_group("dark")
         self._reference_group = self._create_spectrum_group("reference")
         self._metrics_group = self._create_metrics_group()
-        self._flow_events = self._create_flow_state_dataset()
+        self._write_processed_metrics_metadata(processing)
+        self._runtime = self._create_runtime_dataset()
 
-        self._raw = self._data.create_dataset(
-            "raw_spectra_extinction",
-            shape=(0, len(self._wavelengths_nm)),
-            maxshape=(None, len(self._wavelengths_nm)),
-            dtype=np.float32,
-            chunks=True,
-            **self._compression_kwargs,
-        )
-        self._raw.attrs["signal_type"] = signal_kind
         self._time = self._data.create_dataset(
             "time_series",
             shape=(0,),
@@ -222,41 +220,22 @@ class HDF5MeasurementWriter:
         )
         self._time.attrs["columns"] = _string_array(LSPR_MEASUREMENT_TIME_COLUMNS)
         self._time.attrs["prepend_zero"] = np.True_
-        self._peak = self._data.create_dataset(
-            "peak_position_nm",
-            shape=(0,),
-            maxshape=(None,),
-            dtype=np.float64,
-            chunks=True,
-            **self._compression_kwargs,
-        )
-        self._peak.attrs["columns"] = _string_array(LSPR_MEASUREMENT_PEAK_COLUMNS)
-
         columns = list(LSPR_MEASUREMENT_PLAN_COLUMNS)
         self._plan_table_columns = columns
         self._write_plan_tables([])
         self._metadata.attrs["schema_name"] = LSPR_SESSION_SCHEMA_NAME
         self._metadata.attrs["schema_version"] = LSPR_SESSION_SCHEMA_VERSION
         self._metadata.attrs["app_name"] = "LSPR Acquisition"
-        self._metadata.attrs["app_version"] = "0.1.0"
-
-        switch_columns = ["switch_port", "solution_label"]
-        ds = self._metadata.create_dataset(
-            "switch_solution_map",
-            shape=(0, len(switch_columns)),
-            maxshape=(None, len(switch_columns)),
-            dtype=h5py.string_dtype(encoding="utf-8"),
-            chunks=True,
-            **self._compression_kwargs,
-        )
-        ds.attrs["columns"] = _string_array(switch_columns)
+        self._metadata.attrs["app_version"] = APP_VERSION
 
     def update_processing(self, processing: ProcessingSettings) -> None:
         self._write_processing_metadata(processing)
+        self._write_processed_metrics_metadata(processing)
 
     def update_acquisition_state(self, state: dict[str, object]) -> None:
         self._write_acquisition_state_metadata(state)
         self._write_switch_solution_metadata(state)
+        self._write_assignment_tables_metadata(state)
         plan = state.get("experiment_plan")
         if plan is None:
             experiment_control = state.get("experiment_control")
@@ -297,18 +276,11 @@ class HDF5MeasurementWriter:
         if not spectra:
             return
 
-        stacked = np.vstack([self._resample_spectrum(s) for s in spectra])
-        start = self._raw.shape[0]
+        start = self._sample_group["t_ms"].shape[0]
         end = start + len(spectra)
-
-        self._raw.resize((end, self._raw.shape[1]))
-        self._raw[start:end, :] = stacked
 
         self._time.resize((end,))
         self._time[start:end] = np.asarray(time_series_s, dtype=np.float64)
-
-        self._peak.resize((end,))
-        self._peak[start:end] = np.asarray(peak_positions_nm, dtype=np.float64)
         self._append_spectra_rows(self._sample_group, spectra, time_series_s, self._dark_index, self._reference_index)
 
     def append_metrics(self, rows: list[dict[str, object]]) -> None:
@@ -317,29 +289,36 @@ class HDF5MeasurementWriter:
         start = self._metrics_group["t_ms"].shape[0]
         end = start + len(rows)
         for name, dataset in self._metrics_group.items():
+            if not isinstance(dataset, h5py.Dataset):
+                continue
             dataset.resize((end,))
-            if name == "t_ms":
+            if name == LSPR_PROCESSED_METRICS_ACQUIRED_AT_UNIX_MS_DATASET_NAME:
+                dataset[start:end] = np.asarray([int(row.get(name, 0) or 0) for row in rows], dtype=np.int64)
+            elif name == "t_ms":
                 dataset[start:end] = np.asarray([int(row.get(name, 0) or 0) for row in rows], dtype=np.int64)
             elif name == "sample_index":
                 dataset[start:end] = np.asarray([int(row.get(name, -1) or -1) for row in rows], dtype=np.int64)
             else:
                 dataset[start:end] = np.asarray([_float_or_nan(row.get(name, np.nan)) for row in rows], dtype=np.float64)
 
-    def append_flow_state(self, rows: list[dict[str, object]]) -> None:
+    def append_experiment_control_runtime(self, rows: list[dict[str, object]]) -> None:
         if not rows:
             return
         columns = [
             column.decode("utf-8") if isinstance(column, bytes) else str(column)
-            for column in self._flow_events.attrs["columns"]
+            for column in self._runtime.attrs["columns"]
         ]
-        start = self._flow_events.shape[0]
+        start = self._runtime.shape[0]
         end = start + len(rows)
-        self._flow_events.resize((end, len(columns)))
+        self._runtime.resize((end, len(columns)))
         table = []
         for row in rows:
             table.append([str(row.get(column, "")) for column in columns])
         table_array = np.asarray(table, dtype=h5py.string_dtype(encoding="utf-8"))
-        self._flow_events[start:end, :] = table_array
+        self._runtime[start:end, :] = table_array
+
+    def append_flow_state(self, rows: list[dict[str, object]]) -> None:
+        self.append_experiment_control_runtime(rows)
 
     def append_device_state(self, row: dict[str, object]) -> None:
         self.append_flow_state([row])
@@ -360,7 +339,7 @@ class HDF5MeasurementWriter:
         ds.attrs["columns"] = _string_array(columns)
 
     def _create_spectrum_group(self, name: str, *, include_baseline_indices: bool = False):
-        group = self._spectra.create_group(name)
+        group = self._data_spectra.create_group(name)
         group.create_dataset("t_ms", shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True, **self._compression_kwargs)
         group.create_dataset(
             "acquired_at_unix_ms", shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True, **self._compression_kwargs
@@ -391,6 +370,7 @@ class HDF5MeasurementWriter:
     def _create_metrics_group(self):
         group = self._processed.create_group("metrics")
         for name, dtype in (
+            (LSPR_PROCESSED_METRICS_ACQUIRED_AT_UNIX_MS_DATASET_NAME, np.int64),
             ("t_ms", np.int64),
             ("sample_index", np.int64),
             ("centroid_nm", np.float64),
@@ -405,10 +385,14 @@ class HDF5MeasurementWriter:
             ds.attrs["schema_version_added"] = "3.0"
         return group
 
-    def _create_flow_state_dataset(self):
-        columns = list(LSPR_MEASUREMENT_FLOW_STATE_COLUMNS)
-        ds = self._runs.create_dataset(
-            LSPR_MEASUREMENT_FLOW_EVENTS_DATASET_NAME,
+    def _write_processed_metrics_metadata(self, processing: ProcessingSettings) -> None:
+        write_processed_metrics_metadata(self._metrics_group)
+        write_processing_settings_metadata(self._metrics_group, asdict(processing))
+
+    def _create_runtime_dataset(self):
+        columns = list(LSPR_MEASUREMENT_RUNTIME_COLUMNS)
+        ds = self._data.create_dataset(
+            LSPR_MEASUREMENT_RUNTIME_DATASET_NAME,
             shape=(0, len(columns)),
             maxshape=(None, len(columns)),
             dtype=h5py.string_dtype(encoding="utf-8"),
@@ -543,9 +527,12 @@ class HDF5MeasurementWriter:
         self._metadata.attrs["processing_temporal_smoothing"] = processing.temporal_smoothing
         self._metadata.attrs["processing_crop_method"] = processing.crop_method
         self._metadata.attrs["processing_crop_fraction"] = processing.crop_fraction
+        self._metadata.attrs["processing_fit_method"] = processing.fit_method
         self._metadata.attrs["processing_polynomial_order"] = processing.polynomial_order
         self._metadata.attrs["processing_fit_window_width_nm"] = processing.fit_window_width_nm
+        self._metadata.attrs["processing_analysis_resolution_nm"] = processing.analysis_resolution_nm
         self._metadata.attrs["peak_tracking_mode"] = processing.peak_tracking_mode
+        self._metadata.attrs["processing_trace_noise_window_s"] = processing.trace_noise_window_s
         self._metadata.attrs["trace_metrics"] = _string_array(processing.trace_metrics)
 
     def _write_acquisition_state_metadata(self, state: dict[str, object]) -> None:
@@ -575,17 +562,59 @@ class HDF5MeasurementWriter:
                 cleaned_rows.append([str(row[0]), str(row[1])])
             if cleaned_rows:
                 self._upsert_table(
-                    self._metadata,
-                    "switch_solution_map",
+                    self._assignment_tables,
+                    LSPR_MEASUREMENT_SWITCH_SOLUTION_MAP_DATASET_NAME,
                     cleaned_rows,
                     ["switch_port", "solution_label"],
                 )
-                self._upsert_table(
-                    self._plans,
-                    "switch_solution_map",
-                    cleaned_rows,
-                    ["switch_port", "solution_label"],
-                )
+
+    def _write_assignment_tables_metadata(self, state: dict[str, object]) -> None:
+        experiment_control = state.get("experiment_control")
+        if not isinstance(experiment_control, dict):
+            return
+
+        valve_labels = experiment_control.get("valve_state_labels")
+        valve_colors = experiment_control.get("valve_state_colors")
+        if isinstance(valve_labels, dict) or isinstance(valve_colors, dict):
+            rows: list[list[str]] = []
+            for state_name, default_color in (("Open", "#4E79A7"), ("Close", "#B44A4A")):
+                label = state_name
+                color = default_color
+                if isinstance(valve_labels, dict):
+                    label = str(valve_labels.get(state_name, state_name)).strip() or state_name
+                if isinstance(valve_colors, dict):
+                    color = str(valve_colors.get(state_name, default_color)).strip().upper() or default_color
+                rows.append([state_name, label, color])
+            self._upsert_table(
+                self._assignment_tables,
+                LSPR_MEASUREMENT_VALVE_STATE_MAP_DATASET_NAME,
+                rows,
+                ["state", "label", "color"],
+            )
+
+        palette_entries = experiment_control.get("color_palette_entries")
+        if isinstance(palette_entries, list):
+            rows = []
+            for index, raw_entry in enumerate(palette_entries):
+                name = ""
+                color = ""
+                if isinstance(raw_entry, dict):
+                    name = str(raw_entry.get("name", "") or "").strip()
+                    color = str(raw_entry.get("color", "") or "").strip().upper()
+                elif isinstance(raw_entry, (list, tuple)) and len(raw_entry) >= 2:
+                    name = str(raw_entry[0] or "").strip()
+                    color = str(raw_entry[1] or "").strip().upper()
+                if not color:
+                    continue
+                if not name:
+                    name = f"Custom {index + 1}"
+                rows.append([name, color])
+            self._upsert_table(
+                self._assignment_tables,
+                LSPR_MEASUREMENT_COLOR_PALETTE_ENTRIES_DATASET_NAME,
+                rows,
+                ["name", "color"],
+            )
 
     def _plan_rows_from_state(self, state: dict[str, object]) -> list[list[str]]:
         experiment_control = state.get("experiment_control")
@@ -609,9 +638,6 @@ class HDF5MeasurementWriter:
 
     def _write_plan_tables(self, rows: list[list[str]]) -> None:
         self._upsert_table(self._metadata, LSPR_EXPERIMENT_PLAN_DATASET_NAME, rows, self._plan_table_columns)
-        self._upsert_table(self._metadata, LSPR_EXPERIMENT_PLAN_TMP_DATASET_NAME, rows, self._plan_table_columns)
-        self._upsert_table(self._plans, LSPR_EXPERIMENT_PLAN_DATASET_NAME, rows, self._plan_table_columns)
-        self._upsert_table(self._plans, LSPR_EXPERIMENT_PLAN_TMP_DATASET_NAME, rows, self._plan_table_columns)
 
 
 class AsyncHDF5MeasurementWriter:
@@ -677,10 +703,13 @@ class AsyncHDF5MeasurementWriter:
             return
         self._queue.put(("metrics", rows))
 
-    def append_flow_state(self, row: dict[str, object]) -> None:
+    def append_experiment_control_runtime(self, row: dict[str, object]) -> None:
         if self._closed:
             return
-        self._queue.put(("flow_state", row))
+        self._queue.put(("experiment_control_runtime", row))
+
+    def append_flow_state(self, row: dict[str, object]) -> None:
+        self.append_experiment_control_runtime(row)
 
     def append_device_state(self, row: dict[str, object]) -> None:
         if self._closed:
@@ -741,7 +770,7 @@ class AsyncHDF5MeasurementWriter:
                     pending_peaks.extend(peak_positions_nm)
                 elif kind == "metrics" and isinstance(payload, list):
                     writer.append_metrics(payload)
-                elif kind == "flow_state" and isinstance(payload, dict):
+                elif kind == "experiment_control_runtime" and isinstance(payload, dict):
                     writer.append_flow_state([payload])
                 elif kind == "device_state" and isinstance(payload, dict):
                     writer.append_device_state(payload)
