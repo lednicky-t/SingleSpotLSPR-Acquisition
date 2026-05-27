@@ -106,7 +106,7 @@ class ExperimentControlEditingController(QObject):
         self._edit_mode = False
         self._selection_dragging = False
         self._selection_anchor: tuple[int, int] | None = None
-        self._overlay = _SelectionOverlay(window, table)
+        self._overlay = _SelectionOverlay(table.viewport() if table.viewport() is not None else window, table)
         self._table._experiment_control_copied_selection = []
         self._table.setProperty("flow_navigation", True)
         self._table.viewport().setProperty("flow_navigation", True)
@@ -594,19 +594,15 @@ class ExperimentControlEditingController(QObject):
         if self._overlay is None:
             return
         viewport = self._table.viewport()
-        window_handle = self._window.windowHandle() if hasattr(self._window, "windowHandle") else None
         if (
             viewport is None
             or not self._window.isVisible()
-            or window_handle is None
-            or not window_handle.isExposed()
             or not self._table.isVisible()
             or not viewport.isVisible()
         ):
             self._overlay.hide()
             return
-        top_left = self._window.mapFromGlobal(viewport.mapToGlobal(viewport.rect().topLeft()))
-        self._overlay.setGeometry(QRect(top_left, viewport.size()))
+        self._overlay.setGeometry(QRect(0, 0, viewport.width(), viewport.height()))
         self._overlay.show()
         self._overlay.raise_()
         self._overlay.update()

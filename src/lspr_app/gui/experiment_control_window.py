@@ -58,6 +58,8 @@ from PyQt6.QtWidgets import (
 )
 
 from lspr_app.device.amf_mswitch import AMFSwitchController, amf_tools_available, detect_amf_mswitch_devices
+from lspr_app.device.connection_registry import claim_port, release_port
+from lspr_app.device.port_assignments import get_port_assignment
 from lspr_app.device.serial_controllers import (
     ControllerProbe,
     SerialController,
@@ -66,6 +68,7 @@ from lspr_app.device.serial_controllers import (
 from lspr_app.device.valve_controllers import detect_valve_controller
 from lspr_app.device.reglo_icc import PumpProbe, RegloICCClient, is_probable_reglo_port
 from lspr_app import __version__
+from lspr_app.gui.experiment_control_runtime import ExperimentRuntimeSnapshot, experiment_runtime_snapshot
 from lspr_app.domain.pump_plan import (
     ACTIVE_PUMP_CHANNELS,
     DEFAULT_TUBE_MM,
@@ -141,91 +144,6 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
         opt.state &= ~QStyle.StateFlag.State_MouseOver
         opt.showDecorationSelected = False
         super().paint(painter, opt, index)
-
-
-class _FlowSelectionOverlay(QWidget):
-    def __init__(self, table: QTableWidget) -> None:
-        super().__init__(table.viewport() if table.viewport() is not None else table)
-        self._table = table
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setAutoFillBackground(False)
-
-    def _selection_rect(self, indexes: list[QModelIndex]) -> QRectF | None:
-        rects = []
-        for index in indexes:
-            rect = self._table.visualRect(index)
-            if rect.isValid() and rect.width() > 0 and rect.height() > 0:
-                rects.append(rect)
-        if not rects:
-            return None
-        merged = rects[0]
-        for rect in rects[1:]:
-            merged = merged.united(rect)
-        merged = merged.adjusted(1, 1, -1, -1)
-        if merged.width() <= 0 or merged.height() <= 0:
-            return None
-        return QRectF(merged)
-
-    def _draw_rect(self, painter: QPainter, rect: QRectF, *, dashed: bool = False, fill: bool = False) -> None:
-        pen = QPen(QColor("#d8b44a"))
-        pen.setWidth(1)
-        if dashed:
-            pen.setStyle(Qt.PenStyle.DashLine)
-        painter.setPen(pen)
-        painter.setBrush(QColor(216, 180, 74, 32) if fill else Qt.BrushStyle.NoBrush)
-        painter.drawRect(rect)
-
-    def paintEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
-        painter = QPainter(self)
-        try:
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-            model = self._table.model()
-            if model is None:
-                return
-            edit_mode = bool(self._table.property("experiment_control_edit_mode"))
-            selected_indexes = [index for index in self._table.selectedIndexes() if index.isValid()]
-            copied_positions = getattr(self._table, "_experiment_control_copied_selection", [])
-            copied_indexes: list[QModelIndex] = []
-            if isinstance(copied_positions, list):
-                for row, column in copied_positions:
-                    if not isinstance(row, int) or not isinstance(column, int):
-                        continue
-                    if 0 <= row < model.rowCount() and 0 <= column < model.columnCount():
-                        index = model.index(row, column)
-                        if index.isValid():
-                            copied_indexes.append(index)
-
-            if edit_mode:
-                selected_signature = sorted((index.row(), index.column()) for index in selected_indexes)
-                copied_signature = sorted((index.row(), index.column()) for index in copied_indexes)
-                if selected_signature and selected_signature != copied_signature:
-                    selected_rect = self._selection_rect(selected_indexes)
-                    if selected_rect is not None:
-                        self._draw_rect(painter, selected_rect, dashed=False, fill=False)
-                if copied_signature:
-                    copied_rect = self._selection_rect(copied_indexes)
-                    if copied_rect is not None:
-                        self._draw_rect(painter, copied_rect, dashed=True, fill=False)
-                return
-
-            row = self._table.currentRow()
-            if row < 0 or row >= self._table.rowCount():
-                return
-            last_col = max(self._table.columnCount() - 1, 0)
-            left_index = self._table.model().index(row, 0)
-            right_index = self._table.model().index(row, last_col)
-            first_rect = self._table.visualRect(left_index)
-            last_rect = self._table.visualRect(right_index)
-            if not first_rect.isValid() or not last_rect.isValid():
-                return
-            row_rect = first_rect.united(last_rect).adjusted(1, 1, -1, -1)
-            if row_rect.width() <= 0 or row_rect.height() <= 0:
-                return
-            self._draw_rect(painter, QRectF(row_rect), dashed=False, fill=False)
-        finally:
-            painter.end()
 
 
 class ExperimentControlTableView(QTableView):
@@ -1639,13 +1557,16 @@ class ExperimentControlWindow(QWidget):
         self._mswitch_probe_cache: list[ControllerProbe] | None = list(initial_mswitch_devices or [])
         self._mswitch_connect_in_progress = False
         self._mswitch_connect_task: MSwitchConnectTask | None = None
+        self._connection_sync_in_progress = False
         self._auto_connect_devices = bool(auto_connect_devices)
         self._plan_running = False
         self._plan_holding = False
+        self._plan_paused = False
         self._plan_hold_blink_frame = 0
         self._plan_hold_blink_timer = QTimer(self)
         self._plan_hold_blink_timer.setInterval(180)
         self._plan_hold_blink_timer.timeout.connect(self._advance_plan_hold_blink_indicator)
+        self._paused_plan_step: PumpPlanStep | None = None
         self._plan_elapsed_s = 0.0
         self._plan_resume_elapsed_s = 0.0
         self._plan_runtime_s = 0.0
@@ -1821,7 +1742,7 @@ class ExperimentControlWindow(QWidget):
         self._update_plan_detail_toggle_icon()
         self.pause_state_button = self._make_icon_button(
             self._pause_state_button_icon(),
-            "Edit the pause state applied whenever the plan enters hold mode.",
+            "Edit the synthetic pause state applied when the plan enters pause mode.",
         )
         self.color_comment_button = QToolButton()
         self.color_comment_button.setObjectName("flowStepActionButton")
@@ -1915,8 +1836,19 @@ class ExperimentControlWindow(QWidget):
         self.step_comment_edit.setToolTip("Free-text note for the step. It is shown in the timeline when there is enough space.")
         self.plan_toggle_button = self._make_icon_button(
             transport_icon(self._theme_mode, "play"),
-            "Run plan",
+            "Run or resume plan",
         )
+        self.plan_toggle_button.setToolTip("Run or resume the plan.")
+        self.hold_plan_button = self._make_icon_button(
+            transport_icon(self._theme_mode, "hold"),
+            "Hold plan",
+        )
+        self.hold_plan_button.setCheckable(True)
+        self.pause_plan_button = self._make_icon_button(
+            self._runtime_pause_button_icon(),
+            "Pause plan",
+        )
+        self.pause_plan_button.setCheckable(True)
         self.stop_plan_button = self._make_icon_button(
             transport_icon(self._theme_mode, "stop"),
             "Stop plan",
@@ -2306,9 +2238,11 @@ class ExperimentControlWindow(QWidget):
         flow_action_row.setSpacing(4)
         flow_action_row.setContentsMargins(0, 0, 0, 0)
         flow_action_row.addWidget(self.plan_toggle_button)
+        flow_action_row.addWidget(self.hold_plan_button)
         flow_action_row.addWidget(self.stop_plan_button)
         flow_action_row.addWidget(self.previous_step_button)
         flow_action_row.addWidget(self.next_step_button)
+        flow_action_row.addWidget(self.pause_plan_button)
         flow_action_row.addWidget(self.record_with_flow_button)
         flow_action_row.addStretch(1)
         self._experiment_control_flow_action_row = QWidget()
@@ -2360,6 +2294,8 @@ class ExperimentControlWindow(QWidget):
         self.refresh_ports_button.clicked.connect(self._refresh_ports)
         self.connection_toggle_button.clicked.connect(self._toggle_connection)
         self.plan_toggle_button.clicked.connect(self._toggle_experiment_control_run_hold)
+        self.hold_plan_button.clicked.connect(self._toggle_experiment_control_hold)
+        self.pause_plan_button.clicked.connect(self._toggle_experiment_control_pause)
         self.stop_plan_button.clicked.connect(self._stop_experiment_control)
         self.previous_step_button.clicked.connect(lambda _checked=False: self._move_to_relative_experiment_control_step(-1))
         self.next_step_button.clicked.connect(lambda _checked=False: self._move_to_relative_experiment_control_step(1))
@@ -2430,6 +2366,31 @@ class ExperimentControlWindow(QWidget):
             except Exception:
                 continue
         return transport_icon(self._theme_mode, "pause")
+
+    def _hold_plan_button_icon(self, *, active: bool) -> QIcon:
+        if active:
+            alpha_steps = [255, 228, 198, 168, 138, 168, 198, 228]
+            frame_index = int(getattr(self, "_plan_hold_blink_frame", 0)) % len(alpha_steps)
+            color = QColor("#4f88ff")
+            color.setAlpha(alpha_steps[frame_index])
+        elif self._plan_running:
+            color = QColor("#4f88ff")
+        else:
+            color = QColor("#8a98a8")
+        try:
+            return tint_tabler_icon(flow_tabler_icon("clock_stop"), color)
+        except Exception:
+            return transport_icon(self._theme_mode, "hold")
+
+    def _runtime_pause_button_icon(self, *, active: bool = False) -> QIcon:
+        if active:
+            alpha_steps = [255, 228, 198, 168, 138, 168, 198, 228]
+            frame_index = int(getattr(self, "_plan_hold_blink_frame", 0)) % len(alpha_steps)
+            color = QColor("#e8d85f")
+            color.setAlpha(alpha_steps[frame_index])
+        else:
+            color = QColor("#e8d85f")
+        return tint_tabler_icon(flow_tabler_icon("player_pause", "pause"), color)
 
     def _switch_solution_label(self, position: int) -> str:
         index = max(min(int(position), 12), 1) - 1
@@ -4064,40 +4025,75 @@ class ExperimentControlWindow(QWidget):
             on_change()
 
     def _update_experiment_control_toggle_button(self) -> None:
-        if self._plan_running:
-            icon = transport_icon(self._theme_mode, "pause")
-            tooltip = "Hold plan"
-            timer = getattr(self, "_plan_hold_blink_timer", None)
+        snapshot = self._experiment_runtime_snapshot()
+        timer = getattr(self, "_plan_hold_blink_timer", None)
+        if snapshot.blink_active:
+            if timer is not None and not timer.isActive():
+                self._plan_hold_blink_frame = 0
+                timer.start()
+        else:
             if timer is not None and timer.isActive():
                 timer.stop()
-        else:
-            if self._plan_holding:
-                icon = self._hold_plan_play_icon()
-                tooltip = "Resume plan"
-                timer = getattr(self, "_plan_hold_blink_timer", None)
-                if timer is not None and not timer.isActive():
-                    self._plan_hold_blink_frame = 0
-                    timer.start()
-            else:
-                icon = transport_icon(self._theme_mode, "play")
-                tooltip = "Run plan"
-                timer = getattr(self, "_plan_hold_blink_timer", None)
-                if timer is not None and timer.isActive():
-                    timer.stop()
-                self._plan_hold_blink_frame = 0
-        self.plan_toggle_button.setIcon(icon)
-        self.plan_toggle_button.setToolTip(tooltip)
+            self._plan_hold_blink_frame = 0
 
-    def _hold_plan_play_icon(self) -> QIcon:
-        alpha_steps = [255, 226, 194, 160, 126, 160, 194, 226]
-        frame_index = int(getattr(self, "_plan_hold_blink_frame", 0)) % len(alpha_steps)
-        color = QColor("#47a861")
-        color.setAlpha(alpha_steps[frame_index])
-        return tint_tabler_icon(flow_tabler_icon("player_play"), color)
+        self.plan_toggle_button.setIcon(self._play_plan_button_icon(active=snapshot.play_active))
+        if snapshot.running:
+            self.plan_toggle_button.setToolTip("Plan running. Click to resume from the current state.")
+        elif snapshot.holding or snapshot.paused:
+            self.plan_toggle_button.setToolTip("Resume the plan.")
+        else:
+            self.plan_toggle_button.setToolTip("Start the plan.")
+
+        self.hold_plan_button.setVisible(snapshot.hold_visible)
+        self.hold_plan_button.setEnabled(snapshot.hold_enabled)
+        self.hold_plan_button.setIcon(self._hold_plan_button_icon(active=snapshot.holding))
+        if snapshot.holding:
+            self.hold_plan_button.setToolTip("Hold active. Click to resume from hold.")
+            self.hold_plan_button.setChecked(True)
+        elif snapshot.running:
+            self.hold_plan_button.setToolTip("Hold the running plan.")
+            self.hold_plan_button.setChecked(False)
+        else:
+            self.hold_plan_button.setToolTip("Hold is available only while the plan is running.")
+            self.hold_plan_button.setChecked(False)
+
+        self.pause_plan_button.setEnabled(snapshot.pause_available)
+        self.pause_plan_button.setIcon(self._runtime_pause_button_icon(active=snapshot.paused))
+        if snapshot.paused:
+            self.pause_plan_button.setToolTip("Pause active. Click to resume from pause.")
+            self.pause_plan_button.setChecked(True)
+        elif snapshot.running:
+            self.pause_plan_button.setToolTip("Apply the pause state.")
+            self.pause_plan_button.setChecked(False)
+        elif snapshot.holding:
+            self.pause_plan_button.setToolTip("Apply the pause state from hold.")
+            self.pause_plan_button.setChecked(False)
+        elif snapshot.pause_available:
+            self.pause_plan_button.setToolTip("Start the plan in pause state.")
+            self.pause_plan_button.setChecked(False)
+        else:
+            self.pause_plan_button.setToolTip("Pause is available only while the plan is running.")
+            self.pause_plan_button.setChecked(False)
+
+        self.stop_plan_button.setVisible(snapshot.stop_visible)
+        self.stop_plan_button.setEnabled(snapshot.stop_visible)
+
+    def _play_plan_button_icon(self, *, active: bool) -> QIcon:
+        if active:
+            alpha_steps = [255, 228, 198, 168, 138, 168, 198, 228]
+            frame_index = int(getattr(self, "_plan_hold_blink_frame", 0)) % len(alpha_steps)
+            color = QColor("#2fb344")
+            color.setAlpha(alpha_steps[frame_index])
+        else:
+            color = QColor("#2fb344")
+        try:
+            return tint_tabler_icon(flow_tabler_icon("player_play", "play"), color)
+        except Exception:
+            return transport_icon(self._theme_mode, "play")
 
     def _advance_plan_hold_blink_indicator(self) -> None:
         timer = getattr(self, "_plan_hold_blink_timer", None)
-        if timer is None or not timer.isActive() or not self._plan_holding:
+        if timer is None or not timer.isActive() or not (self._plan_running or self._plan_holding or self._plan_paused):
             return
         self._plan_hold_blink_frame = (int(getattr(self, "_plan_hold_blink_frame", 0)) + 1) % 8
         self._update_experiment_control_toggle_button()
@@ -4152,10 +4148,224 @@ class ExperimentControlWindow(QWidget):
         self._update_record_with_flow_button_icon()
 
     def _toggle_experiment_control_run_hold(self) -> None:
+        self._start_or_resume_experiment_control()
+
+    def _toggle_experiment_control_hold(self) -> None:
         if self._plan_running:
             self._hold_experiment_control()
             return
-        self._run_experiment_control()
+        if self._plan_holding:
+            self._start_or_resume_experiment_control()
+
+    def _toggle_experiment_control_pause(self) -> None:
+        if self._plan_running:
+            self._pause_experiment_control()
+            return
+        if self._plan_holding:
+            self._pause_experiment_control()
+            return
+        if self._plan_paused:
+            self._start_or_resume_experiment_control()
+            return
+        self._start_paused_experiment_control()
+
+    def _set_plan_runtime_flags(self, *, running: bool, holding: bool, paused: bool) -> None:
+        self._plan_running = bool(running)
+        self._plan_holding = bool(holding)
+        self._plan_paused = bool(paused)
+
+    def _capture_plan_elapsed_from_clock(self) -> float:
+        if self._plan_started_monotonic is None:
+            return max(float(self._plan_elapsed_s), 0.0)
+        elapsed = self._plan_resume_elapsed_s + max(monotonic() - self._plan_started_monotonic, 0.0)
+        self._plan_elapsed_s = elapsed
+        self._plan_resume_elapsed_s = elapsed
+        return elapsed
+
+    def _reset_plan_runtime_counters(self) -> None:
+        self._plan_elapsed_s = 0.0
+        self._plan_resume_elapsed_s = 0.0
+        self._plan_runtime_s = 0.0
+        self._plan_resume_runtime_s = 0.0
+
+    def _ensure_measurement_started(self) -> None:
+        if self._measurement_started_monotonic is None:
+            self._measurement_started_monotonic = monotonic()
+
+    def _experiment_runtime_snapshot(self) -> ExperimentRuntimeSnapshot:
+        return experiment_runtime_snapshot(
+            running=self._plan_running,
+            holding=self._plan_holding,
+            paused=self._plan_paused,
+            recording=bool(self.__dict__.get("_measurement_started_monotonic") is not None),
+            has_steps=bool(self._read_experiment_control_steps()),
+        )
+
+    def _sync_experiment_control_timeline(self, steps: list[PumpPlanStep], plan_row: int | None, *, refresh_status: bool = False) -> None:
+        if plan_row is not None:
+            self._select_experiment_control_plan_row(plan_row)
+        self.timeline_widget.set_steps(
+            steps,
+            plan_row,
+            self._timeline_progress_for_display(),
+            self._plan_runtime_for_display(),
+            self._step_runtime_for_display(),
+        )
+        if refresh_status:
+            self._refresh_status_line()
+
+    def _resume_experiment_plan(
+        self,
+        *,
+        restore_step: PumpPlanStep | None = None,
+        status_message: str,
+        log_message: str,
+        emit_event: str,
+        emit_step: PumpPlanStep | None = None,
+    ) -> None:
+        if restore_step is not None:
+            self._apply_experiment_control_step_to_pump(restore_step, start=True)
+        self._set_plan_runtime_flags(running=True, holding=False, paused=False)
+        self._plan_started_monotonic = monotonic()
+        if self._plan_timer.isActive():
+            self._plan_timer.stop()
+        self._plan_timer.start()
+        self._update_experiment_control_toggle_button()
+        self._set_status_message(status_message)
+        _LOGGER.info(log_message)
+        steps = self._read_experiment_control_steps()
+        if self._plan_active_row is not None and 0 <= self._plan_active_row < len(steps):
+            self._emit_experimental_control_state(emit_event, emit_step or steps[self._plan_active_row])
+
+    def _begin_experiment_plan_run(self, row: int, steps: list[PumpPlanStep]) -> None:
+        self._reset_plan_runtime_counters()
+        self._ensure_measurement_started()
+        self._step_started_monotonic = monotonic()
+        self._set_plan_runtime_flags(running=True, holding=False, paused=False)
+        self._plan_active_row = row
+        self._plan_started_monotonic = monotonic()
+        self._update_experiment_control_toggle_button()
+        self._activate_experiment_control_step_for_elapsed(0.0, force=True)
+        self._plan_timer.start()
+        self._set_status_message(f"Running experiment plan from step {self._plan_active_row + 1 if self._plan_active_row is not None else 1}.")
+        _LOGGER.info("Experiment plan started | step=%s", self._plan_active_row + 1 if self._plan_active_row is not None else 1)
+        if self._plan_active_row is not None and 0 <= self._plan_active_row < len(steps):
+            self._emit_experimental_control_state("plan_started", steps[self._plan_active_row])
+
+    def _begin_paused_experiment_plan_run(self, row: int, steps: list[PumpPlanStep]) -> None:
+        self._paused_plan_step = deepcopy(steps[row])
+        self._plan_active_row = row
+        if self._plan_timer.isActive():
+            self._plan_timer.stop()
+        self._plan_timer.start()
+        self._reset_plan_runtime_counters()
+        self._ensure_measurement_started()
+        self._set_plan_runtime_flags(running=False, holding=False, paused=True)
+        self._plan_started_monotonic = None
+        self._step_started_monotonic = None
+        pause_applied = self._apply_pause_state()
+        self._update_experiment_control_toggle_button()
+        if pause_applied:
+            self._set_status_message(
+                f"Experiment plan started in pause state on step {self._plan_active_row + 1 if self._plan_active_row is not None else 1}. Pause state applied."
+            )
+            _LOGGER.info(
+                "Experiment plan started in pause state with pause state applied | step=%s",
+                self._plan_active_row + 1 if self._plan_active_row is not None else 1,
+            )
+        else:
+            self._set_status_message(
+                f"Experiment plan started in pause state on step {self._plan_active_row + 1 if self._plan_active_row is not None else 1}."
+            )
+            _LOGGER.info(
+                "Experiment plan started in pause state | step=%s",
+                self._plan_active_row + 1 if self._plan_active_row is not None else 1,
+            )
+        if self._plan_active_row is not None and 0 <= self._plan_active_row < len(steps):
+            self._emit_experimental_control_state("plan_pause", self._applied_plan_step, status="started in pause state")
+
+    def _enter_hold_state(self) -> None:
+        if not self._plan_running:
+            return
+        # HOLD freezes plan time and cursor position, but does not stop recording.
+        self._capture_plan_elapsed_from_clock()
+        self._set_plan_runtime_flags(running=False, holding=True, paused=False)
+        self._plan_started_monotonic = None
+        self._plan_runtime_s = self._step_runtime_for_display()
+        self._update_experiment_control_toggle_button()
+        self._set_status_message("Experiment plan hold.")
+        _LOGGER.info("Experiment plan hold.")
+        self._emit_experimental_control_state("plan_hold", self._applied_plan_step)
+
+    def _enter_pause_state(self, *, restore_step: PumpPlanStep | None = None) -> None:
+        if not (self._plan_running or self._plan_holding):
+            return
+        if self._plan_running:
+            self._capture_plan_elapsed_from_clock()
+        self._paused_plan_step = deepcopy(self._applied_plan_step) if self._applied_plan_step is not None else None
+        if restore_step is not None:
+            self._paused_plan_step = deepcopy(restore_step)
+        pause_applied = self._apply_pause_state()
+        self._set_plan_runtime_flags(running=False, holding=False, paused=True)
+        self._plan_started_monotonic = None
+        self._plan_runtime_s = self._step_runtime_for_display()
+        self._step_started_monotonic = None
+        self._update_experiment_control_toggle_button()
+        if pause_applied:
+            self._set_status_message("Experiment plan paused. Pause state applied.")
+            _LOGGER.info("Experiment plan paused with pause state applied.")
+        else:
+            self._set_status_message("Experiment plan paused.")
+            _LOGGER.info("Experiment plan paused.")
+        self._emit_experimental_control_state("plan_pause", self._applied_plan_step)
+
+    def _stop_experiment_plan(self, last_step: PumpPlanStep | None) -> None:
+        steps = self._read_experiment_control_steps()
+        target_row = self._plan_active_row
+        if target_row is None:
+            target_row = self._selected_experiment_control_row()
+        if target_row is None and steps:
+            target_row = 0
+        if steps and target_row is not None:
+            target_row = min(max(int(target_row), 0), len(steps) - 1)
+            self._plan_active_row = target_row
+            if not (self._plan_running or self._plan_holding or self._plan_paused):
+                self._plan_elapsed_s = 0.0
+            self._plan_resume_elapsed_s = self._plan_elapsed_s
+            self._sync_experiment_control_timeline(steps, target_row)
+        if self._plan_running:
+            self._capture_plan_elapsed_from_clock()
+        self._set_plan_runtime_flags(running=False, holding=False, paused=False)
+        self._plan_started_monotonic = None
+        self._step_started_monotonic = None
+        self._measurement_started_monotonic = None
+        self._plan_runtime_s = self._plan_runtime_for_display()
+        self._plan_resume_runtime_s = self._step_runtime_for_display()
+        self._applied_plan_step = None
+        self._paused_plan_step = None
+        self._plan_timer.stop()
+        self._update_experiment_control_toggle_button()
+        if self._client.is_connected():
+            self._stop_all_channels()
+        else:
+            self._set_status_message("Experiment plan stopped.")
+        _LOGGER.info("Experiment plan stopped.")
+        self._emit_experimental_control_state("plan_stopped", last_step)
+        self._request_recording_control("stop")
+
+    def _start_paused_experiment_control(self) -> None:
+        steps = self._read_experiment_control_steps()
+        if not steps:
+            self._set_status_message("Experiment plan is empty.")
+            return
+        if not self._request_recording_control("start"):
+            self._set_status_message("Experiment plan start cancelled because recording was not started.")
+            return
+        row = self._selected_experiment_control_row()
+        if row is None:
+            row = 0
+            self._select_experiment_control_plan_row(0)
+        self._begin_paused_experiment_plan_run(row, steps)
 
     def _request_recording_control(self, action: str) -> None:
         if not self.record_with_flow_button.isChecked():
@@ -4746,7 +4956,7 @@ class ExperimentControlWindow(QWidget):
         details: list[str] = []
         steps = self._read_experiment_control_steps()
         total_end_s = steps[-1].end_s if steps else 0.0
-        if self._plan_running or self._plan_holding:
+        if self._plan_running or self._plan_holding or self._plan_paused:
             active_row = self._plan_active_row
             if active_row is not None and 0 <= active_row < len(steps):
                 step = steps[active_row]
@@ -5003,16 +5213,31 @@ class ExperimentControlWindow(QWidget):
         _LOGGER.debug("Pump port scan | %d port(s)", len(ports))
         current = self.port_combo.currentData()
         likely_indices: list[tuple[int, int]] = []
+        manual_indices: list[int] = []
         self.port_combo.blockSignals(True)
         self.port_combo.clear()
         for index, port in enumerate(ports):
             label = f"{port.device}  |  {port.description}"
             self.port_combo.addItem(label, port.device)
+            if get_port_assignment(port.device) == "pump":
+                manual_indices.append(index)
             if is_probable_reglo_port(port):
                 likely_indices.append(index)
         self.port_combo.blockSignals(False)
 
         target = self._last_selected_port or current
+        if target is not None:
+            index = self.port_combo.findData(target)
+            if index >= 0:
+                target_port = ports[index] if 0 <= index < len(ports) else None
+                if target_port is not None and get_port_assignment(target_port.device) == "pump":
+                    self.port_combo.setCurrentIndex(index)
+                    return
+
+        if manual_indices:
+            self.port_combo.setCurrentIndex(manual_indices[0])
+            return
+
         if target is not None:
             index = self.port_combo.findData(target)
             if index >= 0:
@@ -5036,11 +5261,14 @@ class ExperimentControlWindow(QWidget):
         _LOGGER.debug("Valve port scan | %d port(s)", len(ports))
         current = self.valve_port_combo.currentData()
         likely_indices: list[tuple[int, int]] = []
+        manual_indices: list[int] = []
         self.valve_port_combo.blockSignals(True)
         self.valve_port_combo.clear()
         for index, port in enumerate(ports):
             label = f"{port.device}  |  {port.description}"
             self.valve_port_combo.addItem(label, port.device)
+            if get_port_assignment(port.device) == "valve":
+                manual_indices.append(index)
             priority = controller_port_priority(port)
             if priority > 0:
                 likely_indices.append((priority, index))
@@ -5060,10 +5288,19 @@ class ExperimentControlWindow(QWidget):
             index = self.valve_port_combo.findData(target)
             if index >= 0:
                 target_port = ports[index] if 0 <= index < len(ports) else None
-                target_priority = controller_port_priority(target_port) if target_port is not None else 0
-                if target_priority >= best_likely_priority:
+                if target_port is not None and get_port_assignment(target_port.device) == "valve":
                     self.valve_port_combo.setCurrentIndex(index)
                     return
+
+        if manual_indices:
+            self.valve_port_combo.setCurrentIndex(manual_indices[0])
+            return
+
+        if target is not None:
+            index = self.valve_port_combo.findData(target)
+            if index >= 0:
+                self.valve_port_combo.setCurrentIndex(index)
+                return
 
         if best_likely_index is not None:
             self.valve_port_combo.setCurrentIndex(best_likely_index)
@@ -5155,6 +5392,12 @@ class ExperimentControlWindow(QWidget):
     def _refresh_ports(self) -> None:
         self._start_port_refresh()
 
+    def refresh_device_ports(self) -> bool:
+        if self._port_refresh_in_progress:
+            return False
+        self._start_port_refresh()
+        return True
+
     def _remember_selected_port(self, _: str) -> None:
         self._last_selected_port = self.selected_port()
 
@@ -5206,6 +5449,7 @@ class ExperimentControlWindow(QWidget):
             return
         self._valve_client = client
         self._valve_probe = probe
+        claim_port(probe.port, "Experiment Control / Valve")
         self._set_valve_connection_visual(True, f"Connected to {probe.model} [{probe.controller_type}] on {probe.port}.")
         self.valve_availability_changed.emit(probe)
         _LOGGER.info("Valve controller connected | model=%s type=%s port=%s", probe.model, probe.controller_type, probe.port)
@@ -5226,10 +5470,13 @@ class ExperimentControlWindow(QWidget):
         return True
 
     def _disconnect_valve_controller(self) -> None:
+        port = getattr(self._valve_probe, "port", None)
         if self._valve_client is not None:
             self._valve_client.close()
         self._valve_client = None
         self._valve_probe = None
+        if port:
+            release_port(port, "Experiment Control / Valve")
         self._set_valve_connection_visual(False, "Valve controller disconnected.")
         self.valve_availability_changed.emit(None)
         _LOGGER.info("Valve controller disconnected.")
@@ -5302,6 +5549,7 @@ class ExperimentControlWindow(QWidget):
             return
         self._mswitch_client = client
         self._mswitch_probe = probe
+        claim_port(probe.port, "Experiment Control / M-Switch")
         self.mswitch_availability_changed.emit(probe)
         self._set_mswitch_connection_visual(True, f"Connected to {probe.model} on {probe.port}.")
         self._update_mswitch_state_from_probe()
@@ -5310,10 +5558,13 @@ class ExperimentControlWindow(QWidget):
         _LOGGER.info("M-Switch connected | model=%s port=%s", probe.model, probe.port)
 
     def _disconnect_mswitch_controller(self) -> None:
+        port = getattr(self._mswitch_probe, "port", None)
         if self._mswitch_client is not None:
             self._mswitch_client.close()
         self._mswitch_client = None
         self._mswitch_probe = None
+        if port:
+            release_port(port, "Experiment Control / M-Switch")
         self._mswitch_connect_in_progress = False
         self._mswitch_connect_task = None
         self._set_mswitch_connection_visual(False, "M-Switch disconnected.")
@@ -5471,10 +5722,13 @@ class ExperimentControlWindow(QWidget):
         self._thread_pool.start(task)
 
     def _disconnect_pump(self) -> None:
+        port = getattr(self._probe, "port", None)
         self._connect_generation += 1
         self._connect_in_progress = False
         self._client.close()
         self._probe = None
+        if port:
+            release_port(port, "Experiment Control / Pump")
         self._set_connection_visual(False, "Pump disconnected.")
         self.availability_changed.emit(None)
         _LOGGER.info("Pump disconnected.")
@@ -5502,6 +5756,7 @@ class ExperimentControlWindow(QWidget):
             self._set_connection_visual(False, f"Connect failed on {probe.port}: {exc}")
             _LOGGER.error("Pump connect failed on %s: %s", probe.port, exc)
             return
+        claim_port(probe.port, "Experiment Control / Pump")
         self._probe = probe
         self._apply_probe(probe)
         self._set_connection_visual(True, f"Connected to {probe.model} on {probe.port}.")
@@ -5539,6 +5794,46 @@ class ExperimentControlWindow(QWidget):
         self._refresh_status_line()
         self.connection_toggle_button.setText("Disconnect" if connected else "Connect")
         self.connection_toggle_button.setEnabled(not self._connect_in_progress or connected)
+
+    def synchronize_device_connections(self) -> None:
+        if self._connection_sync_in_progress:
+            return
+        if self._connect_in_progress or self._valve_connect_in_progress or self._mswitch_connect_in_progress:
+            return
+        self._connection_sync_in_progress = True
+        try:
+            available_ports = {
+                str(port.device).strip()
+                for port in SerialController.list_ports()
+                if str(getattr(port, "device", "") or "").strip()
+            }
+            owner_snapshot = snapshot_port_ownership()
+
+            pump_port = str(getattr(self._probe, "port", "") or "").strip()
+            if self._client.is_connected():
+                if not pump_port or pump_port not in available_ports or "Experiment Control / Pump" not in owner_snapshot.get(pump_port, ""):
+                    _LOGGER.warning("Pump controller failed health check; disconnecting stale connection on %s.", pump_port or "unknown")
+                    self._disconnect_pump()
+            elif pump_port and pump_port in available_ports:
+                release_port(pump_port, "Experiment Control / Pump")
+
+            valve_port = str(getattr(self._valve_probe, "port", "") or "").strip()
+            if self._valve_client is not None and self._valve_client.is_connected():
+                if not valve_port or valve_port not in available_ports or "Experiment Control / Valve" not in owner_snapshot.get(valve_port, ""):
+                    _LOGGER.warning("Valve controller failed health check; disconnecting stale connection on %s.", valve_port or "unknown")
+                    self._disconnect_valve_controller()
+            elif valve_port and valve_port in available_ports:
+                release_port(valve_port, "Experiment Control / Valve")
+
+            mswitch_port = str(getattr(self._mswitch_probe, "port", "") or "").strip()
+            if self._mswitch_client is not None and self._mswitch_client.is_connected():
+                if not mswitch_port or mswitch_port not in available_ports or "Experiment Control / M-Switch" not in owner_snapshot.get(mswitch_port, ""):
+                    _LOGGER.warning("M-Switch failed health check; disconnecting stale connection on %s.", mswitch_port or "unknown")
+                    self._disconnect_mswitch_controller()
+            elif mswitch_port and mswitch_port in available_ports:
+                release_port(mswitch_port, "Experiment Control / M-Switch")
+        finally:
+            self._connection_sync_in_progress = False
 
     def _show_info(self, message: str) -> None:
         _LOGGER.info("%s", message)
@@ -6731,7 +7026,7 @@ class ExperimentControlWindow(QWidget):
             return
         self._select_experiment_control_plan_row(row)
         self._plan_active_row = row
-        if self._plan_running or self._plan_holding:
+        if self._plan_running or self._plan_holding or self._plan_paused:
             self._plan_elapsed_s = 0.0
             self._plan_resume_elapsed_s = 0.0
             self._plan_started_monotonic = monotonic() if self._plan_running else None
@@ -6745,7 +7040,7 @@ class ExperimentControlWindow(QWidget):
             self._plan_resume_runtime_s = 0.0
         self._update_timeline_selection()
         self._load_selected_step_into_editor()
-        if not (self._plan_running or self._plan_holding):
+        if not (self._plan_running or self._plan_holding or self._plan_paused):
             self._set_status_message(f"Selected experiment-plan step {row + 1}.")
 
     def _apply_selected_experiment_control_step(self, row: int) -> None:
@@ -6756,108 +7051,51 @@ class ExperimentControlWindow(QWidget):
         self._apply_experiment_control_step_to_pump(steps[row], start=True)
 
     def _run_experiment_control(self) -> None:
+        self._start_or_resume_experiment_control()
+
+    def _start_or_resume_experiment_control(self) -> None:
         steps = self._read_experiment_control_steps()
         if not steps:
             self._set_status_message("Experiment plan is empty.")
             return
+        if self._plan_running:
+            return
+        if self._plan_holding or self._plan_paused:
+            restore_step = None
+            if self._plan_paused and self._paused_plan_step is not None:
+                restore_step = deepcopy(self._paused_plan_step)
+                self._paused_plan_step = None
+            self._resume_experiment_plan(
+                restore_step=restore_step,
+                status_message=f"Resumed experiment plan on step {self._plan_active_row + 1 if self._plan_active_row is not None else 1}.",
+                log_message=f"Experiment plan resumed | step={self._plan_active_row + 1 if self._plan_active_row is not None else 1}",
+                emit_event="plan_resume",
+            )
+            return
         if not self._request_recording_control("start"):
             self._set_status_message("Experiment plan start cancelled because recording was not started.")
             return
-        if self._plan_holding:
-            self._plan_holding = False
         row = self._selected_experiment_control_row()
         if row is None:
             row = 0
             self._select_experiment_control_plan_row(0)
-        if not self._plan_running:
-            self._plan_elapsed_s = 0.0
-            self._plan_resume_elapsed_s = 0.0
-        if self._measurement_started_monotonic is None:
-            self._measurement_started_monotonic = monotonic()
-        self._step_started_monotonic = monotonic()
-        self._plan_runtime_s = 0.0
-        self._plan_resume_runtime_s = 0.0
-        self._plan_running = True
-        self._plan_active_row = row
-        self._plan_started_monotonic = monotonic()
-        self._update_experiment_control_toggle_button()
-        self._activate_experiment_control_step_for_elapsed(0.0, force=True)
-        self._plan_timer.start()
-        self._set_status_message(f"Running experiment plan from step {self._plan_active_row + 1 if self._plan_active_row is not None else 1}.")
-        _LOGGER.info("Experiment plan started | step=%s", self._plan_active_row + 1 if self._plan_active_row is not None else 1)
-        if self._plan_active_row is not None and 0 <= self._plan_active_row < len(steps):
-            self._emit_experimental_control_state("plan_started", steps[self._plan_active_row])
+        self._begin_experiment_plan_run(row, steps)
 
     def _hold_experiment_control(self) -> None:
-        if not (self._plan_running or self._plan_holding):
-            return
-        # See docs/experiment-control/experiment_plan_execution_model.md:
-        # HOLD freezes plan time and cursor position, but does not stop recording.
-        if self._plan_running and self._plan_started_monotonic is not None:
-            self._plan_elapsed_s = self._plan_resume_elapsed_s + max(monotonic() - self._plan_started_monotonic, 0.0)
-            self._plan_resume_elapsed_s = self._plan_elapsed_s
-        self._plan_running = False
-        self._plan_holding = True
-        self._plan_started_monotonic = None
-        self._plan_runtime_s = self._step_runtime_for_display()
-        pause_applied = self._apply_pause_state()
-        self._update_experiment_control_toggle_button()
-        if pause_applied:
-            self._set_status_message("Experiment plan hold. Pause state applied.")
-            _LOGGER.info("Experiment plan hold with pause state applied.")
-        else:
-            self._set_status_message("Experiment plan hold.")
-            _LOGGER.info("Experiment plan hold.")
-        self._emit_experimental_control_state("plan_hold", self._applied_plan_step)
+        self._enter_hold_state()
+
+    def _pause_experiment_control(self) -> None:
+        self._enter_pause_state()
 
     def _stop_experiment_control(self) -> None:
-        steps = self._read_experiment_control_steps()
-        target_row = self._plan_active_row
-        if target_row is None:
-            target_row = self._selected_experiment_control_row()
-        if target_row is None and steps:
-            target_row = 0
-        if steps and target_row is not None:
-            target_row = min(max(int(target_row), 0), len(steps) - 1)
-            self._plan_active_row = target_row
-            if not (self._plan_running or self._plan_holding):
-                self._plan_elapsed_s = 0.0
-            self._plan_resume_elapsed_s = self._plan_elapsed_s
-            self._select_experiment_control_plan_row(target_row)
-            self.timeline_widget.set_steps(
-                steps,
-                target_row,
-                self._timeline_progress_for_display(),
-                self._plan_runtime_for_display(),
-                self._step_runtime_for_display(),
-            )
-        if self._plan_running and self._plan_started_monotonic is not None:
-            self._plan_elapsed_s = self._plan_resume_elapsed_s + max(monotonic() - self._plan_started_monotonic, 0.0)
-            self._plan_resume_elapsed_s = self._plan_elapsed_s
-        self._plan_running = False
-        self._plan_holding = False
-        self._plan_started_monotonic = None
-        self._step_started_monotonic = None
-        self._measurement_started_monotonic = None
-        self._plan_runtime_s = self._plan_runtime_for_display()
-        self._plan_resume_runtime_s = self._step_runtime_for_display()
-        self._applied_plan_step = None
-        self._plan_timer.stop()
-        self._update_experiment_control_toggle_button()
-        if self._client.is_connected():
-            self._stop_all_channels()
-        else:
-            self._set_status_message("Experiment plan stopped.")
-        _LOGGER.info("Experiment plan stopped.")
-        self._emit_experimental_control_state("plan_stopped", self._applied_plan_step)
-        self._request_recording_control("stop")
+        self._stop_experiment_plan(self._applied_plan_step)
 
     def _move_to_relative_experiment_control_step(self, delta: int) -> None:
         steps = self._read_experiment_control_steps()
         if not steps:
             return
         running = self._plan_running
-        row = self._plan_active_row if (self._plan_running or self._plan_holding) else self._selected_experiment_control_row()
+        row = self._plan_active_row if (self._plan_running or self._plan_holding or self._plan_paused) else self._selected_experiment_control_row()
         if row is None:
             row = 0
         target = min(max(row + delta, 0), len(steps) - 1)
@@ -6868,11 +7106,11 @@ class ExperimentControlWindow(QWidget):
             self._step_started_monotonic = monotonic()
             self._plan_runtime_s = self._step_runtime_for_display()
             self._plan_resume_runtime_s = self._plan_runtime_s
-        if not (self._plan_running or self._plan_holding):
+        if not (self._plan_running or self._plan_holding or self._plan_paused):
             self._set_status_message(f"Selected experiment-plan step {target + 1}.")
 
     def _timeline_progress_for_display(self) -> float | None:
-        if self._plan_running or self._plan_holding:
+        if self._plan_running or self._plan_holding or self._plan_paused:
             row = self._plan_active_row if self._plan_active_row is not None else self._selected_experiment_control_row()
             steps = self._read_experiment_control_steps()
             if row is not None and 0 <= row < len(steps):
@@ -6893,8 +7131,10 @@ class ExperimentControlWindow(QWidget):
     def _emit_experimental_control_state(self, event: str, step: PumpPlanStep | None = None, *, status: str = "") -> None:
         if step is None:
             step = self._applied_plan_step
+        plan_state = self._experiment_runtime_snapshot().payload_state
         payload: dict[str, object] = {
             "event": event,
+            "plan_state": plan_state,
             "step_index": int(step.step) if step is not None else "",
             "elapsed_in_step_ms": int(round(max(float(self._plan_elapsed_s), 0.0) * 1000.0)),
             "pump_running": bool(self._plan_running),
@@ -6917,17 +7157,10 @@ class ExperimentControlWindow(QWidget):
         self._emit_experimental_control_state(event, step, status=status)
 
     def _advance_experiment_control_progress(self) -> None:
-        if self._plan_holding:
+        if self._plan_holding or self._plan_paused:
             steps = self._read_experiment_control_steps()
             if steps:
-                self.timeline_widget.set_steps(
-                    steps,
-                    self._plan_active_row,
-                    self._timeline_progress_for_display(),
-                    self._plan_runtime_for_display(),
-                    self._step_runtime_for_display(),
-                )
-            self._refresh_status_line()
+                self._sync_experiment_control_timeline(steps, self._plan_active_row, refresh_status=True)
             return
         if not self._plan_running or self._plan_started_monotonic is None:
             return
@@ -6950,30 +7183,15 @@ class ExperimentControlWindow(QWidget):
                 _LOGGER.info("Experiment plan finished.")
                 return
             self._plan_active_row = next_row
-            self._select_experiment_control_plan_row(next_row)
             self._apply_experiment_control_step_to_pump(steps[next_row], start=True)
             self._plan_elapsed_s = 0.0
             self._plan_resume_elapsed_s = 0.0
             self._plan_started_monotonic = monotonic()
             self._step_started_monotonic = monotonic()
-            self.timeline_widget.set_steps(
-                steps,
-                next_row,
-                self._timeline_progress_for_display(),
-                self._plan_runtime_for_display(),
-                self._step_runtime_for_display(),
-            )
-            self._refresh_status_line()
+            self._sync_experiment_control_timeline(steps, next_row, refresh_status=True)
             return
         self._plan_elapsed_s = elapsed
-        self._refresh_status_line()
-        self.timeline_widget.set_steps(
-            steps,
-            current_row,
-            self._timeline_progress_for_display(),
-            self._plan_runtime_for_display(),
-            self._step_runtime_for_display(),
-        )
+        self._sync_experiment_control_timeline(steps, current_row, refresh_status=True)
 
     def _activate_experiment_control_step_for_elapsed(self, elapsed_s: float, *, force: bool) -> None:
         steps = self._read_experiment_control_steps()
@@ -6987,15 +7205,8 @@ class ExperimentControlWindow(QWidget):
             target_row = 0
         if force or target_row != self._plan_active_row:
             self._plan_active_row = target_row
-            self._select_experiment_control_plan_row(target_row)
             self._apply_experiment_control_step_to_pump(steps[target_row], start=True)
-        self.timeline_widget.set_steps(
-            steps,
-            target_row,
-            self._plan_elapsed_s,
-            self._plan_runtime_for_display(),
-            self._step_runtime_for_display(),
-        )
+        self._sync_experiment_control_timeline(steps, target_row)
 
     def _stop_all_channels(self) -> None:
         if not self._client.is_connected():
@@ -7024,6 +7235,7 @@ class ExperimentControlWindow(QWidget):
                 _LOGGER.info("Shutdown: M-Switch left in current position before disconnect.")
         finally:
             self._stop_experiment_control()
+            self._release_claimed_device_ports()
             if self._valve_client is not None:
                 self._valve_client.close()
             self._valve_client = None
@@ -7041,6 +7253,14 @@ class ExperimentControlWindow(QWidget):
             self._set_connection_visual(False, "Pump disconnected.")
             self._set_valve_connection_visual(False, "Valve controller disconnected.")
             self._set_mswitch_connection_visual(False, "M-Switch disconnected.")
+
+    def _release_claimed_device_ports(self) -> None:
+        if self._probe is not None:
+            release_port(self._probe.port, "Experiment Control / Pump")
+        if self._valve_probe is not None:
+            release_port(self._valve_probe.port, "Experiment Control / Valve")
+        if self._mswitch_probe is not None:
+            release_port(self._mswitch_probe.port, "Experiment Control / M-Switch")
 
     def _read_live_status(self) -> None:
         if not self._client.is_connected():
@@ -7529,6 +7749,7 @@ class ExperimentControlWindow(QWidget):
         _LOGGER.info("Experiment control window closed.")
         self.save_ui_state()
         self._client.close()
+        self._release_claimed_device_ports()
         if self._valve_client is not None:
             self._valve_client.close()
         self._valve_client = None

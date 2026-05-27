@@ -16,6 +16,11 @@ from PyQt6.QtWidgets import QFileDialog, QInputDialog
 from lspr_app.domain.models import Spectrum
 from lspr_app.domain.session import MeasurementError
 from lspr_app.gui.icon_helpers import flow_tabler_icon, math_function_tab_icon, prism_tab_icon, tint_tabler_icon, transport_icon
+from lspr_app.gui.experiment_control_runtime import (
+    experiment_runtime_label,
+    experiment_runtime_snapshot,
+    experiment_runtime_state_name,
+)
 from lspr_app.gui.history_utils import trim_history_tail_in_place
 from lspr_app.gui.main_window_headers import update_source_link_buttons
 from lspr_app.gui.trace_history_buffer import TraceHistoryBuffer
@@ -993,19 +998,46 @@ def flush_measurement_frames(window, force: bool = False) -> None:
         window.status_label.setText(f"Recording to {window._measurement_path.name}")
 
 
+def _experiment_runtime_flags(window) -> tuple[bool, bool, bool]:
+    experiment_control_window = getattr(window, "_experiment_control_window", None)
+    if experiment_control_window is None:
+        return False, False, False
+    return (
+        bool(getattr(experiment_control_window, "_plan_running", False)),
+        bool(getattr(experiment_control_window, "_plan_holding", False)),
+        bool(getattr(experiment_control_window, "_plan_paused", False)),
+    )
+
+
+def _experiment_runtime_state(window) -> str:
+    running, holding, paused = _experiment_runtime_flags(window)
+    return experiment_runtime_state_name(running=running, holding=holding, paused=paused)
+
+
+def _experiment_runtime_label(window) -> str:
+    running, holding, paused = _experiment_runtime_flags(window)
+    return experiment_runtime_label(
+        running=running,
+        holding=holding,
+        paused=paused,
+        recording=bool(getattr(window, "_measurement_active", False)),
+    )
+
+
 def update_window_mode_label(window) -> None:
     if not hasattr(window, "_window_mode_label"):
         return
     source_name = "Spectrometer" if window._source_mode == "spectrometer" else "Simulation"
-    if window._measurement_active:
-        text = f"Measurement | {source_name}"
-        tooltip = "A measurement is currently active."
-    elif window._live_active:
-        text = f"Live mode | {source_name}"
-        tooltip = "Live acquisition is running."
-    else:
-        text = f"Free mode | {source_name}"
-        tooltip = "The app is open but no measurement is running."
+    running, holding, paused = _experiment_runtime_flags(window)
+    snapshot = experiment_runtime_snapshot(
+        running=running,
+        holding=holding,
+        paused=paused,
+        recording=bool(getattr(window, "_measurement_active", False)),
+        has_steps=bool(getattr(getattr(window, "_experiment_control_window", None), "_read_experiment_control_steps", lambda: [])()),
+    )
+    text = snapshot.label()
+    tooltip = snapshot.tooltip(source_name=source_name)
     window._window_mode_label.setText(text)
     window._window_mode_label.setToolTip(tooltip)
     if hasattr(window, "_window_mode_icon_label"):

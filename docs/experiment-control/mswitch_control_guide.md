@@ -35,6 +35,12 @@ The M-switch control stack has three layers:
 
 The M-switch code depends on the optional proprietary `amfTools` package.
 
+Install it in the active virtual environment before using M-Switch control:
+
+```powershell
+python -m pip install AMFTools
+```
+
 If `amfTools` is not installed:
 
 - discovery returns no devices

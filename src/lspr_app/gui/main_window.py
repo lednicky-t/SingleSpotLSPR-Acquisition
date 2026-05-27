@@ -61,6 +61,7 @@ from lspr_app import __version__
 from lspr_app.device.base import Spectrometer, SpectrometerCapabilities
 from lspr_app.device.amf_mswitch import detect_amf_mswitch_devices
 from lspr_app.device.reglo_icc import RegloICCClient, is_probable_reglo_port
+from lspr_app.device.port_assignments import get_port_assignment
 from lspr_app.device.serial_controllers import SerialController, controller_port_priority
 from lspr_app.device.valve_controllers import detect_valve_controller
 from lspr_app.device.simulated import SimulationParameters, SimulatedSpectrometer
@@ -260,6 +261,7 @@ from lspr_app.gui.hardware_initializer import (
     HardwareInitStepResult,
     HardwareInitTask,
 )
+from lspr_app.gui.hardware_inventory_dialog import show_hardware_inventory_dialog
 from lspr_app.gui.workers import (
     AcquisitionResult,
     LiveAcquisitionEvent,
@@ -2531,6 +2533,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _handle_experimental_control_state_recorded(self, payload: object) -> None:
+        self._update_window_mode_label()
         if self._measurement_writer is None or not self._measurement_active:
             return
         if not isinstance(payload, dict):
@@ -3086,7 +3089,10 @@ class MainWindow(QMainWindow):
         )
 
     def _pump_init_step(self) -> HardwareInitStepResult:
-        ports = [port for port in RegloICCClient.list_ports() if is_probable_reglo_port(port)]
+        all_ports = RegloICCClient.list_ports()
+        preferred_ports = [port for port in all_ports if get_port_assignment(port.device) == "pump"]
+        probable_ports = [port for port in all_ports if is_probable_reglo_port(port)]
+        ports = preferred_ports + [port for port in probable_ports if port not in preferred_ports]
         if not ports:
             return HardwareInitStepResult(
                 key="pump",
@@ -3156,7 +3162,10 @@ class MainWindow(QMainWindow):
         )
 
     def _valve_init_step(self) -> HardwareInitStepResult:
-        ports = [port for port in SerialController.list_ports() if controller_port_priority(port) > 0]
+        all_ports = SerialController.list_ports()
+        preferred_ports = [port for port in all_ports if get_port_assignment(port.device) == "valve"]
+        likely_ports = [port for port in all_ports if controller_port_priority(port) > 0]
+        ports = preferred_ports + [port for port in likely_ports if port not in preferred_ports]
         if not ports:
             return HardwareInitStepResult(
                 key="valve",
@@ -3303,6 +3312,13 @@ class MainWindow(QMainWindow):
     def _start_hardware_initialization(self) -> None:
         if self._hardware_init_task is not None:
             return
+        experiment_control_window = getattr(self, "_experiment_control_window", None)
+        if experiment_control_window is not None and hasattr(experiment_control_window, "shutdown_devices"):
+            self._log_info("Resetting live hardware connections before reinitialization.")
+            try:
+                experiment_control_window.shutdown_devices()
+            except Exception as exc:
+                self._log_warning(f"Could not reset live hardware connections: {exc}")
         self.status_label.setText("Scanning connected devices...")
         self._emit_hardware_init_progress(12, "Scanning connected devices...")
         self._log_info("Hardware initialization queued.")
@@ -3330,6 +3346,7 @@ class MainWindow(QMainWindow):
 
     def _handle_hardware_init_finished(self, result: object) -> None:
         self._hardware_init_task = None
+        experiment_control_window = getattr(self, "_experiment_control_window", None)
         if not isinstance(result, HardwareInitResult):
             self._log_warning("Hardware initialization finished with an unexpected result payload.")
             self._finish_hardware_initialization("Hardware initialization finished.")
@@ -3367,6 +3384,15 @@ class MainWindow(QMainWindow):
             self._log_warning(f"Valve controller scan failed: {result.valve_error}")
         else:
             self._log_warning("No valve controller discovered.")
+
+        if experiment_control_window is not None and hasattr(experiment_control_window, "refresh_device_ports"):
+            try:
+                refreshed = bool(experiment_control_window.refresh_device_ports())
+            except Exception as exc:
+                self._log_warning(f"Could not refresh experiment-control ports after initialization: {exc}")
+            else:
+                if refreshed:
+                    self._log_info("Refreshing experiment-control ports after initialization.")
 
         self._emit_hardware_init_progress(100, "Hardware initialization complete.")
         self._finish_hardware_initialization("Hardware initialization complete.")
@@ -3458,6 +3484,9 @@ class MainWindow(QMainWindow):
             "ovh = acquisition latency minus expected budget\n"
             "show = last displayed frame/window summary",
         )
+
+    def _show_connected_devices_dialog(self) -> None:
+        show_hardware_inventory_dialog(self)
 
     def _set_processing_debug_mode_enabled(self, enabled: bool) -> None:
         self._processing_debug_mode_enabled = bool(enabled)

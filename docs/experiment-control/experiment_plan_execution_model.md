@@ -45,7 +45,7 @@ Behavior:
 
 ### HOLD
 
-This is the state currently closest to the existing plan pause behavior.
+This is the state that freezes the plan clock without applying the synthetic pause row.
 
 Behavior:
 
@@ -61,12 +61,12 @@ The plan can later be resumed from the same point.
 
 ### PAUSE
 
-This is a new device-control state.
+This is the device-control state driven by the synthetic pause row.
 
 Behavior:
 
 - the flow execution remains logically paused
-- the current step can be replaced by an artificial pause step if needed
+- the current step can be replaced by the synthetic pause step from the app-defined pause row
 - selected devices may be stopped or put into a safe idle mode
 - measurement recording continues
 - when pause is canceled, the original flow step can resume from the paused position
@@ -126,6 +126,27 @@ Behavior:
 - flow execution ends
 - measurement recording ends
 - the HDF5 file is finalized and closed
+
+## Runtime Controls
+
+The control strip below the timeline should expose the runtime actions as separate buttons:
+
+- `Play`
+  - starts a stopped plan
+  - resumes a plan from `HOLD` or `PAUSE`
+- `Hold`
+  - freezes the current plan clock and automatic step progression
+  - does not apply the synthetic pause row
+- `Pause`
+  - applies the synthetic pause row
+  - pauses the execution while preserving the interrupted step for later resume
+  - can be entered directly from `RUN`, from `HOLD`, or from `STOP`
+  - when entered from `STOP`, the plan starts recording and applies the pause state on the selected step; `Play` then resumes that selected step afterward
+- `Stop`
+  - cancels every runtime state
+  - stops hardware and ends recording
+
+The `Pause` button edits and applies the runtime pause template, while the pause template itself remains a separate app-defined row in the experiment-control table.
 
 ## Plan Vs Runtime
 
@@ -268,8 +289,8 @@ Implementation preference:
 
 For now, the intended meaning is:
 
-- `HOLD` equals time freeze on the current step
-- `PAUSE` equals temporary device stop or safe idle, potentially driven by a synthetic `0` row
+- `HOLD` equals time freeze on the current step without changing the hardware state
+- `PAUSE` equals temporary device stop or safe idle, driven by the synthetic pause row
 - `STOP` equals full termination
 
 The table and bar remain plan selectors, while the recorded runtime sequence is built live from the actual experiment.

@@ -71,6 +71,10 @@ def build_menu_bar(window) -> QMenuBar:
     hw_init_action.setToolTip("Scan the connected spectrometer and pump controller.")
     hw_init_action.triggered.connect(window._start_hardware_initialization)
 
+    hw_inventory_action = hw_menu.addAction("Connected devices")
+    hw_inventory_action.setToolTip("Show connected COM ports and the device type recognized for each port.")
+    hw_inventory_action.triggered.connect(window._show_connected_devices_dialog)
+
     hw_menu.addSeparator()
     device_settings_menu = hw_menu.addMenu("Device settings")
     device_settings_placeholder = device_settings_menu.addAction("Reserved for device-specific settings")

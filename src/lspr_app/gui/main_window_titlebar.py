@@ -4,8 +4,21 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QMenuBar, QWidget
 
+from lspr_app.device.connection_registry import snapshot_port_ownership
 from lspr_app.gui.icon_helpers import device_status_icon
 from lspr_app.gui.ui_helpers import make_window_button, window_control_icon
+
+
+def device_status_state(connected: bool, discovered: bool) -> str:
+    if connected:
+        return "connected"
+    if discovered:
+        return "discovered"
+    return "disconnected"
+
+
+def _device_status_entry(connected: bool, discovered: bool, detail: str = "") -> tuple[str, str]:
+    return device_status_state(connected, discovered), detail
 
 
 def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
@@ -135,47 +148,74 @@ def refresh_hw_device_status_strip(window) -> None:
     if not items:
         return
     experiment_control_window = getattr(window, "_experiment_control_window", None)
+    if experiment_control_window is not None and hasattr(experiment_control_window, "synchronize_device_connections"):
+        try:
+            experiment_control_window.synchronize_device_connections()
+        except Exception:
+            pass
     overrides = getattr(window, "_hardware_status_overrides", {})
     init_active = bool(getattr(window, "_hardware_init_task", None)) or not bool(getattr(window, "_hardware_init_ready_emitted", False))
     pump_client = getattr(experiment_control_window, "_client", None) if experiment_control_window is not None else None
     valve_client = getattr(experiment_control_window, "_valve_client", None) if experiment_control_window is not None else None
     mswitch_client = getattr(experiment_control_window, "_mswitch_client", None) if experiment_control_window is not None else None
+    pump_probe = getattr(experiment_control_window, "_probe", None) if experiment_control_window is not None else None
+    valve_probe = getattr(experiment_control_window, "_valve_probe", None) if experiment_control_window is not None else None
+    mswitch_probe = getattr(experiment_control_window, "_mswitch_probe", None) if experiment_control_window is not None else None
+    owner_snapshot = snapshot_port_ownership()
 
-    def _is_connected(client) -> bool:
-        return bool(client is not None and getattr(client, "is_connected", lambda: False)())
+    def _is_connected(client, owner_label: str) -> bool:
+        if client is None or not getattr(client, "is_connected", lambda: False)():
+            return False
+        port = getattr(client, "port", None)
+        port_name = getattr(port, "device", port)
+        if not port_name:
+            return False
+        return owner_label in owner_snapshot.get(str(port_name), "")
+
+    def _port_name(probe: object | None) -> str:
+        if probe is None:
+            return ""
+        port = getattr(probe, "port", None)
+        return str(getattr(port, "device", port) or "").strip()
+
+    def _is_discovered(client, probe: object | None, owner_label: str) -> bool:
+        port_name = _port_name(probe)
+        if not port_name:
+            return False
+        if _is_connected(client, owner_label):
+            return False
+        return True
 
     spectrometer_detail = "(Simulations)" if not bool(window._hardware_available) else ""
     devices = {
-        "spectrometer": (
-            bool(window._hardware_available),
-            spectrometer_detail,
+        "spectrometer": _device_status_entry(bool(window._hardware_available), False, spectrometer_detail),
+        "pump": _device_status_entry(
+            _is_connected(pump_client, "Experiment Control / Pump"),
+            _is_discovered(pump_client, pump_probe, "Experiment Control / Pump"),
         ),
-        "pump": (
-            _is_connected(pump_client),
-            "",
+        "valve": _device_status_entry(
+            _is_connected(valve_client, "Experiment Control / Valve"),
+            _is_discovered(valve_client, valve_probe, "Experiment Control / Valve"),
         ),
-        "valve": (
-            _is_connected(valve_client),
-            "",
-        ),
-        "mswitch": (
-            _is_connected(mswitch_client),
-            "",
+        "mswitch": _device_status_entry(
+            _is_connected(mswitch_client, "Experiment Control / M-Switch"),
+            _is_discovered(mswitch_client, mswitch_probe, "Experiment Control / M-Switch"),
         ),
     }
     for key, icon_label, text_label in items:
-        online, detail = devices.get(key, (False, ""))
+        state, detail = devices.get(key, ("disconnected", ""))
         if init_active and key in overrides:
-            override_online, override_detail = overrides.get(key, (online, detail))
-            online = bool(override_online)
+            override_online, override_detail = overrides.get(key, (state == "connected", detail))
+            state = "connected" if override_online else state
             if key == "spectrometer" and override_detail:
                 detail = override_detail
         elif key in overrides and not detail:
-            override_online, override_detail = overrides.get(key, (online, detail))
-            online = bool(online or override_online)
+            override_online, override_detail = overrides.get(key, (state == "connected", detail))
+            if override_online:
+                state = "connected"
             if key == "spectrometer" and override_detail:
                 detail = override_detail
-        icon_label.setPixmap(device_status_icon(online).pixmap(16, 16))
+        icon_label.setPixmap(device_status_icon(state).pixmap(16, 16))
         base_text = text_label.text().split(":", 1)[0].strip()
         text_label.setText(base_text if not detail else f"{base_text}: {detail}")
 

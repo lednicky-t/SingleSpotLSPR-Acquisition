@@ -9,6 +9,7 @@ Desktop application for live LSPR spectroscopy acquisition, analysis, and experi
 - Experiment control window for pump and valve hardware
 - HDF5 and CSV export for measurement data
 - Compact debug log terminal and live status footer
+- Optional AMF M-Switch control when the vendor `AMFTools` package is installed
 
 ## Repository layout
 
@@ -45,4 +46,5 @@ python -m lspr_app.app
 - The project name shown in the UI is `LSPR Acquisition`.
 - Versioning is documented in `docs/versioning.md`.
 - The native experiment-control plan format is documented in `docs/experiment_plan_format.md`.
+- M-Switch control requires the optional `AMFTools` package; without it, the HW testbench and experiment-control M-Switch actions are unavailable.
 
