@@ -414,26 +414,39 @@ def reference_peak_nm_for_shift_for(window) -> float | None:
 
 
 def build_summary_text_for(window) -> str:
-    state = window._session.state
     current = window._current_settings()
     processing = window._current_processing_settings()
+    project_destination = "-"
+    if hasattr(window, "recording_project_destination"):
+        project_destination = str(window.recording_project_destination() or "").strip() or "-"
+    experiment_name = "-"
+    if hasattr(window, "recording_experiment_name"):
+        experiment_name = str(window.recording_experiment_name() or "").strip() or "-"
+    compression_enabled = "-"
+    if hasattr(window, "measurement_hdf5_compression_enabled"):
+        compression_enabled = "enabled" if window.measurement_hdf5_compression_enabled() else "disabled"
     smoothing_method = str(processing.smoothing_method).replace("_", " ")
     crop_method = str(getattr(processing, "crop_method", "fixed_width")).replace("_", " ")
     fit_method = str(getattr(processing, "fit_method", "none")).replace("_", " ")
     peak_tracking_mode = str(getattr(processing, "peak_tracking_mode", "smoothed_max")).replace("_", " ")
     return "\n".join(
         [
-            "Source",
-            f"  Mode: {'Spectrometer' if window._source_mode == 'spectrometer' else 'Simulation'}",
+            "Recording settings",
+            f"  Project destination: {project_destination}",
+            f"  Experiment name: {experiment_name}",
+            f"  HDF5 compression after recording: {compression_enabled}",
+            "",
+            "Source and acquisition settings",
+            f"  Source mode: {'Spectrometer' if window._source_mode == 'spectrometer' else 'Simulation'}",
             f"  Backend: {window._spectrometer.device_name()}",
             "",
-            "Acquisition",
+            "Acquisition settings",
             f"  Integration time: {current.integration_time_ms:.3f} ms",
             f"  Accumulation: {current.averages} raw_spectra",
             f"  Correct dark counts: {'yes' if current.correct_dark_counts else 'no'}",
             f"  Correct nonlinearity: {'yes' if current.correct_nonlinearity else 'no'}",
             "",
-            "Processing",
+            "Processing settings",
             f"  Range: {processing.wavelength_min_nm:.2f}-{processing.wavelength_max_nm:.2f} nm",
             f"  Baseline removal: {processing.baseline_method}",
             f"  Spectral smoothing: {smoothing_method} ({processing.smoothing_window})",
@@ -446,12 +459,6 @@ def build_summary_text_for(window) -> str:
             f"  Noise window: {processing.trace_noise_window_s:.1f} s",
             f"  Peak trace: {peak_tracking_mode}",
             f"  Trace metrics: {', '.join(processing.trace_metrics)}",
-            "",
-            "Stored spectra",
-            f"  Dark: {window._describe_spectrum(state.dark)}",
-            f"  Reference: {window._describe_spectrum(state.reference)}",
-            f"  Sample: {window._describe_spectrum(state.sample)}",
-            f"  Absorbance: {window._describe_spectrum(state.absorbance)}",
         ]
     )
 

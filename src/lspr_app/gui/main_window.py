@@ -181,6 +181,7 @@ from lspr_app.gui.main_window_logging import (
     clear_log_terminal,
     copy_log_terminal,
     copy_session_stats_log_for,
+    copy_session_stats_snapshot_for,
     describe_spectrum_for,
     flush_log_buffer,
     log_debug,
@@ -193,6 +194,7 @@ from lspr_app.gui.main_window_logging import (
     refresh_session_summary_for,
     refresh_session_statistics_for,
     set_log_following,
+    save_session_stats_log_for,
 )
 from lspr_app.gui.acquisition_controller import (
     append_processed_trace_history,
@@ -546,15 +548,24 @@ class MainWindow(QMainWindow):
         self.session_statistics_text: QTextEdit | None = None
         self.session_settings_text: QTextEdit | None = None
         self.session_summary: QTextEdit | None = None
-        self.session_stats_splitter: QSplitter | None = None
         self._last_session_stats_text = ""
         self._last_session_stats_refresh_ts = 0.0
         self._session_stats_log: list[str] = []
         self._session_stats_log_last_text = ""
         self._session_stats_log_last_capture_ts = 0.0
+        self._session_stats_recording_active = False
+        self._session_stats_recording_started_at: datetime | None = None
+        self._session_stats_recording_duration_s: float | None = None
+        self._session_stats_recording_blink_visible = True
+        self._session_stats_recording_blink_timer = QTimer(self)
+        self._session_stats_recording_blink_timer.setInterval(650)
+        self._session_stats_recording_blink_timer.timeout.connect(self._advance_session_stats_recording_blink_indicator)
+        self._session_stats_recording_timer = QTimer(self)
+        self._session_stats_recording_timer.timeout.connect(self._capture_session_stats_recording_snapshot)
         self._title_bar_widget: QWidget | None = None
         self._title_bar_drag_active = False
         self._title_bar_drag_offset = QPoint(0, 0)
+        self._sensorgram_header_controls_ready = False
         self._brand_icon_path = Path(__file__).resolve().parent.parent / "resources" / "icons" / "app_icon.svg"
         self._prism_icon_svg = """
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -679,12 +690,13 @@ class MainWindow(QMainWindow):
         self.acquire_dark_button.clicked.connect(lambda: self._request_manual_acquisition("dark"))
         self.acquire_reference_button.clicked.connect(lambda: self._request_manual_acquisition("reference"))
 
-        self.live_rate_spin = QDoubleSpinBox()
-        make_compact_spinbox(self.live_rate_spin)
+        self.live_rate_spin = InlineWheelDoubleLabel(4.0)
+        self.live_rate_spin.setObjectName("liveRateLabel")
         self.live_rate_spin.setRange(0.1, 200.0)
         self.live_rate_spin.setValue(4.0)
         self.live_rate_spin.setDecimals(2)
         self.live_rate_spin.setSuffix(" Hz")
+        self.live_rate_spin.setSingleStep(0.1)
         self.live_rate_spin.setToolTip(
             "GUI display refresh rate for live spectra and sensorgram updates. "
             "Lower values skip more display frames and reduce GUI work."
@@ -1036,31 +1048,36 @@ class MainWindow(QMainWindow):
 
         session_font = QFont("Consolas", 9)
 
-        self.session_statistics_text = QTextEdit()
-        self.session_statistics_text.setObjectName("sessionStatisticsText")
-        self.session_statistics_text.setReadOnly(True)
-        self.session_statistics_text.setAcceptRichText(False)
-        self.session_statistics_text.setUndoRedoEnabled(False)
-        self.session_statistics_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self.session_statistics_text.setFont(session_font)
-        self.session_statistics_text.document().setDefaultFont(session_font)
-        self.session_statistics_text.setToolTip("Live timing and performance statistics. Scroll without the view jumping back to the top.")
+        self.session_summary = QTextEdit()
+        self.session_summary.setObjectName("sessionSettingsText")
+        self.session_summary.setReadOnly(True)
+        self.session_summary.setAcceptRichText(True)
+        self.session_summary.setUndoRedoEnabled(False)
+        self.session_summary.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.session_summary.setFont(session_font)
+        self.session_summary.document().setDefaultFont(session_font)
+        self.session_summary.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.session_summary.setMinimumHeight(150)
+        self.session_summary.setToolTip(
+            "Current session settings and live performance statistics. Scroll without the view jumping back to the top."
+        )
+        self.session_settings_text = self.session_summary
+        self.session_statistics_text = self.session_summary
 
-        self.session_settings_text = QTextEdit()
-        self.session_settings_text.setObjectName("sessionSettingsText")
-        self.session_settings_text.setReadOnly(True)
-        self.session_settings_text.setAcceptRichText(False)
-        self.session_settings_text.setUndoRedoEnabled(False)
-        self.session_settings_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self.session_settings_text.setFont(session_font)
-        self.session_settings_text.document().setDefaultFont(session_font)
-        self.session_settings_text.setToolTip("Current acquisition and processing settings for the active session.")
-
-        self.session_summary = self.session_settings_text
-
-        self.session_stats_copy_button = QPushButton("Copy stats log")
-        self.session_stats_copy_button.setToolTip("Copy the recording-period statistics log to the clipboard.")
-        self.session_stats_copy_button.clicked.connect(self._copy_session_stats_log)
+        self.session_stats_snapshot_button = self._make_frameless_icon_button(
+            tint_tabler_icon(flow_tabler_icon("camera"), QColor("#5fa8ff")),
+            "Copy the current session panel snapshot to the clipboard.",
+            size=24,
+        )
+        self.session_stats_snapshot_button.clicked.connect(self._copy_session_stats_snapshot)
+        self.session_stats_record_button = self._make_frameless_icon_button(
+            transport_icon(self._theme_mode, "record"),
+            "Start session log recording.",
+            size=24,
+        )
+        self.session_stats_record_button.setCheckable(True)
+        self.session_stats_record_button.setChecked(False)
+        self.session_stats_record_button.clicked.connect(self._toggle_session_stats_recording)
 
         self._apply_control_sizing()
         _startup_mark("control sizing applied")
@@ -1318,81 +1335,30 @@ class MainWindow(QMainWindow):
 
         footer_bar = QHBoxLayout()
         footer_bar.setSpacing(10)
-        footer_live_label = QLabel("Live")
-        footer_live_label.setToolTip(
-            "Live acquisition status and throughput information for the active source."
-        )
-        footer_bar.addWidget(footer_live_label)
-        footer_bar.addWidget(self.live_estimate, 1)
-        footer_stats_label = QLabel("Stats")
-        footer_stats_label.setToolTip(
-            "Latest processing and telemetry summary for the currently acquired spectrum."
-        )
-        footer_bar.addWidget(footer_stats_label)
-        footer_bar.addWidget(self.telemetry_label, 2)
+        footer_bar.addStretch(1)
         self._window_size_grip = QSizeGrip(self)
         self._window_size_grip.setToolTip("Drag to resize the window.")
         footer_bar.addWidget(self._window_size_grip, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
 
         source_section = CollapsibleSection("Light source", source_block, expanded=True)
         processing_section = CollapsibleSection("Processing", processing_group, expanded=False)
-        session_stats_header = QHBoxLayout()
-        session_stats_header.setContentsMargins(0, 0, 0, 0)
-        session_stats_header.setSpacing(6)
-        session_stats_title = QLabel("Statistics")
-        session_stats_title.setStyleSheet("font-size: 13px; font-weight: 800; letter-spacing: 0.8px; color: #5b6775;")
-        session_stats_header.addWidget(session_stats_title)
-        session_stats_header.addStretch(1)
-        session_stats_header.addWidget(self.session_stats_copy_button)
-        session_stats_header_widget = QWidget()
-        session_stats_header_widget.setLayout(session_stats_header)
-
-        session_stats_block = QWidget()
-        session_stats_layout = QVBoxLayout()
-        session_stats_layout.setContentsMargins(0, 0, 0, 0)
-        session_stats_layout.setSpacing(4)
-        session_stats_layout.addWidget(session_stats_header_widget)
-        session_stats_layout.addWidget(self.session_statistics_text)
-        session_stats_block.setLayout(session_stats_layout)
-
-        session_settings_header = QLabel("Settings")
-        session_settings_header.setStyleSheet("font-size: 13px; font-weight: 800; letter-spacing: 0.8px; color: #5b6775;")
-        session_settings_header.setToolTip("Current acquisition and processing parameters.")
-
-        session_settings_block = QWidget()
-        session_settings_layout = QVBoxLayout()
-        session_settings_layout.setContentsMargins(0, 0, 0, 0)
-        session_settings_layout.setSpacing(4)
-        session_settings_layout.addWidget(session_settings_header)
-        session_rate_row = QHBoxLayout()
-        session_rate_row.setContentsMargins(0, 0, 0, 0)
-        session_rate_row.setSpacing(6)
+        session_top_row = QHBoxLayout()
+        session_top_row.setContentsMargins(0, 0, 0, 0)
+        session_top_row.setSpacing(6)
         session_rate_label = QLabel("Refresh rate")
         session_rate_label.setToolTip("GUI display refresh rate for live spectra and sensorgram updates.")
-        session_rate_row.addWidget(session_rate_label)
-        session_rate_row.addWidget(self.live_rate_spin)
-        session_rate_row.addStretch(1)
-        session_settings_layout.addLayout(session_rate_row)
-        session_settings_layout.addWidget(self.session_settings_text)
-        session_settings_block.setLayout(session_settings_layout)
-
-        session_splitter = CompactSplitter(Qt.Orientation.Vertical)
-        session_splitter.setObjectName("sessionStatsSplitter")
-        session_splitter.setChildrenCollapsible(False)
-        session_splitter.setOpaqueResize(True)
-        session_splitter.setHandleWidth(10)
-        session_splitter.addWidget(session_stats_block)
-        session_splitter.addWidget(session_settings_block)
-        session_splitter.setStretchFactor(0, 1)
-        session_splitter.setStretchFactor(1, 1)
-        session_splitter.setSizes([220, 220])
-        self.session_stats_splitter = session_splitter
+        session_top_row.addWidget(session_rate_label)
+        session_top_row.addWidget(self.live_rate_spin)
+        session_top_row.addStretch(1)
+        session_top_row.addWidget(self.session_stats_snapshot_button)
+        session_top_row.addWidget(self.session_stats_record_button)
 
         session_block = QWidget()
         session_layout = QVBoxLayout()
         session_layout.setContentsMargins(0, 0, 0, 0)
         session_layout.setSpacing(4)
-        session_layout.addWidget(session_splitter)
+        session_layout.addLayout(session_top_row)
+        session_layout.addWidget(self.session_summary, 1)
         session_block.setLayout(session_layout)
         session_section = CollapsibleSection("Session", session_block, expanded=False)
 
@@ -1509,6 +1475,8 @@ class MainWindow(QMainWindow):
         container.setLayout(root_layout)
         self._main_content_widget = container
         self.setCentralWidget(container)
+        self._sensorgram_header_controls_ready = True
+        self._update_sensorgram_header_control_visibility()
 
     def _build_recording_context_row(self) -> QWidget:
         panel = QWidget()
@@ -2156,6 +2124,7 @@ class MainWindow(QMainWindow):
         self._style_plot_widgets()
         self._apply_sensorgram_display_style()
         self._update_measurement_toggle_button()
+        self._render_session_stats_recording_blink_indicator()
         self._log_info(f"Theme switched to {self._theme_mode}.")
         if self._experiment_control_window is not None:
             self._experiment_control_window.set_theme(self._theme_mode)
@@ -2420,6 +2389,7 @@ class MainWindow(QMainWindow):
                 theme_mode=self._theme_mode,
                 initial_mswitch_devices=[probe for probe in self._initial_mswitch_devices if probe is not None],
                 auto_connect_devices=True,
+                parent=getattr(self, "_top_content_stack", self),
             )
             self._experiment_control_window.availability_changed.connect(self._handle_flow_availability_changed)
             self._experiment_control_window.valve_availability_changed.connect(self._handle_valve_availability_changed)
@@ -3005,6 +2975,87 @@ class MainWindow(QMainWindow):
 
     def _copy_session_stats_log(self) -> None:
         copy_session_stats_log_for(self)
+
+    def _copy_session_stats_snapshot(self) -> None:
+        copy_session_stats_snapshot_for(self)
+
+    def _toggle_session_stats_recording(self) -> None:
+        self._set_session_stats_recording_active(not self._session_stats_recording_active)
+
+    def _update_session_stats_recording_timer_interval(self) -> None:
+        timer = getattr(self, "_session_stats_recording_timer", None)
+        if timer is None:
+            return
+        rate_hz = float(self.live_rate_spin.value()) if hasattr(self, "live_rate_spin") else 1.0
+        timer.setInterval(max(int(round(1000.0 / max(rate_hz, 1e-9))), 1))
+
+    def _set_session_stats_recording_active(self, active: bool) -> None:
+        active = bool(active)
+        if active == bool(self._session_stats_recording_active):
+            self._render_session_stats_recording_blink_indicator()
+            return
+        if active:
+            self._session_stats_log.clear()
+            self._session_stats_log_last_text = ""
+            self._session_stats_log_last_capture_ts = 0.0
+            self._session_stats_recording_started_at = datetime.now(timezone.utc)
+            self._session_stats_recording_duration_s = None
+            self._session_stats_recording_active = True
+            self._session_stats_recording_blink_visible = True
+            self._update_session_stats_recording_timer_interval()
+            self._session_stats_recording_blink_timer.start()
+            self._session_stats_recording_timer.start()
+            self._capture_session_stats_recording_snapshot()
+            self._log_info("Session log recording started.")
+        else:
+            self._session_stats_recording_active = False
+            self._session_stats_recording_blink_timer.stop()
+            self._session_stats_recording_timer.stop()
+            started_at = self._session_stats_recording_started_at
+            if started_at is not None:
+                self._session_stats_recording_duration_s = max(
+                    (datetime.now(timezone.utc) - started_at).total_seconds(),
+                    0.0,
+                )
+            destination = save_session_stats_log_for(self)
+            self._session_stats_recording_started_at = None
+            self._session_stats_recording_blink_visible = True
+            self._render_session_stats_recording_blink_indicator()
+            if destination is not None:
+                self.status_label.setText(f"Session log saved to {destination.name}")
+                self._log_success(f"Session log saved: {destination.name}")
+            else:
+                self._log_warning("Session log recording stopped without data.")
+            self._refresh_session_summary(force=True)
+            self._refresh_session_statistics(force=True)
+
+    def _capture_session_stats_recording_snapshot(self) -> None:
+        if not self._session_stats_recording_active:
+            return
+        self._refresh_session_statistics(force=True)
+
+    def _advance_session_stats_recording_blink_indicator(self) -> None:
+        timer = getattr(self, "_session_stats_recording_blink_timer", None)
+        if timer is None or not timer.isActive():
+            return
+        self._session_stats_recording_blink_visible = not bool(getattr(self, "_session_stats_recording_blink_visible", True))
+        self._render_session_stats_recording_blink_indicator()
+
+    def _render_session_stats_recording_blink_indicator(self) -> None:
+        button = getattr(self, "session_stats_record_button", None)
+        if button is None:
+            return
+        if bool(getattr(self, "_session_stats_recording_active", False)):
+            if bool(getattr(self, "_session_stats_recording_blink_visible", True)):
+                button.setIcon(transport_icon(self._theme_mode, "record"))
+            else:
+                button.setIcon(QIcon())
+            button.setToolTip("Stop session log recording and save the text log to the project destination.")
+            button.setChecked(True)
+        else:
+            button.setIcon(transport_icon(self._theme_mode, "record"))
+            button.setToolTip("Start session log recording.")
+            button.setChecked(False)
 
     def _hardware_init_steps(self) -> list[HardwareInitStep]:
         return [
@@ -3941,6 +3992,8 @@ class MainWindow(QMainWindow):
         self._update_sensorgram_header_control_visibility()
 
     def _update_sensorgram_header_control_visibility(self) -> None:
+        if not getattr(self, "_sensorgram_header_controls_ready", False):
+            return
         view_mode = self._normalize_sensorgram_view_mode(self._sensorgram_view_mode)
         if hasattr(self, "sensorgram_downsampling_button"):
             self.sensorgram_downsampling_button.setVisible(view_mode == "absolute")
@@ -4166,6 +4219,8 @@ class MainWindow(QMainWindow):
 
     def _handle_live_setting_change(self) -> None:
         handle_live_setting_change_for(self)
+        if self._session_stats_recording_active:
+            self._update_session_stats_recording_timer_interval()
 
     def _handle_simulation_output_rate_change(self) -> None:
         handle_simulation_output_rate_change_for(self)

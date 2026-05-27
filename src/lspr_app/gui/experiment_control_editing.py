@@ -113,7 +113,7 @@ class ExperimentControlEditingController(QObject):
         self._table.selectionModel().selectionChanged.connect(lambda _sel, _desel: self._sync_overlay())
         self._table.installEventFilter(window)
         self._table.viewport().installEventFilter(window)
-        self._sync_overlay()
+        QTimer.singleShot(0, self._sync_overlay)
 
     @property
     def edit_mode(self) -> bool:
@@ -594,7 +594,15 @@ class ExperimentControlEditingController(QObject):
         if self._overlay is None:
             return
         viewport = self._table.viewport()
-        if viewport is None or not self._table.isVisible() or not viewport.isVisible():
+        window_handle = self._window.windowHandle() if hasattr(self._window, "windowHandle") else None
+        if (
+            viewport is None
+            or not self._window.isVisible()
+            or window_handle is None
+            or not window_handle.isExposed()
+            or not self._table.isVisible()
+            or not viewport.isVisible()
+        ):
             self._overlay.hide()
             return
         top_left = self._window.mapFromGlobal(viewport.mapToGlobal(viewport.rect().topLeft()))

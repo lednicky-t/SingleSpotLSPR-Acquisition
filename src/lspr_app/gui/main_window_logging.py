@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
-from html import unescape
+from datetime import datetime, timezone
+from pathlib import Path
+from html import escape, unescape
 from time import perf_counter
 
 from PyQt6.QtGui import QTextCursor
@@ -42,10 +43,53 @@ def copy_log_terminal(window) -> None:
 def copy_session_stats_log_for(window) -> None:
     lines = getattr(window, "_session_stats_log", None)
     if not lines:
-        current = build_session_statistics_text_for(window)
+        current = build_session_panel_plain_text_for(window)
         QApplication.clipboard().setText(current)
         return
     QApplication.clipboard().setText("\n\n".join(str(line) for line in lines))
+
+
+def copy_session_stats_snapshot_for(window) -> None:
+    QApplication.clipboard().setText(build_session_panel_plain_text_for(window))
+
+
+def save_session_stats_log_for(window) -> Path | None:
+    lines = getattr(window, "_session_stats_log", None)
+    text = "\n\n".join(str(line) for line in lines) if lines else build_session_panel_plain_text_for(window)
+    if not text.strip():
+        return None
+
+    project_destination = ""
+    if hasattr(window, "recording_project_destination"):
+        project_destination = str(window.recording_project_destination() or "").strip()
+    base_dir = Path(project_destination).expanduser() if project_destination else Path.cwd() / "data"
+    started_at = getattr(window, "_session_stats_recording_started_at", None)
+    if started_at is None:
+        started_at = getattr(window, "_measurement_started_at", None)
+    if started_at is None:
+        started_at = datetime.now(timezone.utc)
+    started_local = started_at.astimezone()
+    duration_s = getattr(window, "_session_stats_recording_duration_s", None)
+    if duration_s is None:
+        current_started_at = getattr(window, "_session_stats_recording_started_at", None)
+        if current_started_at is not None:
+            duration_s = max((datetime.now(timezone.utc) - current_started_at).total_seconds(), 0.0)
+        else:
+            duration_s = 0.0
+    timestamp = started_local.strftime("%Y%m%d_%H%M%S")
+    duration_suffix = f"{int(round(float(duration_s)))}s"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    destination = base_dir / f"session_log_{timestamp}_{duration_suffix}.txt"
+    if destination.exists():
+        stem = destination.stem
+        suffix = destination.suffix
+        for index in range(1, 100):
+            candidate = destination.with_name(f"{stem}_{index:02d}{suffix}")
+            if not candidate.exists():
+                destination = candidate
+                break
+    destination.write_text(text, encoding="utf-8")
+    return destination
 
 
 def flush_log_buffer(window) -> None:
@@ -207,7 +251,7 @@ def log_throttled(window, key: str, message: str, *, level: int = logging.DEBUG,
 
 
 def refresh_session_summary_for(window, force: bool = False) -> None:
-    target = getattr(window, "session_settings_text", None) or getattr(window, "session_summary", None)
+    target = getattr(window, "session_summary", None) or getattr(window, "session_settings_text", None)
     if target is None:
         return
     now = perf_counter()
@@ -217,9 +261,9 @@ def refresh_session_summary_for(window, force: bool = False) -> None:
     old_value = scrollbar.value()
     old_max = max(scrollbar.maximum(), 1)
     stay_at_bottom = old_value >= max(old_max - 2, 0)
-    text = window._build_summary_text()
+    text = build_session_panel_html_for(window)
     if force or text != window._last_summary_text:
-        target.setPlainText(text)
+        target.setHtml(text)
         window._last_summary_text = text
         scrollbar = target.verticalScrollBar()
         if stay_at_bottom:
@@ -231,7 +275,7 @@ def refresh_session_summary_for(window, force: bool = False) -> None:
 
 
 def refresh_session_statistics_for(window, force: bool = False) -> None:
-    target = getattr(window, "session_statistics_text", None)
+    target = getattr(window, "session_summary", None) or getattr(window, "session_statistics_text", None)
     if target is None:
         return
     now = perf_counter()
@@ -241,9 +285,9 @@ def refresh_session_statistics_for(window, force: bool = False) -> None:
     old_value = scrollbar.value()
     old_max = max(scrollbar.maximum(), 1)
     stay_at_bottom = old_value >= max(old_max - 2, 0)
-    text = build_session_statistics_text_for(window)
+    text = build_session_panel_html_for(window)
     if force or text != window._last_session_stats_text:
-        target.setPlainText(text)
+        target.setHtml(text)
         window._last_session_stats_text = text
         scrollbar = target.verticalScrollBar()
         if stay_at_bottom:
@@ -255,14 +299,36 @@ def refresh_session_statistics_for(window, force: bool = False) -> None:
     window._last_session_stats_refresh_ts = now
 
 
+def build_session_panel_plain_text_for(window) -> str:
+    summary_text = getattr(window, "_build_summary_text", lambda: "")().strip()
+    stats_text = build_session_statistics_text_for(window).strip()
+    if summary_text and stats_text:
+        return f"{summary_text}\n{stats_text}"
+    return summary_text or stats_text
+
+
+def build_session_panel_html_for(window) -> str:
+    summary_text = getattr(window, "_build_summary_text", lambda: "")().strip()
+    stats_text = build_session_statistics_text_for(window).strip()
+    sections: list[str] = []
+    if summary_text:
+        sections.append(
+            "<div style='margin:0 0 6px 0;'>"
+            "<div style='font-weight:700; margin:0 0 2px 0;'>Session settings</div>"
+            f"<div style='white-space:pre-wrap; margin:0;'>{escape(summary_text).replace(chr(10), '<br>')}</div>"
+            "</div>"
+        )
+    if stats_text:
+        sections.append(
+            "<div style='margin:0;'>"
+            "<div style='font-weight:700; margin:0 0 2px 0;'>Session statistics</div>"
+            f"<div style='white-space:pre-wrap; margin:0;'>{escape(stats_text).replace(chr(10), '<br>')}</div>"
+            "</div>"
+        )
+    return "".join(sections) if sections else "<div></div>"
+
+
 def build_session_statistics_text_for(window) -> str:
-    live_estimate = _plain_text(window.live_estimate.text() if hasattr(window, "live_estimate") else "")
-    telemetry = _plain_text(window.telemetry_label.text() if hasattr(window, "telemetry_label") else "")
-    spectrum_stats = _plain_text(window.spectrum_stats_label.text() if hasattr(window, "spectrum_stats_label") else "")
-    spectrum_cursor = _plain_text(window.spectrum_cursor_label.text() if hasattr(window, "spectrum_cursor_label") else "")
-    trace_stats = _plain_text(window.trace_stats_label.text() if hasattr(window, "trace_stats_label") else "")
-    trace_noise = _plain_text(window.trace_noise_summary_label.text() if hasattr(window, "trace_noise_summary_label") else "")
-    trace_cursor = _plain_text(window.trace_cursor_label.text() if hasattr(window, "trace_cursor_label") else "")
     skip_rate = window._live_skip_rate_hz() if hasattr(window, "_live_skip_rate_hz") else 0.0
     display_rate_text = f"{float(window.live_rate_spin.value()):.2f} Hz" if hasattr(window, "live_rate_spin") else "-"
     processing_text = "-" if getattr(window, "_last_processing_ms", None) is None else f"{window._last_processing_ms:.1f} ms"
@@ -271,34 +337,51 @@ def build_session_statistics_text_for(window) -> str:
     wait_text = "-"
     if getattr(window, "_last_processing_queue_wait_ms", None) is not None:
         wait_text = f"{window._last_processing_queue_wait_ms:.1f} ms"
+    acquisition_latency_text = "-"
+    if getattr(window, "_last_elapsed_ms", None) is not None:
+        acquisition_latency_text = f"{window._last_elapsed_ms:.1f} ms"
+    acquisition_overhead_text = "-"
+    if getattr(window, "_last_overhead_ms", None) is not None:
+        acquisition_overhead_text = f"{window._last_overhead_ms:.1f} ms"
+    frame_spacing_text = "-"
+    if getattr(window, "_last_spacing_ms", None) is not None:
+        frame_spacing_text = f"{window._last_spacing_ms:.1f} ms"
+    source_rate_text = "-"
+    if getattr(window, "_effective_raw_rate_hz", None) is not None:
+        source_rate_text = f"{window._effective_raw_rate_hz:.2f} Hz"
+    measurement_state_text = "recording" if getattr(window, "_measurement_active", False) else "idle"
+    current_measurement_runtime_text = "-"
+    total_measurement_runtime_text = "-"
+    started_at = getattr(window, "_measurement_started_at", None)
+    if started_at is not None:
+        elapsed_s = max((datetime.now(timezone.utc) - started_at).total_seconds(), 0.0)
+        current_measurement_runtime_text = f"{elapsed_s:.1f} s"
+        total_measurement_runtime_text = f"{elapsed_s:.1f} s"
     return "\n".join(
         [
-            "GUI",
-            f"  Display refresh rate: {display_rate_text}",
-            f"  Live estimate: {live_estimate or '-'} | skip {skip_rate:.1f} Hz",
+            "App",
+            f"  Refresh rate: {display_rate_text}",
+            f"  Frame skip rate: {skip_rate:.1f} Hz",
+            f"  State: {measurement_state_text}",
+            f"  Runtime: {current_measurement_runtime_text}",
+            f"  Total runtime: {total_measurement_runtime_text}",
             "",
             "Processing",
-            f"  Processing time: {processing_text}",
+            f"  Time per spectrum: {processing_text}",
             f"  Queue wait: {wait_text}",
             f"  Headroom: {headroom_text}",
             "",
-            "Acquisition",
-            f"  Telemetry: {telemetry or '-'}",
-            "",
-            "Spectrum",
-            f"  Stats: {spectrum_stats or '-'}",
-            f"  Cursor: {spectrum_cursor or '-'}",
-            "",
-            "Trace",
-            f"  Stats: {trace_stats or '-'}",
-            f"  Noise: {trace_noise or '-'}",
-            f"  Cursor: {trace_cursor or '-'}",
+            "Device acquisition",
+            f"  Acquisition latency: {acquisition_latency_text}",
+            f"  Acquisition overhead: {acquisition_overhead_text}",
+            f"  Frame spacing: {frame_spacing_text}",
+            f"  Effective source rate: {source_rate_text}",
         ]
     )
 
 
 def append_session_stats_log_snapshot_for(window, text: str | None = None) -> None:
-    if not getattr(window, "_measurement_active", False):
+    if not getattr(window, "_measurement_active", False) and not getattr(window, "_session_stats_recording_active", False):
         return
     log = getattr(window, "_session_stats_log", None)
     if log is None:
@@ -306,7 +389,7 @@ def append_session_stats_log_snapshot_for(window, text: str | None = None) -> No
     now = perf_counter()
     last_at = float(getattr(window, "_session_stats_log_last_capture_ts", 0.0) or 0.0)
     if text is None:
-        text = build_session_statistics_text_for(window)
+        text = build_session_panel_plain_text_for(window)
     if text == getattr(window, "_session_stats_log_last_text", None) and (now - last_at) < 1.0:
         return
     timestamp = datetime.now().strftime("%H:%M:%S")
