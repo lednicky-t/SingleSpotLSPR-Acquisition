@@ -389,6 +389,8 @@ def clear_trace_history_for(window) -> None:
         window._sensorgram_heatmap_history.clear()
     if hasattr(window, "_sensorgram_heatmap_wavelengths"):
         window._sensorgram_heatmap_wavelengths = None
+    if hasattr(window, "_sensorgram_heatmap_axis_key"):
+        window._sensorgram_heatmap_axis_key = None
     signal = window._session.state.absorbance or window._session.state.sample
     if signal is not None:
         processed, _ = window._get_analysis_processed_spectrum(signal)

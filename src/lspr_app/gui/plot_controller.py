@@ -420,13 +420,14 @@ def refresh_trace_plot(window, trace_label: str) -> None:
         return
     clock_mode = not bool(window._measurement_active)
     content_mode = getattr(window, "_sensorgram_content_mode", "metric")
+    active_series = window._active_trace_series()
     if content_mode == "heatmap":
         window._visible_trace_mode = "clock" if clock_mode else "elapsed"
         window.trace_time_axis.set_mode("clock" if clock_mode else "elapsed")
         window.trace_plot.setLabel("left", "Wavelength (nm)")
         window.trace_plot.setLabel("bottom", "Time (local)" if clock_mode else "Time (s)")
-        if window._peak_history:
-            render_trace_series(window, window._peak_history, clock_mode=clock_mode)
+        if active_series:
+            render_trace_series(window, active_series, clock_mode=clock_mode)
         else:
             for curve in window.trace_curves.values():
                 curve.setData([], [])
@@ -434,12 +435,12 @@ def refresh_trace_plot(window, trace_label: str) -> None:
         render_sensorgram_heatmap(window, window._sensorgram_heatmap_history, clock_mode=clock_mode)
         request_trace_autoscale(window)
         return
-    if window._peak_history:
+    if active_series:
         window._visible_trace_mode = "clock" if clock_mode else "elapsed"
         window.trace_time_axis.set_mode("clock" if clock_mode else "elapsed")
         window.trace_plot.setLabel("left", trace_label)
         window.trace_plot.setLabel("bottom", "Time (local)" if clock_mode else "Time (s)")
-        render_trace_series(window, window._peak_history, clock_mode=clock_mode)
+        render_trace_series(window, active_series, clock_mode=clock_mode)
         window.trace_heatmap_image.setVisible(False)
         if hasattr(window, "trace_legend"):
             window.trace_legend.setVisible(True)
@@ -476,13 +477,23 @@ def refresh_trace_plot(window, trace_label: str) -> None:
 
 def render_trace_series(
     window,
-    history: dict[str, list[tuple[object, float]]],
+    history: dict[str, tuple[np.ndarray, np.ndarray] | list[tuple[object, float]]],
     clock_mode: bool,
 ) -> None:
     def _trace_x_value(raw_x: object) -> float:
         if hasattr(raw_x, "timestamp"):
             return float(raw_x.timestamp())
         return float(raw_x)
+
+    def _series_to_arrays(series: tuple[np.ndarray, np.ndarray] | list[tuple[object, float]]) -> tuple[np.ndarray, np.ndarray]:
+        if isinstance(series, tuple) and len(series) == 2:
+            return np.asarray(series[0], dtype=np.float64), np.asarray(series[1], dtype=np.float64)
+        if not series:
+            return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+        return (
+            np.asarray([_trace_x_value(item[0]) for item in series], dtype=np.float64),
+            np.asarray([item[1] for item in series], dtype=np.float64),
+        )
 
     view_mode = getattr(window, "_sensorgram_view_mode", "absolute")
     trace_view_locked = bool(getattr(window, "_trace_view_locked", False))
@@ -493,10 +504,12 @@ def render_trace_series(
     elif view_mode == "rolling" and len(history) > 0:
         latest_x = None
         for series in history.values():
-            for item in series:
-                x_value = _trace_x_value(item[0])
-                if latest_x is None or x_value > latest_x:
-                    latest_x = x_value
+            x_values, _ = _series_to_arrays(series)
+            if len(x_values) == 0:
+                continue
+            series_latest = float(np.nanmax(x_values))
+            if latest_x is None or series_latest > latest_x:
+                latest_x = series_latest
         if latest_x is not None:
             window_span = max(float(getattr(window, "_trace_display_window_s", 60.0)), 1e-9)
             view_x_max = latest_x
@@ -504,11 +517,13 @@ def render_trace_series(
     active_series = {}
     for metric_name, curve in window.trace_curves.items():
         series = history.get(metric_name, [])
-        if metric_name not in window._selected_trace_metrics() or not series:
+        if metric_name not in window._selected_trace_metrics() or series is None:
             curve.setData([], [])
             continue
-        x = np.asarray([_trace_x_value(item[0]) for item in series], dtype=np.float64)
-        y = np.asarray([item[1] for item in series], dtype=np.float64)
+        x, y = _series_to_arrays(series)
+        if len(x) == 0 or len(y) == 0:
+            curve.setData([], [])
+            continue
         x, y = downsample_trace_series_for_view(
             x,
             y,

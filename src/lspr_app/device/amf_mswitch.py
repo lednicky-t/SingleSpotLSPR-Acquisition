@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from contextlib import redirect_stderr, redirect_stdout
+import os
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from io import StringIO
 
 from lspr_app.device.serial_controllers import ControllerError, ControllerProbe
@@ -15,6 +16,25 @@ def amf_tools_available() -> bool:
     return amfTools is not None
 
 
+@contextmanager
+def _suppress_console_output():
+    devnull_fd = os.open(os.devnull, os.O_RDWR)
+    saved_stdout_fd = os.dup(1)
+    saved_stderr_fd = os.dup(2)
+    try:
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+        yield
+    finally:
+        try:
+            os.dup2(saved_stdout_fd, 1)
+            os.dup2(saved_stderr_fd, 2)
+        finally:
+            os.close(saved_stdout_fd)
+            os.close(saved_stderr_fd)
+            os.close(devnull_fd)
+
+
 def detect_amf_mswitch_devices() -> list[ControllerProbe]:
     if amfTools is None:
         return []
@@ -22,7 +42,7 @@ def detect_amf_mswitch_devices() -> list[ControllerProbe]:
     seen_ports: set[str] = set()
     try:
         sink = StringIO()
-        with redirect_stdout(sink), redirect_stderr(sink):
+        with _suppress_console_output(), redirect_stdout(sink), redirect_stderr(sink):
             devices = amfTools.util.getProductList()
     except Exception:
         return []

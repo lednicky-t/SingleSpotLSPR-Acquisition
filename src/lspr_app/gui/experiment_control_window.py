@@ -7,6 +7,7 @@ import re
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from time import monotonic, perf_counter
 
 try:
@@ -20,9 +21,7 @@ except ImportError:  # pragma: no cover - optional dependency guard
     yaml = None
 
 from PyQt6.QtCore import QByteArray, QObject, QRectF, QRunnable, QSize, QThreadPool, QTimer, Qt, QEvent, QModelIndex, QItemSelectionModel, pyqtSignal
-from pathlib import Path
-
-from PyQt6.QtGui import QColor, QFont, QFontInfo, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap
+from PyQt6.QtGui import QColor, QFont, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -1116,11 +1115,8 @@ class PumpPlanTimelineWidget(QWidget):
         return f"{label}: {self._format_duration(max(float(value_s), 0.0))} / {clock_text}"
 
     def _scaled_font(self, base_font: QFont, *, delta: float = 0.0, minimum: float = 1.0, bold: bool | None = None) -> QFont:
-        font_info = QFontInfo(base_font)
         font = QFont(base_font)
         base_size = float(font.pointSizeF())
-        if base_size <= 0:
-            base_size = float(font.pointSize()) if font.pointSize() > 0 else float(font_info.pointSize())
         if base_size <= 0:
             base_size = 10.0
         new_size = max(base_size + delta, minimum, 1.0)

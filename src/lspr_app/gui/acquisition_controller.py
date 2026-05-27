@@ -21,7 +21,6 @@ from lspr_app.gui.experiment_control_runtime import (
     experiment_runtime_snapshot,
     experiment_runtime_state_name,
 )
-from lspr_app.gui.history_utils import trim_history_tail_in_place
 from lspr_app.gui.main_window_headers import update_source_link_buttons
 from lspr_app.gui.trace_history_buffer import TraceHistoryBuffer
 from lspr_app.gui.workers import (
@@ -822,6 +821,8 @@ def start_measurement_run(window) -> None:
         window._sensorgram_heatmap_history.clear()
     if hasattr(window, "_sensorgram_heatmap_wavelengths"):
         window._sensorgram_heatmap_wavelengths = None
+    if hasattr(window, "_sensorgram_heatmap_axis_key"):
+        window._sensorgram_heatmap_axis_key = None
     window._trace_display_cursor_s = 0.0
     window._live_trace_started_at = None
     window._peak_reference_processed = None
@@ -866,28 +867,29 @@ def stop_measurement_run(window) -> None:
     if hasattr(window, "_set_recording_blink_indicator"):
         window._set_recording_blink_indicator(False)
     window._sync_simulation_backend_from_controls()
-    if started_at is not None and window._peak_history:
-        converted_history: dict[str, list[tuple[float, float]]] = {}
-        for metric_name, series in window._peak_history.items():
-            converted_series: list[tuple[float, float]] = []
-            for elapsed_s, value in series:
-                local_timestamp = (started_at + timedelta(seconds=float(elapsed_s))).astimezone().timestamp()
-                converted_series.append((float(local_timestamp), float(value)))
-            if converted_series:
-                converted_history[metric_name] = converted_series
-        window._peak_history = converted_history
+    if started_at is not None:
         peak_history_buffers = getattr(window, "_peak_history_buffers", None)
         if peak_history_buffers:
+            converted_history: dict[str, list[tuple[float, float]]] = {}
             converted_buffers: dict[str, TraceHistoryBuffer] = {}
             max_points = int(getattr(window, "_trace_history_max_points", 6000))
             for metric_name, buffer in peak_history_buffers.items():
                 times, values = buffer.to_arrays()
+                if len(times) == 0:
+                    continue
                 converted_buffer = TraceHistoryBuffer(max_points)
+                converted_series: list[tuple[float, float]] = []
                 for elapsed_s, value in zip(times.tolist(), values.tolist(), strict=False):
                     local_timestamp = (started_at + timedelta(seconds=float(elapsed_s))).astimezone().timestamp()
-                    converted_buffer.append(float(local_timestamp), float(value))
+                    local_timestamp = float(local_timestamp)
+                    value = float(value)
+                    converted_buffer.append(local_timestamp, value)
+                    converted_series.append((local_timestamp, value))
                 if len(converted_buffer) > 0:
                     converted_buffers[metric_name] = converted_buffer
+                if converted_series:
+                    converted_history[metric_name] = converted_series
+            window._peak_history = converted_history
             window._peak_history_buffers = converted_buffers
     if started_at is not None and getattr(window, "_sensorgram_heatmap_history", None):
         converted_heatmap_history: list[tuple[float, np.ndarray]] = []
@@ -938,10 +940,6 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
         value = metrics.get(metric_name)
         if not isinstance(value, (int, float)) or not np.isfinite(float(value)):
             continue
-        history = window._peak_history.setdefault(metric_name, [])
-        history.append((elapsed_s, float(value)))
-        trim_history_tail_in_place(history, int(getattr(window, "_trace_history_max_points", 6000)))
-        window._peak_history[metric_name] = history
         peak_history_buffers = getattr(window, "_peak_history_buffers", None)
         if peak_history_buffers is None:
             peak_history_buffers = {}
@@ -950,11 +948,8 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
         max_points = int(getattr(window, "_trace_history_max_points", 6000))
         if buffer is None or buffer.capacity != max_points:
             buffer = TraceHistoryBuffer(max_points)
-            for history_elapsed_s, history_value in history:
-                buffer.append(history_elapsed_s, history_value)
-            peak_history_buffers[metric_name] = buffer
-        else:
-            buffer.append(elapsed_s, float(value))
+        peak_history_buffers[metric_name] = buffer
+        buffer.append(elapsed_s, float(value))
         updated = True
 
     window._trace_display_cursor_s = elapsed_s + display_step_s

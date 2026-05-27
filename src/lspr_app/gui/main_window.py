@@ -501,6 +501,7 @@ class MainWindow(QMainWindow):
         self._sensorgram_heatmap_history: list[tuple[float, np.ndarray]] = []
         self._sensorgram_heatmap_history_max_rows = 2000
         self._sensorgram_heatmap_wavelengths: np.ndarray | None = None
+        self._sensorgram_heatmap_axis_key: tuple[int, float, float] | None = None
         self._peak_history_buffers: dict[str, TraceHistoryBuffer] = {}
         self._last_summary_text: str = ""
         self._last_summary_refresh_ts: float = 0.0
@@ -2684,6 +2685,7 @@ class MainWindow(QMainWindow):
         self._peak_history_buffers.clear()
         self._sensorgram_heatmap_history.clear()
         self._sensorgram_heatmap_wavelengths = None
+        self._sensorgram_heatmap_axis_key = None
         self._peak_reference_processed = None
         self._live_trace_started_at = None
         self._reset_live_accumulator()
@@ -4178,12 +4180,14 @@ class MainWindow(QMainWindow):
             time_value = float(spectrum.acquired_at.timestamp())
         wavelengths = np.asarray(spectrum.wavelengths_nm, dtype=np.float64)
         values = np.asarray(spectrum.values, dtype=np.float64)
-        if (
-            self._sensorgram_heatmap_wavelengths is None
-            or self._sensorgram_heatmap_wavelengths.shape != wavelengths.shape
-            or not np.allclose(self._sensorgram_heatmap_wavelengths, wavelengths)
-        ):
+        axis_key = (
+            len(wavelengths),
+            float(wavelengths[0]),
+            float(wavelengths[-1]),
+        )
+        if self._sensorgram_heatmap_axis_key != axis_key:
             self._sensorgram_heatmap_wavelengths = wavelengths.copy()
+            self._sensorgram_heatmap_axis_key = axis_key
             self._sensorgram_heatmap_history.clear()
         self._sensorgram_heatmap_history.append((float(time_value), values.copy()))
         trim_history_tail_in_place(
