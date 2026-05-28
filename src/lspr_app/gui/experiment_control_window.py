@@ -4136,7 +4136,7 @@ class ExperimentControlWindow(QWidget):
             if self._read_experiment_control_steps():
                 self.timeline_widget.set_steps(
                     self._read_experiment_control_steps(),
-                    self._selected_experiment_control_row(),
+                    self._experiment_control_timeline_row(),
                     self._timeline_progress_for_display(),
                     self._plan_runtime_for_display(),
                     self._step_runtime_for_display(),
@@ -4197,9 +4197,13 @@ class ExperimentControlWindow(QWidget):
             has_steps=bool(self._read_experiment_control_steps()),
         )
 
+    def _set_experiment_control_runtime_row_property(self, row: int | None) -> None:
+        self.plan_table.setProperty("experiment_control_runtime_row", row)
+        self.plan_table.viewport().setProperty("experiment_control_runtime_row", row)
+
     def _sync_experiment_control_timeline(self, steps: list[PumpPlanStep], plan_row: int | None, *, refresh_status: bool = False) -> None:
-        if plan_row is not None:
-            self._select_experiment_control_plan_row(plan_row)
+        runtime_row = plan_row if (self._plan_running or self._plan_holding or self._plan_paused) else None
+        self._set_experiment_control_runtime_row_property(runtime_row)
         self.timeline_widget.set_steps(
             steps,
             plan_row,
@@ -4207,6 +4211,9 @@ class ExperimentControlWindow(QWidget):
             self._plan_runtime_for_display(),
             self._step_runtime_for_display(),
         )
+        controller = getattr(self, "_experiment_control_edit_controller", None)
+        if controller is not None:
+            controller.sync_overlay()
         if refresh_status:
             self._refresh_status_line()
 
@@ -6545,7 +6552,7 @@ class ExperimentControlWindow(QWidget):
         self._experiment_control_steps_cache = deepcopy(recomputed_steps)
         self.timeline_widget.set_steps(
             recomputed_steps,
-            self._selected_experiment_control_row(),
+            self._experiment_control_timeline_row(),
             self._timeline_progress_for_display(),
             self._plan_runtime_for_display(),
         )
@@ -6646,11 +6653,28 @@ class ExperimentControlWindow(QWidget):
         self._fit_plan_table_columns_to_viewport()
         self._update_plan_table_height()
 
-    def _handle_experiment_control_model_changed(self, *_args) -> None:
+    def _handle_experiment_control_model_changed(self, *args) -> None:
         if self._updating_table:
             return
+        previous_steps = deepcopy(self._experiment_control_steps_cache)
         self._experiment_control_steps_cache = self._plan_model.steps()
         self._update_timeline_selection()
+        if (
+            self._plan_running
+            and len(args) >= 2
+            and isinstance(args[0], QModelIndex)
+            and isinstance(args[1], QModelIndex)
+            and self._plan_active_row is not None
+        ):
+            top_left = args[0]
+            bottom_right = args[1]
+            if top_left.row() <= self._plan_active_row <= bottom_right.row():
+                updated_step = self._plan_model.step_at(self._plan_active_row)
+                previous_step = previous_steps[self._plan_active_row] if self._plan_active_row < len(previous_steps) else None
+                change_summary = self._experiment_control_step_change_summary(previous_step, updated_step)
+                if updated_step is not None:
+                    if self._apply_experiment_control_step_to_pump(updated_step, start=True) and change_summary:
+                        self._emit_experimental_control_state("step_edited", updated_step, status=change_summary)
         self.save_ui_state()
 
     def _handle_experiment_control_table_change(self, *_args) -> None:
@@ -6724,6 +6748,12 @@ class ExperimentControlWindow(QWidget):
             return None
         return self._plan_row_from_table_row(row)
 
+    def _experiment_control_timeline_row(self) -> int | None:
+        if self._plan_running or self._plan_holding or self._plan_paused:
+            if self._plan_active_row is not None:
+                return self._plan_active_row
+        return self._selected_experiment_control_row()
+
     def _flow_table_row_from_point(self, point_f) -> int | None:
         if not self.plan_table.rowCount():
             return None
@@ -6751,12 +6781,17 @@ class ExperimentControlWindow(QWidget):
         self._set_status_message(f"Moved step to position {target_row + 1}.")
 
     def _update_timeline_selection(self) -> None:
+        runtime_row = self._plan_active_row if (self._plan_running or self._plan_holding or self._plan_paused) else None
+        self._set_experiment_control_runtime_row_property(runtime_row)
         self.timeline_widget.set_steps(
             self._read_experiment_control_steps(),
-            self._selected_experiment_control_row(),
+            self._experiment_control_timeline_row(),
             self._timeline_progress_for_display(),
             self._plan_runtime_for_display(),
         )
+        controller = getattr(self, "_experiment_control_edit_controller", None)
+        if controller is not None:
+            controller.sync_overlay()
         self._update_plan_table_height()
 
 
@@ -7016,32 +7051,97 @@ class ExperimentControlWindow(QWidget):
         self._emit_experimental_control_state("step_applied", step, status="; ".join(status_messages))
         return True
 
+    def _experiment_control_step_change_summary(self, previous: PumpPlanStep | None, updated: PumpPlanStep | None) -> str:
+        if previous is None or updated is None:
+            return ""
+        changes: list[str] = []
+        if abs(float(previous.duration_s) - float(updated.duration_s)) > 1e-9:
+            changes.append(f"duration {float(previous.duration_s):g} -> {float(updated.duration_s):g}")
+        if str(previous.color or "").strip() != str(updated.color or "").strip():
+            changes.append(f"color {previous.color or '-'} -> {updated.color or '-'}")
+        if str(previous.valve or "").strip() != str(updated.valve or "").strip():
+            changes.append(f"valve {previous.valve or '-'} -> {updated.valve or '-'}")
+        if int(previous.switch_position) != int(updated.switch_position):
+            changes.append(f"switch {int(previous.switch_position)} -> {int(updated.switch_position)}")
+        if str(previous.description or "").strip() != str(updated.description or "").strip():
+            prev_desc = str(previous.description or "").strip() or "-"
+            new_desc = str(updated.description or "").strip() or "-"
+            changes.append(f"comment {prev_desc} -> {new_desc}")
+        for index in range(min(len(previous.channels), len(updated.channels), ACTIVE_PUMP_CHANNELS)):
+            prev_channel = previous.channels[index]
+            new_channel = updated.channels[index]
+            if abs(float(prev_channel.flow_ul_min) - float(new_channel.flow_ul_min)) > 1e-9:
+                changes.append(f"CH{index + 1} flow {float(prev_channel.flow_ul_min):g} -> {float(new_channel.flow_ul_min):g}")
+            prev_dir = str(prev_channel.direction or "OFF").upper()
+            new_dir = str(new_channel.direction or "OFF").upper()
+            if prev_dir != new_dir:
+                changes.append(f"CH{index + 1} dir {prev_dir} -> {new_dir}")
+        if not changes:
+            return ""
+        return "Edited active step: " + "; ".join(changes)
+
+    def _set_experiment_control_runtime_row(
+        self,
+        row: int,
+        *,
+        event: str,
+        status: str = "",
+        apply_step: bool = False,
+        refresh_status: bool = True,
+    ) -> None:
+        steps = self._read_experiment_control_steps()
+        if row < 0 or row >= len(steps):
+            return
+        self._plan_active_row = row
+        if apply_step:
+            self._apply_experiment_control_step_to_pump(steps[row], start=True)
+        self._sync_experiment_control_timeline(steps, row, refresh_status=refresh_status)
+        self._emit_experimental_control_state(event, steps[row], status=status)
+
     def _jump_to_experiment_control_step(self, row: int) -> None:
         steps = self._read_experiment_control_steps()
         if row < 0 or row >= len(steps):
             return
-        self._select_experiment_control_plan_row(row)
-        self._plan_active_row = row
         if self._plan_running or self._plan_holding or self._plan_paused:
+            self._plan_active_row = row
             self._plan_elapsed_s = 0.0
             self._plan_resume_elapsed_s = 0.0
-            self._plan_started_monotonic = monotonic() if self._plan_running else None
-            self._step_started_monotonic = monotonic() if self._plan_running else None
-        else:
-            self._plan_elapsed_s = 0.0
-            self._plan_resume_elapsed_s = 0.0
-            self._plan_started_monotonic = None
-            self._step_started_monotonic = None
-            self._plan_runtime_s = 0.0
-            self._plan_resume_runtime_s = 0.0
-        self._update_timeline_selection()
+            if self._plan_running:
+                self._plan_started_monotonic = monotonic()
+                self._step_started_monotonic = monotonic()
+            else:
+                self._plan_started_monotonic = None
+                self._step_started_monotonic = None
+            self._set_experiment_control_runtime_row(
+                row,
+                event="step_jump",
+                apply_step=self._plan_running,
+            )
+            self._plan_runtime_s = self._step_runtime_for_display() if self._plan_running else self._plan_runtime_s
+            self._plan_resume_runtime_s = self._plan_runtime_s
+            return
+        self._select_experiment_control_plan_row(row)
         self._load_selected_step_into_editor()
-        if not (self._plan_running or self._plan_holding or self._plan_paused):
-            self._set_status_message(f"Selected experiment-plan step {row + 1}.")
+        self._update_timeline_selection()
+        self._set_status_message(f"Selected experiment-plan step {row + 1}.")
 
     def _apply_selected_experiment_control_step(self, row: int) -> None:
         steps = self._read_experiment_control_steps()
         if row < 0 or row >= len(steps):
+            return
+        if self._plan_running:
+            self._set_experiment_control_runtime_row(
+                row,
+                event="step_apply",
+                apply_step=True,
+            )
+            return
+        if self._plan_holding or self._plan_paused:
+            self._set_experiment_control_runtime_row(
+                row,
+                event="step_select",
+                apply_step=False,
+            )
             return
         self._jump_to_experiment_control_step(row)
         self._apply_experiment_control_step_to_pump(steps[row], start=True)
@@ -7095,13 +7195,18 @@ class ExperimentControlWindow(QWidget):
         if row is None:
             row = 0
         target = min(max(row + delta, 0), len(steps) - 1)
-        self._jump_to_experiment_control_step(target)
-        if running:
-            self._apply_experiment_control_step_to_pump(steps[target], start=True)
-            self._emit_experimental_control_state("step_jump", steps[target])
-            self._step_started_monotonic = monotonic()
-            self._plan_runtime_s = self._step_runtime_for_display()
-            self._plan_resume_runtime_s = self._plan_runtime_s
+        if self._plan_running or self._plan_holding or self._plan_paused:
+            self._set_experiment_control_runtime_row(
+                target,
+                event="step_jump",
+                apply_step=running,
+            )
+            if running:
+                self._step_started_monotonic = monotonic()
+                self._plan_runtime_s = self._step_runtime_for_display()
+                self._plan_resume_runtime_s = self._plan_runtime_s
+        else:
+            self._jump_to_experiment_control_step(target)
         if not (self._plan_running or self._plan_holding or self._plan_paused):
             self._set_status_message(f"Selected experiment-plan step {target + 1}.")
 
@@ -7543,7 +7648,7 @@ class ExperimentControlWindow(QWidget):
                     self._select_experiment_control_plan_row(0)
                 self.timeline_widget.set_steps(
                     steps,
-                    self._selected_experiment_control_row(),
+                    self._experiment_control_timeline_row(),
                     self._timeline_progress_for_display(),
                     self._plan_runtime_for_display(),
                 )

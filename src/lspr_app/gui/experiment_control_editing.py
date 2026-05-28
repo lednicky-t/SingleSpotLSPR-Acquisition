@@ -23,17 +23,110 @@ class _SelectionOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAutoFillBackground(False)
 
-    def _paint_rect(self, painter: QPainter, rect, *, dashed: bool = False, fill: bool = False) -> None:
-        pen = QPen(QColor("#d8b44a"))
-        pen.setWidth(1)
+    def _paint_rect(
+        self,
+        painter: QPainter,
+        rect,
+        *,
+        color: QColor,
+        dashed: bool = False,
+        fill: bool = False,
+        pen_width: float = 1.0,
+    ) -> None:
+        pen = QPen(color)
+        pen.setWidthF(max(float(pen_width), 1.0))
         if dashed:
             pen.setStyle(Qt.PenStyle.DashLine)
         painter.setPen(pen)
         if fill:
-            painter.setBrush(QColor(216, 180, 74, 32))
+            brush = QColor(color)
+            brush.setAlpha(32)
+            painter.setBrush(brush)
         else:
             painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(rect)
+
+    def _row_indexes(self, row: int) -> list[QModelIndex]:
+        if row < 0:
+            return []
+        model = self._table.model()
+        if model is None or row >= model.rowCount():
+            return []
+        return [model.index(row, column) for column in range(model.columnCount()) if model.index(row, column).isValid()]
+
+    def _draw_row(
+        self,
+        painter: QPainter,
+        row: int,
+        *,
+        color: QColor,
+        dashed: bool = False,
+        fill: bool = False,
+        pen_width: float = 1.0,
+    ) -> None:
+        indexes = self._row_indexes(row)
+        if not indexes:
+            return
+        rects = []
+        for index in indexes:
+            rect = self._table.visualRect(index)
+            if rect.isValid() and rect.width() > 0 and rect.height() > 0:
+                rects.append(rect)
+        if not rects:
+            return
+        merged = rects[0]
+        for rect in rects[1:]:
+            merged = merged.united(rect)
+        merged = merged.adjusted(1, 1, -1, -1)
+        if merged.width() <= 0 or merged.height() <= 0:
+            return
+        self._paint_rect(painter, merged, color=color, dashed=dashed, fill=fill, pen_width=pen_width)
+
+    def _draw_indexes(
+        self,
+        painter: QPainter,
+        indexes: list[QModelIndex],
+        *,
+        color: QColor,
+        dashed: bool = False,
+        fill: bool = False,
+        pen_width: float = 1.0,
+    ) -> None:
+        rects = []
+        for index in indexes:
+            rect = self._table.visualRect(index)
+            if rect.isValid() and rect.width() > 0 and rect.height() > 0:
+                rects.append(rect)
+        if not rects:
+            return
+        merged = rects[0]
+        for rect in rects[1:]:
+            merged = merged.united(rect)
+        merged = merged.adjusted(1, 1, -1, -1)
+        if merged.width() <= 0 or merged.height() <= 0:
+            return
+        self._paint_rect(painter, merged, color=color, dashed=dashed, fill=fill, pen_width=pen_width)
+
+    def _runtime_row(self) -> int | None:
+        active_row = self._table.property("experiment_control_runtime_row")
+        if not isinstance(active_row, int):
+            active_row = getattr(self._table.window(), "_plan_active_row", None)
+        return active_row if isinstance(active_row, int) else None
+
+    def _runtime_active(self) -> bool:
+        return bool(
+            self._runtime_row() is not None
+            or getattr(self._table.window(), "_plan_running", False)
+            or getattr(self._table.window(), "_plan_holding", False)
+            or getattr(self._table.window(), "_plan_paused", False)
+        )
+
+    def _highlight_colors(self) -> tuple[QColor, QColor]:
+        active_color = QColor("#d8b44a")
+        active_color.setAlpha(220)
+        editor_color = QColor("#43b05c")
+        editor_color.setAlpha(240)
+        return active_color, editor_color
 
     def paintEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
         painter = QPainter(self)
@@ -42,22 +135,9 @@ class _SelectionOverlay(QWidget):
             model = self._table.model()
             if model is None:
                 return
-
-            def _draw(indexes: list[QModelIndex], *, dashed: bool = False, fill: bool = False) -> None:
-                rects = []
-                for index in indexes:
-                    rect = self._table.visualRect(index)
-                    if rect.isValid() and rect.width() > 0 and rect.height() > 0:
-                        rects.append(rect)
-                if not rects:
-                    return
-                merged = rects[0]
-                for rect in rects[1:]:
-                    merged = merged.united(rect)
-                merged = merged.adjusted(1, 1, -1, -1)
-                if merged.width() <= 0 or merged.height() <= 0:
-                    return
-                self._paint_rect(painter, merged, dashed=dashed, fill=fill)
+            active_row = self._runtime_row()
+            runtime_active = self._runtime_active()
+            active_color, editor_color = self._highlight_colors()
 
             if bool(self._table.property("experiment_control_edit_mode")):
                 selected = [index for index in self._table.selectedIndexes() if index.isValid()]
@@ -71,28 +151,22 @@ class _SelectionOverlay(QWidget):
                                 if index.isValid():
                                     copied.append(index)
                 if selected:
-                    selected_signature = sorted((index.row(), index.column()) for index in selected)
-                    copied_signature = sorted((index.row(), index.column()) for index in copied)
-                    if selected_signature and selected_signature != copied_signature:
-                        _draw(selected, dashed=False, fill=False)
-                    if copied_signature:
-                        _draw(copied, dashed=True, fill=False)
+                    self._draw_indexes(painter, selected, color=editor_color, dashed=False, fill=False, pen_width=1.4)
+                if copied:
+                    self._draw_indexes(painter, copied, color=QColor("#d8b44a"), dashed=True, fill=False, pen_width=1.4)
+                if active_row is not None:
+                    self._draw_row(painter, active_row, color=active_color, dashed=False, fill=True, pen_width=2.0)
+                return
+
+            if runtime_active:
+                if active_row is not None:
+                    self._draw_row(painter, active_row, color=active_color, dashed=False, fill=True, pen_width=2.0)
                 return
 
             row = self._table.currentRow()
             if row < 0 or row >= self._table.rowCount():
                 return
-            last_col = max(self._table.columnCount() - 1, 0)
-            left_index = model.index(row, 0)
-            right_index = model.index(row, last_col)
-            first_rect = self._table.visualRect(left_index)
-            last_rect = self._table.visualRect(right_index)
-            if not first_rect.isValid() or not last_rect.isValid():
-                return
-            merged = first_rect.united(last_rect).adjusted(1, 1, -1, -1)
-            if merged.width() <= 0 or merged.height() <= 0:
-                return
-            self._paint_rect(painter, merged, dashed=False, fill=False)
+            self._draw_row(painter, row, color=editor_color, dashed=False, fill=False)
         finally:
             painter.end()
 

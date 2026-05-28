@@ -221,6 +221,15 @@ Rules:
 
 The timeline can therefore diverge from the original designed plan if the user holds, pauses, or skips steps.
 
+The experiment-control table should keep two separate cursors while a measurement is active:
+
+- the editor cursor follows the user’s table navigation and cell edits
+- the runtime cursor follows the actual step that is currently driving hardware
+
+The runtime cursor must not overwrite the editor cursor just because the measurement advances.
+This lets the user inspect and edit other rows while the experiment continues.
+If the user edits the currently active runtime row during a running measurement, the hardware should re-apply the changed step immediately and append a runtime event that records what changed.
+
 ## Timing Contract
 
 The GUI and runtime controller should use three distinct timing concepts:

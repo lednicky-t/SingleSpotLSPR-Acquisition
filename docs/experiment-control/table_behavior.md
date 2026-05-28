@@ -71,8 +71,13 @@ The table should display the current values immediately after those tools change
 - The selected row must remain visible.
 - The table should auto-scroll when the current row changes.
 - PageUp and PageDown should move the selected step.
-- The current row should stay aligned with timeline navigation and runtime changes.
-- In edit mode, multi-cell and multi-row selection should be possible.
+- The table has two distinct cursors when the plan is running:
+  - the editor cursor shows where the user is browsing or editing and is highlighted in green
+  - the runtime cursor shows which step is currently active in the measurement and is highlighted separately
+- The editor cursor should remain user-controlled even while the runtime advances.
+- Runtime-driven step changes should not steal the editor cursor.
+- In edit mode, multi-cell and multi-row selection should still be possible.
+- When the active runtime row is edited during a running measurement, the changed device parameters should take effect immediately and the runtime log should record the change.
 
 ## Persistence
 
