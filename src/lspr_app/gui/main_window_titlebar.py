@@ -21,6 +21,19 @@ def _device_status_entry(connected: bool, discovered: bool, detail: str = "") ->
     return device_status_state(connected, discovered), detail
 
 
+def device_status_tooltip(label_text: str, state: str, *, port_name: str = "", detail: str = "") -> str:
+    normalized = device_status_state(state == "connected", state == "discovered")
+    tooltip = f"{label_text}: {normalized}."
+    if port_name:
+        tooltip = f"{label_text}: {normalized} on {port_name}."
+    if detail:
+        suffix = str(detail).strip()
+        if suffix and not suffix.startswith("("):
+            suffix = f"({suffix})"
+        tooltip = f"{tooltip} {suffix}".strip()
+    return tooltip
+
+
 def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
     brand_icon_label = QLabel()
     brand_icon_label.setObjectName("brandIconLabel")
@@ -188,22 +201,40 @@ def refresh_hw_device_status_strip(window) -> None:
 
     spectrometer_detail = "(Simulations)" if not bool(window._hardware_available) else ""
     devices = {
-        "spectrometer": _device_status_entry(bool(window._hardware_available), False, spectrometer_detail),
-        "pump": _device_status_entry(
-            _is_connected(pump_client, "Experiment Control / Pump"),
-            _is_discovered(pump_client, pump_probe, "Experiment Control / Pump"),
+        "spectrometer": ("connected" if bool(window._hardware_available) else "disconnected", spectrometer_detail, ""),
+        "pump": (
+            device_status_state(
+                _is_connected(pump_client, "Experiment Control / Pump"),
+                _is_discovered(pump_client, pump_probe, "Experiment Control / Pump"),
+            ),
+            "",
+            _port_name(pump_probe) if not _is_connected(pump_client, "Experiment Control / Pump") else str(
+                getattr(getattr(pump_client, "port", None), "device", getattr(pump_client, "port", "")) or ""
+            ).strip(),
         ),
-        "valve": _device_status_entry(
-            _is_connected(valve_client, "Experiment Control / Valve"),
-            _is_discovered(valve_client, valve_probe, "Experiment Control / Valve"),
+        "valve": (
+            device_status_state(
+                _is_connected(valve_client, "Experiment Control / Valve"),
+                _is_discovered(valve_client, valve_probe, "Experiment Control / Valve"),
+            ),
+            "",
+            _port_name(valve_probe) if not _is_connected(valve_client, "Experiment Control / Valve") else str(
+                getattr(getattr(valve_client, "port", None), "device", getattr(valve_client, "port", "")) or ""
+            ).strip(),
         ),
-        "mswitch": _device_status_entry(
-            _is_connected(mswitch_client, "Experiment Control / M-Switch"),
-            _is_discovered(mswitch_client, mswitch_probe, "Experiment Control / M-Switch"),
+        "mswitch": (
+            device_status_state(
+                _is_connected(mswitch_client, "Experiment Control / M-Switch"),
+                _is_discovered(mswitch_client, mswitch_probe, "Experiment Control / M-Switch"),
+            ),
+            "",
+            _port_name(mswitch_probe) if not _is_connected(mswitch_client, "Experiment Control / M-Switch") else str(
+                getattr(getattr(mswitch_client, "port", None), "device", getattr(mswitch_client, "port", "")) or ""
+            ).strip(),
         ),
     }
     for key, icon_label, text_label in items:
-        state, detail = devices.get(key, ("disconnected", ""))
+        state, detail, port_name = devices.get(key, ("disconnected", "", ""))
         if init_active and key in overrides:
             override_online, override_detail = overrides.get(key, (state == "connected", detail))
             state = "connected" if override_online else state
@@ -218,6 +249,9 @@ def refresh_hw_device_status_strip(window) -> None:
         icon_label.setPixmap(device_status_icon(state).pixmap(16, 16))
         base_text = text_label.text().split(":", 1)[0].strip()
         text_label.setText(base_text if not detail else f"{base_text}: {detail}")
+        tooltip = device_status_tooltip(base_text, state, port_name=port_name, detail=detail)
+        icon_label.setToolTip(tooltip)
+        text_label.setToolTip(tooltip)
 
 
 def sync_window_control_icons(window) -> None:

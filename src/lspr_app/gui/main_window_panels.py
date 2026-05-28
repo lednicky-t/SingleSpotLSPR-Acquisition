@@ -213,11 +213,26 @@ def build_processing_group(window) -> QGroupBox:
 
 def configure_processing_group_controls(window) -> None:
     range_width = max(window.range_min_spin.sizeHint().width(), window.range_max_spin.sizeHint().width())
-    window.range_min_spin.setMinimumWidth(range_width)
-    window.range_max_spin.setMinimumWidth(range_width)
-    window.smoothing_window_spin.setMinimumWidth(range_width)
-    window.analysis_resolution_spin.setMinimumWidth(max(window.analysis_resolution_spin.sizeHint().width(), 84))
-    window.smoothing_method_combo.setMinimumWidth(range_width * 2)
+    narrow_range_width = max(int(round(range_width * 0.5)), 32)
+    window.range_min_spin.setFixedWidth(narrow_range_width)
+    window.range_max_spin.setFixedWidth(narrow_range_width)
+    uniform_controls = (
+        window.baseline_method_combo,
+        window.smoothing_method_combo,
+        window.smoothing_window_spin,
+        window.temporal_smoothing_spin,
+        window.crop_method_combo,
+        window.crop_fraction_spin,
+        window.fit_method_combo,
+        window.poly_order_spin,
+        window.fit_window_spin,
+        window.analysis_resolution_spin,
+        window.peak_metric_combo,
+    )
+    uniform_width = max(control.sizeHint().width() for control in uniform_controls)
+    uniform_width = max(uniform_width, 110)
+    for control in uniform_controls:
+        control.setFixedWidth(uniform_width)
 
 
 def _build_processing_range_widget(window) -> QWidget:

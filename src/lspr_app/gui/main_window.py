@@ -868,6 +868,9 @@ class MainWindow(QMainWindow):
         self.analysis_resolution_spin = QComboBox()
         populate_analysis_resolution_combo(self.analysis_resolution_spin)
         self.analysis_resolution_spin.setCurrentIndex(2)
+        self.analysis_resolution_spin.setEditable(True)
+        self.analysis_resolution_spin.lineEdit().setReadOnly(True)
+        self.analysis_resolution_spin.lineEdit().setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.analysis_resolution_spin.setToolTip(
             "Resolution used for peak and centroid analysis. Lower values improve sub-sample tracking but cost more CPU."
         )
