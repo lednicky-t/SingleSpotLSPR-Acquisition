@@ -12,12 +12,14 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+from lspr_ui import make_info_button
+
 
 def build_spectrometer_page(window) -> QWidget:
-    settings_group = QGroupBox()
-    settings_layout = QFormLayout()
-    settings_layout.setHorizontalSpacing(12)
-    settings_layout.setVerticalSpacing(8)
+    device_group = QGroupBox("Spectrometer device")
+    device_layout = QFormLayout()
+    device_layout.setHorizontalSpacing(12)
+    device_layout.setVerticalSpacing(8)
 
     integration_row = QHBoxLayout()
     integration_row.setContentsMargins(0, 0, 0, 0)
@@ -25,7 +27,7 @@ def build_spectrometer_page(window) -> QWidget:
     integration_row.addWidget(window.integration_spin)
     integration_row.addWidget(window.auto_integration_button)
     integration_row.addStretch(1)
-    settings_layout.addRow("Integration time", integration_row)
+    device_layout.addRow("Integration time", integration_row)
 
     window.averages_spin.setToolTip("Average this many frames into one displayed spectrum.")
     accumulation_row = QHBoxLayout()
@@ -33,19 +35,19 @@ def build_spectrometer_page(window) -> QWidget:
     accumulation_row.setSpacing(8)
     accumulation_row.addWidget(window.averages_spin)
     accumulation_row.addStretch(1)
-    settings_layout.addRow("Accumulation", accumulation_row)
+    device_layout.addRow("Accumulation", accumulation_row)
 
     window.correct_dark_check.setText("")
     window.correct_dark_check.setToolTip("Apply dark-count correction to spectrometer data.")
     window.correct_nonlinearity_check.setText("")
     window.correct_nonlinearity_check.setToolTip("Apply nonlinearity correction to spectrometer data.")
-    settings_layout.addRow("Correct dark counts", window.correct_dark_check)
-    settings_layout.addRow("Correct nonlinearity", window.correct_nonlinearity_check)
-    settings_group.setLayout(settings_layout)
+    device_layout.addRow("Correct dark counts", window.correct_dark_check)
+    device_layout.addRow("Correct nonlinearity", window.correct_nonlinearity_check)
+    device_group.setLayout(device_layout)
 
     page_layout = QVBoxLayout()
     page_layout.setContentsMargins(0, 0, 0, 0)
-    page_layout.addWidget(settings_group)
+    page_layout.addWidget(device_group)
     page_layout.addStretch(1)
     page = QWidget()
     page.setLayout(page_layout)
@@ -53,69 +55,83 @@ def build_spectrometer_page(window) -> QWidget:
 
 
 def build_simulation_page(window) -> QWidget:
-    simulation_group = QGroupBox()
+    simulation_group = QGroupBox("Simulation display model")
     simulation_layout = QGridLayout()
     simulation_layout.setHorizontalSpacing(8)
     simulation_layout.setVerticalSpacing(6)
 
-    _add_sim_row(
-        simulation_layout,
-        0,
-        "Peak center",
-        window.sim_peak_center_slider,
-        window.sim_peak_center_value,
-        "Center wavelength of the simulated spectral peak.",
+    simulation_info_row = QHBoxLayout()
+    simulation_info_row.setContentsMargins(0, 0, 0, 0)
+    simulation_info_row.setSpacing(4)
+    simulation_info_row.addWidget(
+        make_info_button(
+            "Synthetic spectrum controls used in Simulation mode. "
+            "These settings shape the generated display data and do not affect spectrometer hardware."
+        )
     )
+    simulation_info_row.addStretch(1)
+    simulation_layout.addLayout(simulation_info_row, 0, 0, 1, 2)
+
     _add_sim_row(
         simulation_layout,
         1,
-        "Peak width",
-        window.sim_peak_width_slider,
-        window.sim_peak_width_value,
-        "Width of the simulated spectral peak.",
+        "Peak center",
+        window.sim_peak_center_slider,
+        window.sim_peak_center_value,
+        "Center wavelength of the synthetic spectral peak.",
     )
     _add_sim_row(
         simulation_layout,
         2,
-        "Peak height",
-        window.sim_peak_height_slider,
-        window.sim_peak_height_value,
-        "Height of the simulated peak above the baseline.",
+        "Peak width",
+        window.sim_peak_width_slider,
+        window.sim_peak_width_value,
+        "Width of the synthetic spectral peak.",
     )
     _add_sim_row(
         simulation_layout,
         3,
-        "Baseline",
-        window.sim_baseline_slider,
-        window.sim_baseline_value,
-        "Baseline offset applied to the simulated spectrum.",
+        "Peak height",
+        window.sim_peak_height_slider,
+        window.sim_peak_height_value,
+        "Peak height in the synthetic display model.",
     )
     _add_sim_row(
         simulation_layout,
         4,
-        "Slope",
-        window.sim_slope_slider,
-        window.sim_slope_value,
-        "Linear slope added to the simulated spectrum.",
+        "Baseline",
+        window.sim_baseline_slider,
+        window.sim_baseline_value,
+        "Baseline offset in the synthetic display model.",
     )
     _add_sim_row(
         simulation_layout,
         5,
+        "Slope",
+        window.sim_slope_slider,
+        window.sim_slope_value,
+        "Linear slope in the synthetic display model.",
+    )
+    _add_sim_row(
+        simulation_layout,
+        6,
         "Noise",
         window.sim_noise_slider,
         window.sim_noise_value,
-        "Random noise level added to the simulated spectrum.",
+        "Random noise level added to the synthetic display model.",
     )
 
     resolution_label = QLabel("Resolution")
-    resolution_label.setToolTip("Wavelength spacing used by the simulation backend.")
-    simulation_layout.addWidget(resolution_label, 6, 0)
-    window.sim_resolution_spin.setToolTip("Wavelength spacing used by the simulation backend.")
-    simulation_layout.addWidget(window.sim_resolution_spin, 6, 1)
+    resolution_label.setToolTip("Wavelength spacing of the synthetic spectrum grid.")
+    simulation_layout.addWidget(resolution_label, 7, 0)
+    window.sim_resolution_spin.setToolTip("Wavelength spacing of the synthetic spectrum grid.")
+    simulation_layout.addWidget(window.sim_resolution_spin, 7, 1)
     output_rate_label = QLabel("Output rate")
-    output_rate_label.setToolTip("Simulation frame production rate.")
-    simulation_layout.addWidget(output_rate_label, 7, 0)
-    simulation_layout.addWidget(window.sim_output_rate_spin, 7, 1)
+    output_rate_label.setToolTip(
+        "Frame production rate of the simulation backend. This does not affect spectrometer hardware."
+    )
+    simulation_layout.addWidget(output_rate_label, 8, 0)
+    simulation_layout.addWidget(window.sim_output_rate_spin, 8, 1)
     simulation_group.setLayout(simulation_layout)
 
     page_layout = QVBoxLayout()
@@ -187,11 +203,11 @@ def build_processing_group(window) -> QGroupBox:
     processing_layout.addRow(poly_label, poly_row)
 
     peak_label = QLabel("Peak method")
-    peak_label.setToolTip("Choose which peak metric is shown in the trace plot and summary.")
+    peak_label.setToolTip("Choose which peak metric is shown in the metric plot and summary.")
     processing_layout.addRow(peak_label, window.peak_metric_combo)
 
-    trace_label = QLabel("Trace")
-    trace_label.setToolTip("Toggle individual trace metrics on and off.")
+    trace_label = QLabel("Metric")
+    trace_label.setToolTip("Toggle individual metric traces on and off.")
     trace_row = QVBoxLayout()
     trace_row.setContentsMargins(0, 0, 0, 0)
     trace_row.setSpacing(2)

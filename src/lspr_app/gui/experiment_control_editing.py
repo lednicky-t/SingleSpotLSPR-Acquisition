@@ -623,7 +623,7 @@ class ExperimentControlEditingController(QObject):
                     return True
             if bool(obj.property("open_popup_on_click")):
                 combo = self._window._combo_popup_target(obj)
-                if combo is not None:
+                if combo is not None and getattr(self._window, "_ui_startup_ready", False):
                     QTimer.singleShot(0, combo.showPopup)
         if event.type() == QEvent.Type.MouseMove and getattr(obj, "property", None) is not None:
             if bool(obj.property("flow_navigation")) and (event.buttons() & Qt.MouseButton.LeftButton):

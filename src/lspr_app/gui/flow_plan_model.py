@@ -463,7 +463,8 @@ class _BaseFlowDelegate(QStyledItemDelegate):
         if isinstance(editor, QComboBox):
             editor.setProperty("open_popup_on_click", True)
             # Open immediately so the cell behaves like a dropdown field instead of requiring a second click.
-            QTimer.singleShot(0, editor.showPopup)
+            if getattr(self._window, "_ui_startup_ready", False):
+                QTimer.singleShot(0, editor.showPopup)
 
     def _style_combo_editor(self, editor: QComboBox, *, width: int | None = None) -> None:
         editor.setAutoFillBackground(True)

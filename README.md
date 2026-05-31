@@ -10,6 +10,7 @@ Desktop application for live LSPR spectroscopy acquisition, analysis, and experi
 - HDF5 and CSV export for measurement data
 - Compact debug log terminal and live status footer
 - Optional AMF M-Switch control when the vendor `AMFTools` package is installed
+- Launcher modes that can skip device discovery or open only the experiment-control editor
 
 ## Repository layout
 
@@ -42,6 +43,10 @@ python -m lspr_app.app
 ## Notes
 
 - The application uses a simulated spectrometer automatically when no Ocean Insight backend is available.
+- The suite launcher can start the app in three profiles:
+  - `Full`: current behavior, including startup hardware discovery and experiment-control auto-connect.
+  - `Simulation`: skips startup device discovery and runs the acquisition UI in simulation mode.
+  - `Control editor`: opens the experiment-control editor without the runtime transport controls and without startup device discovery.
 - Measurement files and local settings are ignored by Git so the repository stays clean.
 - The project name shown in the UI is `LSPR Acquisition`.
 - Versioning is documented in `docs/versioning.md`.

@@ -75,6 +75,11 @@ def build_menu_bar(window) -> QMenuBar:
     hw_inventory_action.setToolTip("Show connected COM ports and the device type recognized for each port.")
     hw_inventory_action.triggered.connect(window._show_connected_devices_dialog)
 
+    hw_disconnect_all_action = hw_menu.addAction("Disconnect all devices")
+    hw_disconnect_all_action.setToolTip("Stop the active devices and release all app-owned hardware connections.")
+    hw_disconnect_all_action.triggered.connect(window._disconnect_all_devices)
+    window._hw_disconnect_all_action = hw_disconnect_all_action
+
     hw_menu.addSeparator()
     device_settings_menu = hw_menu.addMenu("Device settings")
     device_settings_placeholder = device_settings_menu.addAction("Reserved for device-specific settings")
@@ -101,6 +106,26 @@ def build_menu_bar(window) -> QMenuBar:
     debug_mode_action.setChecked(bool(getattr(window, "_processing_debug_mode_enabled", False)))
     debug_mode_action.setToolTip("Enable slow-spectrum profiling and other developer diagnostics.")
     debug_mode_action.toggled.connect(window._set_processing_debug_mode_enabled)
+
+    performance_menu = help_menu.addMenu("Performance switches")
+
+    acquisition_autosave_action = performance_menu.addAction("Acquisition-state autosave")
+    acquisition_autosave_action.setCheckable(True)
+    acquisition_autosave_action.setChecked(bool(getattr(window, "_acquisition_state_autosave_enabled", True)))
+    acquisition_autosave_action.setToolTip("Automatically save acquisition state during UI and acquisition changes.")
+    acquisition_autosave_action.toggled.connect(window._set_acquisition_state_autosave_enabled)
+
+    ui_autosave_action = performance_menu.addAction("UI-state autosave")
+    ui_autosave_action.setCheckable(True)
+    ui_autosave_action.setChecked(bool(getattr(window, "_ui_state_autosave_enabled", True)))
+    ui_autosave_action.setToolTip("Automatically save window geometry and UI layout changes.")
+    ui_autosave_action.toggled.connect(window._set_ui_state_autosave_enabled)
+
+    log_buffering_action = performance_menu.addAction("Log buffering")
+    log_buffering_action.setCheckable(True)
+    log_buffering_action.setChecked(bool(getattr(window, "_log_buffering_enabled", True)))
+    log_buffering_action.setToolTip("Batch log writes before rendering them in the log panel.")
+    log_buffering_action.toggled.connect(window._set_log_buffering_enabled)
 
     help_menu.addSeparator()
     about_action = help_menu.addAction("About")

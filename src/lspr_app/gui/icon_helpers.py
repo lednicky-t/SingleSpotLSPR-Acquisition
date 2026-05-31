@@ -60,6 +60,14 @@ def storage_compression_icon(active: bool) -> QIcon:
         return tint_tabler_icon(flow_tabler_icon("archive", "database", "box"), tint)
 
 
+def storage_save_icon() -> QIcon:
+    tint = QColor("#47a861")
+    try:
+        return tint_tabler_icon(tabler_icon("device_floppy"), tint)
+    except Exception:
+        return tint_tabler_icon(flow_tabler_icon("device_floppy", "device_save", "floppy"), tint)
+
+
 __all__ = [
     "bulb_icon",
     "dark_icon",
@@ -72,6 +80,7 @@ __all__ = [
     "residual_icon",
     "snowflake_icon",
     "storage_compression_icon",
+    "storage_save_icon",
     "tabler_icon",
     "tint_tabler_icon",
     "transport_icon",

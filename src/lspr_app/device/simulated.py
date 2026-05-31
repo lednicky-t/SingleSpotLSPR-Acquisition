@@ -23,7 +23,11 @@ class SimulationParameters:
 
 
 class SimulatedSpectrometer(Spectrometer):
-    """Development backend that emulates a spectrometer response."""
+    """Development backend that emulates a spectrometer response.
+
+    The synthetic spectrum depends only on the simulation parameters, not on
+    acquisition settings such as integration time or averaging.
+    """
 
     def __init__(self, parameters: SimulationParameters | None = None) -> None:
         self._parameters = parameters or SimulationParameters()
@@ -81,22 +85,19 @@ class SimulatedSpectrometer(Spectrometer):
         assert linear_baseline is not None
         assert peak_signal is not None
         assert shoulder_signal is not None
-        normalized_integration = max(settings.integration_time_ms, 1.0) / 50.0
         phase_shift = self._sample_phase * 0.6
         drift = 0.5 * float(self._parameters.noise) * np.sin(x_relative / 140.0 + phase_shift)
         baseline_signal = linear_baseline + drift
         sample_signal = baseline_signal + peak_signal + shoulder_signal
-        noise_scale = max(self._parameters.noise, 0.0) / np.sqrt(
-            max(settings.averages, 1) * normalized_integration
-        )
+        noise_scale = max(self._parameters.noise, 0.0)
         noise = np.random.normal(0.0, noise_scale, size=wavelengths.shape)
 
         if kind == "dark":
             values = np.clip(20.0 + 0.1 * baseline_signal + noise * 0.3, 1e-6, None)
         elif kind == "reference":
-            values = np.clip(baseline_signal * normalized_integration + noise, 1e-6, None)
+            values = np.clip(baseline_signal + noise, 1e-6, None)
         else:
-            values = np.clip(sample_signal * normalized_integration + noise, 1e-6, None)
+            values = np.clip(sample_signal + noise, 1e-6, None)
 
         self._sample_phase += 1
         return Spectrum(

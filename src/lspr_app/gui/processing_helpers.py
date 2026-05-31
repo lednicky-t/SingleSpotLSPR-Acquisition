@@ -113,6 +113,16 @@ def get_dense_analysis_curve(
     return build_dense_analysis_curve(processed, fit, settings)
 
 
+def _safe_nanargmax_index(values: np.ndarray) -> int | None:
+    array = np.asarray(values, dtype=np.float64)
+    if array.size == 0:
+        return None
+    finite = np.isfinite(array)
+    if not np.any(finite):
+        return None
+    return int(np.nanargmax(array))
+
+
 def compute_metric_nm(mode: str, processed: Spectrum, fit: Spectrum | None, settings: ProcessingSettings) -> float:
     analysis = get_analysis_metrics(processed, fit, settings)
     value = analysis.get(mode)
@@ -121,7 +131,10 @@ def compute_metric_nm(mode: str, processed: Spectrum, fit: Spectrum | None, sett
     dense_max = analysis.get("dense_max_nm")
     if isinstance(dense_max, (int, float)) and np.isfinite(float(dense_max)):
         return float(dense_max)
-    return float(processed.wavelengths_nm[int(np.nanargmax(processed.values))])
+    peak_index = _safe_nanargmax_index(processed.values)
+    if peak_index is not None and peak_index < len(processed.wavelengths_nm):
+        return float(processed.wavelengths_nm[peak_index])
+    return float("nan")
 
 
 def compute_peak_metric_nm(processed: Spectrum, fit: Spectrum | None, settings: ProcessingSettings) -> float:
@@ -154,7 +167,10 @@ def compute_centroid_nm(processed: Spectrum, fit: Spectrum | None, settings: Pro
     centroid = centroid_from_curve(dense_wavelengths, dense_values)
     if centroid is not None:
         return centroid
-    return float(processed.wavelengths_nm[int(np.nanargmax(processed.values))])
+    peak_index = _safe_nanargmax_index(processed.values)
+    if peak_index is not None and peak_index < len(processed.wavelengths_nm):
+        return float(processed.wavelengths_nm[peak_index])
+    return float("nan")
 
 
 def compute_fit_r(processed: Spectrum, fit: Spectrum | None) -> str | None:
@@ -292,9 +308,13 @@ def get_analysis_metrics(
         if dense_peak is not None:
             dense_max_nm = float(dense_peak)
         else:
-            dense_max_nm = float(dense_wavelengths[int(np.nanargmax(dense_values))])
+            dense_peak_index = _safe_nanargmax_index(dense_values)
+            if dense_peak_index is not None and dense_peak_index < len(dense_wavelengths):
+                dense_max_nm = float(dense_wavelengths[dense_peak_index])
     elif processed is not None and len(processed.wavelengths_nm) > 0:
-        dense_max_nm = float(processed.wavelengths_nm[int(np.nanargmax(processed.values))])
+        processed_peak_index = _safe_nanargmax_index(processed.values)
+        if processed_peak_index is not None and processed_peak_index < len(processed.wavelengths_nm):
+            dense_max_nm = float(processed.wavelengths_nm[processed_peak_index])
 
     centroid_nm = centroid_from_curve(dense_wavelengths, dense_values)
     if centroid_nm is None:

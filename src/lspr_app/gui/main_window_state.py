@@ -2,9 +2,11 @@
 
 from PyQt6.QtCore import Qt, QRect
 from PyQt6.QtWidgets import QApplication
+from time import perf_counter
 
 from lspr_app.domain.pump_plan import to_core_experiment_plan
 from lspr_app.storage.app_config import save_acquisition_state, save_window_ui_state
+from lspr_core import LAUNCH_PROFILE_CONTROL_EDITOR, LAUNCH_PROFILE_FULL, LAUNCH_PROFILE_SIMULATION
 
 
 def restore_ui_state(window) -> None:
@@ -263,8 +265,30 @@ def acquisition_state_payload(window) -> dict[str, object]:
     }
 
 
+def resolve_initial_source_mode(window, requested_source_mode: str) -> str:
+    profile = getattr(window, "_launch_profile_spec", None)
+    profile_key = str(getattr(profile, "key", "") or "").strip().lower()
+    requested = str(requested_source_mode or "").strip().lower()
+    hardware_available = bool(getattr(window, "_hardware_available", False))
+
+    if profile_key == LAUNCH_PROFILE_SIMULATION:
+        return "simulation"
+    if profile_key == LAUNCH_PROFILE_FULL:
+        return "spectrometer" if hardware_available else "simulation"
+    if profile_key == LAUNCH_PROFILE_CONTROL_EDITOR:
+        if requested in {"spectrometer", "simulation"}:
+            return requested
+        return "spectrometer" if hardware_available else "simulation"
+
+    if requested in {"spectrometer", "simulation"}:
+        if requested == "spectrometer" and not hardware_available:
+            return "simulation"
+        return requested
+    return "spectrometer" if hardware_available else "simulation"
+
+
 def persist_acquisition_state(window) -> None:
-    if window._suspend_acquisition_autosave:
+    if window._suspend_acquisition_autosave or not getattr(window, "_acquisition_state_autosave_enabled", True):
         return
     payload = acquisition_state_payload(window)
     window._acquisition_state = payload
@@ -286,9 +310,12 @@ def persist_acquisition_state(window) -> None:
 
 
 def schedule_acquisition_state_persist(window) -> None:
-    if window._suspend_acquisition_autosave:
+    if window._suspend_acquisition_autosave or not getattr(window, "_acquisition_state_autosave_enabled", True):
+        timer = getattr(window, "_acquisition_state_timer", None)
+        if timer is not None:
+            timer.stop()
         return
-    window._acquisition_state_timer.start()
+    window._acquisition_state_requested_at = perf_counter()
 
 
 def apply_acquisition_state_to_widgets(window, state: dict[str, object]) -> None:
@@ -310,7 +337,7 @@ def apply_acquisition_state_to_widgets(window, state: dict[str, object]) -> None
         if isinstance(live_rate_hz, (int, float)) and float(live_rate_hz) > 0:
             window.live_rate_spin.setValue(float(live_rate_hz))
 
-        source_mode = str(state.get("source_mode", window._source_mode))
+        source_mode = resolve_initial_source_mode(window, str(state.get("source_mode", window._source_mode)))
 
         acquisition = state.get("acquisition", {})
         if isinstance(acquisition, dict):

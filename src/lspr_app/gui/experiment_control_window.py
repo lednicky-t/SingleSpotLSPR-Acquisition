@@ -118,7 +118,7 @@ from lspr_io import (
 )
 
 
-_LOGGER = logging.getLogger("lspr_app.flow")
+_LOGGER = logging.getLogger("lspr_app.experiment_control")
 
 
 def _safe_float(text: str, default: float = 0.0) -> float:
@@ -1497,6 +1497,7 @@ class ExperimentControlWindow(QWidget):
         ("Gold", "#EDC948"),
         ("Gray", "#9C9DA1"),
     ]
+    STARTUP_DEVICE_ORDER = ("pump", "valve", "mswitch")
 
     PLAN_COLUMNS = [
         "step",
@@ -1525,6 +1526,7 @@ class ExperimentControlWindow(QWidget):
         theme_mode: str | None = None,
         initial_mswitch_devices: list[ControllerProbe] | None = None,
         auto_connect_devices: bool = False,
+        show_runtime_controls: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1555,6 +1557,13 @@ class ExperimentControlWindow(QWidget):
         self._mswitch_connect_task: MSwitchConnectTask | None = None
         self._connection_sync_in_progress = False
         self._auto_connect_devices = bool(auto_connect_devices)
+        self._startup_auto_connect_enabled = False
+        self._startup_auto_connect_scheduled = False
+        self._startup_auto_connect_active = False
+        self._startup_auto_connect_stage: str | None = None
+        self._startup_auto_connect_queue: list[str] = []
+        self._show_runtime_controls = bool(show_runtime_controls)
+        self._ui_startup_ready = False
         self._plan_running = False
         self._plan_holding = False
         self._plan_paused = False
@@ -1657,7 +1666,7 @@ class ExperimentControlWindow(QWidget):
                 self._experiment_control_view_mode_sizes[self._experiment_control_view_mode] = parsed_legacy
         self._experiment_control_view_mode_apply_pending = True
 
-        _LOGGER.info("Flow bootstrap +%.1f ms: init state prepared", (perf_counter() - self._bootstrap_t0) * 1000.0)
+        _LOGGER.info("Experiment control bootstrap +%.1f ms: init state prepared", (perf_counter() - self._bootstrap_t0) * 1000.0)
 
         self.setWindowTitle(f"Experiment Control {__version__}")
         self.setWindowIcon(QIcon(str(Path(__file__).resolve().parent.parent / "resources" / "icons" / "app_icon.svg")))
@@ -1973,7 +1982,7 @@ class ExperimentControlWindow(QWidget):
         self.timeline_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._startup_ui_pending = True
         self._build_ui()
-        _LOGGER.info("Flow bootstrap +%.1f ms: UI built", (perf_counter() - self._bootstrap_t0) * 1000.0)
+        _LOGGER.info("Experiment control bootstrap +%.1f ms: UI built", (perf_counter() - self._bootstrap_t0) * 1000.0)
         self._refresh_switch_solution_combo(self.step_switch_spin.value())
         self._set_switch_solution_mode(self._switch_solution_mode)
         self._connect_signals()
@@ -1982,19 +1991,16 @@ class ExperimentControlWindow(QWidget):
         self._update_experiment_control_toggle_button()
         self._restore_ui_state()
         self._restore_experiment_control_state()
-        _LOGGER.info("Flow bootstrap +%.1f ms: state restore queued", (perf_counter() - self._bootstrap_t0) * 1000.0)
+        _LOGGER.info("Experiment control bootstrap +%.1f ms: state restore queued", (perf_counter() - self._bootstrap_t0) * 1000.0)
         self._set_manual_uniform_mode(self.manual_uniform_button.isChecked())
         if self._probe is not None:
             self._apply_probe(self._probe)
         self._set_connection_visual(False, "Pump not connected.")
         self._suppress_plan_table_layout_save = False
-        if self._auto_connect_devices:
-            QTimer.singleShot(0, self._auto_connect_pump)
-            QTimer.singleShot(0, self._auto_connect_valve)
-            QTimer.singleShot(0, self._auto_connect_mswitch)
+        self._schedule_startup_device_auto_connect()
         self._startup_ui_pending = False
         self._set_switch_solution_mode(self._switch_solution_mode)
-        _LOGGER.info("Flow bootstrap +%.1f ms: constructor finished", (perf_counter() - self._bootstrap_t0) * 1000.0)
+        _LOGGER.info("Experiment control bootstrap +%.1f ms: constructor finished", (perf_counter() - self._bootstrap_t0) * 1000.0)
 
     def _build_ui(self) -> None:
         palette = self._theme_palette()
@@ -2243,6 +2249,7 @@ class ExperimentControlWindow(QWidget):
         flow_action_row.addStretch(1)
         self._experiment_control_flow_action_row = QWidget()
         self._experiment_control_flow_action_row.setLayout(flow_action_row)
+        self._experiment_control_flow_action_row.setVisible(self._show_runtime_controls)
 
         timeline_controls_layout = QVBoxLayout()
         timeline_controls_layout.setContentsMargins(0, 0, 0, 0)
@@ -2603,11 +2610,23 @@ class ExperimentControlWindow(QWidget):
     def _normalize_experiment_plan_header(self, text: str) -> str:
         return re.sub(r"[^a-z0-9]+", "", str(text or "").casefold())
 
+    def _run_gui_callback_timed(self, label: str, callback, *, warn_ms: float = 20.0) -> None:
+        started = perf_counter()
+        try:
+            callback()
+        finally:
+            elapsed_ms = (perf_counter() - started) * 1000.0
+            if elapsed_ms >= warn_ms:
+                _LOGGER.warning("Experiment control GUI callback %s took %.2f ms", label, elapsed_ms)
+
     def _advance_import_plan_busy_indicator(self) -> None:
-        if not self.import_plan_busy_label.isVisible():
-            return
-        self._import_plan_busy_frame_index = (self._import_plan_busy_frame_index + 1) % len(self._import_plan_busy_frames)
-        self._render_import_plan_busy_indicator()
+        def _callback() -> None:
+            if not self.import_plan_busy_label.isVisible():
+                return
+            self._import_plan_busy_frame_index = (self._import_plan_busy_frame_index + 1) % len(self._import_plan_busy_frames)
+            self._render_import_plan_busy_indicator()
+
+        self._run_gui_callback_timed("import_plan_busy", _callback)
 
     def _render_import_plan_busy_indicator(self) -> None:
         label = self.import_plan_busy_label
@@ -3287,21 +3306,24 @@ class ExperimentControlWindow(QWidget):
         self._experiment_plan_import_fill_timer.start()
 
     def _advance_experiment_plan_import_population(self) -> None:
-        try:
-            if self._experiment_control_bootstrap_pending_state is not None:
-                self._advance_experiment_control_bootstrap_population()
-                return
-            steps = self._experiment_plan_import_pending_steps
-            payload = self._experiment_plan_import_pending_payload
-            if payload is None or not steps:
+        def _callback() -> None:
+            try:
+                if self._experiment_control_bootstrap_pending_state is not None:
+                    self._advance_experiment_control_bootstrap_population()
+                    return
+                steps = self._experiment_plan_import_pending_steps
+                payload = self._experiment_plan_import_pending_payload
+                if payload is None or not steps:
+                    self._experiment_plan_import_fill_timer.stop()
+                    self._finalize_experiment_plan_import_population()
+                    return
                 self._experiment_plan_import_fill_timer.stop()
+                self._populate_experiment_control_table(steps, selected_row=self._experiment_plan_import_pending_selected_row)
                 self._finalize_experiment_plan_import_population()
-                return
-            self._experiment_plan_import_fill_timer.stop()
-            self._populate_experiment_control_table(steps, selected_row=self._experiment_plan_import_pending_selected_row)
-            self._finalize_experiment_plan_import_population()
-        except Exception as exc:
-            self._abort_experiment_plan_import_population(str(exc))
+            except Exception as exc:
+                self._abort_experiment_plan_import_population(str(exc))
+
+        self._run_gui_callback_timed("experiment_plan_import_population", _callback)
 
     def _finalize_experiment_plan_import_population(self) -> None:
         try:
@@ -4088,11 +4110,14 @@ class ExperimentControlWindow(QWidget):
             return transport_icon(self._theme_mode, "play")
 
     def _advance_plan_hold_blink_indicator(self) -> None:
-        timer = getattr(self, "_plan_hold_blink_timer", None)
-        if timer is None or not timer.isActive() or not (self._plan_running or self._plan_holding or self._plan_paused):
-            return
-        self._plan_hold_blink_frame = (int(getattr(self, "_plan_hold_blink_frame", 0)) + 1) % 8
-        self._update_experiment_control_toggle_button()
+        def _callback() -> None:
+            timer = getattr(self, "_plan_hold_blink_timer", None)
+            if timer is None or not timer.isActive() or not (self._plan_running or self._plan_holding or self._plan_paused):
+                return
+            self._plan_hold_blink_frame = (int(getattr(self, "_plan_hold_blink_frame", 0)) + 1) % 8
+            self._update_experiment_control_toggle_button()
+
+        self._run_gui_callback_timed("plan_hold_blink", _callback)
 
     def _update_record_with_flow_button_icon(self) -> None:
         if not hasattr(self, "record_with_flow_button"):
@@ -4201,6 +4226,21 @@ class ExperimentControlWindow(QWidget):
         self.plan_table.setProperty("experiment_control_runtime_row", row)
         self.plan_table.viewport().setProperty("experiment_control_runtime_row", row)
 
+    def _ensure_experiment_control_plan_row_visible(self, plan_row: int | None, *, center: bool = False) -> None:
+        if plan_row is None:
+            return
+        table_row = self._table_row_from_plan_row(plan_row)
+        if not (0 <= table_row < self.plan_table.rowCount()):
+            return
+        model = self.plan_table.model()
+        if model is None:
+            return
+        index = model.index(table_row, 0)
+        if not index.isValid():
+            return
+        hint = QAbstractItemView.ScrollHint.PositionAtCenter if center else QAbstractItemView.ScrollHint.EnsureVisible
+        self.plan_table.scrollTo(index, hint)
+
     def _sync_experiment_control_timeline(self, steps: list[PumpPlanStep], plan_row: int | None, *, refresh_status: bool = False) -> None:
         runtime_row = plan_row if (self._plan_running or self._plan_holding or self._plan_paused) else None
         self._set_experiment_control_runtime_row_property(runtime_row)
@@ -4210,6 +4250,10 @@ class ExperimentControlWindow(QWidget):
             self._timeline_progress_for_display(),
             self._plan_runtime_for_display(),
             self._step_runtime_for_display(),
+        )
+        self._ensure_experiment_control_plan_row_visible(
+            plan_row if (self._plan_running or self._plan_holding or self._plan_paused) else self._selected_experiment_control_row(),
+            center=bool(self._plan_running or self._plan_holding or self._plan_paused),
         )
         controller = getattr(self, "_experiment_control_edit_controller", None)
         if controller is not None:
@@ -4872,7 +4916,7 @@ class ExperimentControlWindow(QWidget):
         self._apply_plan_table_column_widths(self._default_experiment_control_table_column_widths())
 
     def _fit_plan_table_columns_to_viewport(self) -> None:
-        fit_plan_table_columns_to_viewport(self)
+        self._run_gui_callback_timed("plan_table_fit", lambda: fit_plan_table_columns_to_viewport(self))
 
     def _update_plan_table_height(self) -> None:
         update_plan_table_height(self)
@@ -5356,7 +5400,7 @@ class ExperimentControlWindow(QWidget):
         self._port_refresh_generation += 1
         generation = self._port_refresh_generation
         self._port_refresh_in_progress = True
-        _LOGGER.info("Flow bootstrap +%.1f ms: port refresh started", (perf_counter() - self._bootstrap_t0) * 1000.0)
+        _LOGGER.info("Experiment control bootstrap +%.1f ms: port refresh started", (perf_counter() - self._bootstrap_t0) * 1000.0)
         self._update_experiment_control_busy_indicator()
         task = PortRefreshTask(generation)
         self._port_refresh_task = task
@@ -5369,7 +5413,7 @@ class ExperimentControlWindow(QWidget):
             return
         self._port_refresh_task = None
         self._port_refresh_in_progress = False
-        _LOGGER.info("Flow bootstrap +%.1f ms: port refresh finished", (perf_counter() - self._bootstrap_t0) * 1000.0)
+        _LOGGER.info("Experiment control bootstrap +%.1f ms: port refresh finished", (perf_counter() - self._bootstrap_t0) * 1000.0)
         if not isinstance(payload, PortRefreshData):
             self._update_experiment_control_busy_indicator()
             return
@@ -5379,10 +5423,7 @@ class ExperimentControlWindow(QWidget):
         self._update_experiment_control_busy_indicator()
         if self._experiment_control_bootstrap_in_progress:
             return
-        if self._auto_connect_devices:
-            self._auto_connect_pump()
-            self._auto_connect_valve()
-            self._auto_connect_mswitch()
+        self._schedule_startup_device_auto_connect()
 
     def _handle_port_refresh_failed(self, generation: int, message: str) -> None:
         if generation != self._port_refresh_generation:
@@ -5400,6 +5441,133 @@ class ExperimentControlWindow(QWidget):
             return False
         self._start_port_refresh()
         return True
+
+    def enable_startup_device_auto_connect(self) -> None:
+        if self._startup_auto_connect_enabled:
+            return
+        self._startup_auto_connect_enabled = True
+        self._schedule_startup_device_auto_connect()
+
+    def _schedule_startup_device_auto_connect(self) -> bool:
+        if not self._auto_connect_devices:
+            return False
+        if not self._startup_auto_connect_enabled:
+            return False
+        if self._port_refresh_in_progress or self._experiment_control_bootstrap_in_progress:
+            return False
+        if self._startup_auto_connect_scheduled:
+            return False
+        if not self._startup_auto_connect_active:
+            self._startup_auto_connect_active = True
+            self._startup_auto_connect_queue = list(self.STARTUP_DEVICE_ORDER)
+            _LOGGER.info("Startup auto-connect queue initialized: %s", ", ".join(self._startup_auto_connect_queue))
+        self._startup_auto_connect_scheduled = True
+        QTimer.singleShot(0, self._run_startup_device_auto_connect)
+        return True
+
+    def _run_startup_device_auto_connect(self) -> None:
+        if not self._startup_auto_connect_scheduled:
+            return
+        self._startup_auto_connect_scheduled = False
+        if not self._auto_connect_devices or not self._startup_auto_connect_enabled:
+            self._startup_auto_connect_active = False
+            self._startup_auto_connect_stage = None
+            self._startup_auto_connect_queue = []
+            return
+        if self._port_refresh_in_progress or self._experiment_control_bootstrap_in_progress:
+            self._schedule_startup_device_auto_connect()
+            return
+        if self._startup_auto_connect_stage is not None:
+            return
+        if not self._startup_auto_connect_queue:
+            self._startup_auto_connect_active = False
+            return
+        _LOGGER.info("Startup auto-connect stage starting: %s", self._startup_auto_connect_queue[0])
+        self._advance_startup_device_auto_connect()
+
+    def _advance_startup_device_auto_connect(self) -> None:
+        if not self._startup_auto_connect_active:
+            return
+        if self._startup_auto_connect_stage is not None:
+            return
+        if self._port_refresh_in_progress or self._experiment_control_bootstrap_in_progress:
+            self._schedule_startup_device_auto_connect()
+            return
+        if not self._startup_auto_connect_queue:
+            self._startup_auto_connect_active = False
+            self._startup_auto_connect_stage = None
+            return
+        device_key = self._startup_auto_connect_queue[0]
+        _LOGGER.info("Startup auto-connect evaluating: %s", device_key)
+        if not self._startup_device_ready(device_key):
+            _LOGGER.info("Startup auto-connect skipping %s (not ready).", device_key)
+            self._finish_startup_device_auto_connect_stage(device_key)
+            return
+        if self._startup_attempt_device_connect(device_key):
+            self._startup_auto_connect_stage = device_key
+            _LOGGER.info("Startup auto-connect requested connect for %s.", device_key)
+        else:
+            _LOGGER.info("Startup auto-connect could not request connect for %s.", device_key)
+            self._finish_startup_device_auto_connect_stage(device_key)
+
+    def _finish_startup_device_auto_connect_stage(self, device_key: str) -> None:
+        if not self._startup_auto_connect_active:
+            return
+        if self._startup_auto_connect_queue and self._startup_auto_connect_queue[0] == device_key:
+            self._startup_auto_connect_queue.pop(0)
+        elif self._startup_auto_connect_stage != device_key:
+            return
+        self._startup_auto_connect_stage = None
+        _LOGGER.info(
+            "Startup auto-connect stage finished: %s | remaining=%s",
+            device_key,
+            ", ".join(self._startup_auto_connect_queue) if self._startup_auto_connect_queue else "none",
+        )
+        if not self._startup_auto_connect_queue:
+            self._startup_auto_connect_active = False
+            _LOGGER.info("Startup auto-connect sequence complete.")
+            return
+        self._schedule_startup_device_auto_connect()
+
+    def _startup_pump_ready(self) -> bool:
+        if self._client.is_connected() or self._connect_in_progress:
+            return False
+        selected_port = self.selected_port()
+        return bool(selected_port is not None and self.port_combo.findData(selected_port) >= 0)
+
+    def _startup_valve_ready(self) -> bool:
+        if self._valve_client is not None and self._valve_client.is_connected():
+            return False
+        if self._valve_connect_in_progress or self._valve_connect_task is not None:
+            return False
+        selected_port = self._selected_valve_port()
+        return bool(selected_port is not None and self.valve_port_combo.findData(selected_port) >= 0)
+
+    def _startup_mswitch_ready(self) -> bool:
+        if self._mswitch_client is not None and self._mswitch_client.is_connected():
+            return False
+        if self._mswitch_connect_in_progress or self._mswitch_connect_task is not None:
+            return False
+        selected_port = self._selected_mswitch_port()
+        return bool(selected_port is not None and self.mswitch_port_combo.findData(selected_port) >= 0)
+
+    def _startup_device_ready(self, device_key: str) -> bool:
+        if device_key == "pump":
+            return self._startup_pump_ready()
+        if device_key == "valve":
+            return self._startup_valve_ready()
+        if device_key == "mswitch":
+            return self._startup_mswitch_ready()
+        return False
+
+    def _startup_attempt_device_connect(self, device_key: str) -> bool:
+        if device_key == "pump":
+            return self.connect_best_pump_controller()
+        if device_key == "valve":
+            return self.connect_best_valve_controller()
+        if device_key == "mswitch":
+            return self.connect_best_mswitch_controller()
+        return False
 
     def _remember_selected_port(self, _: str) -> None:
         self._last_selected_port = self.selected_port()
@@ -5449,6 +5617,7 @@ class ExperimentControlWindow(QWidget):
             self._set_valve_connection_visual(False, f"Valve connect failed on {port}: {error}")
             self.valve_availability_changed.emit(None)
             _LOGGER.warning("Valve connect failed on %s: %s", port, error)
+            self._finish_startup_device_auto_connect_stage("valve")
             return
         self._valve_client = client
         self._valve_probe = probe
@@ -5456,6 +5625,7 @@ class ExperimentControlWindow(QWidget):
         self._set_valve_connection_visual(True, f"Connected to {probe.model} [{probe.controller_type}] on {probe.port}.")
         self.valve_availability_changed.emit(probe)
         _LOGGER.info("Valve controller connected | model=%s type=%s port=%s", probe.model, probe.controller_type, probe.port)
+        self._finish_startup_device_auto_connect_stage("valve")
 
     def connect_best_valve_controller(self) -> bool:
         if self._port_refresh_in_progress:
@@ -5495,6 +5665,8 @@ class ExperimentControlWindow(QWidget):
 
     def _auto_connect_valve(self) -> None:
         if not self._auto_connect_devices:
+            return
+        if not self._startup_auto_connect_enabled:
             return
         if self._port_refresh_in_progress:
             return
@@ -5549,6 +5721,7 @@ class ExperimentControlWindow(QWidget):
             self._set_mswitch_connection_visual(False, f"M-Switch connect failed on {port}: {exc}")
             self.mswitch_availability_changed.emit(None)
             _LOGGER.error("M-Switch connect failed on %s: %s", port, exc)
+            self._finish_startup_device_auto_connect_stage("mswitch")
             return
         self._mswitch_client = client
         self._mswitch_probe = probe
@@ -5559,6 +5732,7 @@ class ExperimentControlWindow(QWidget):
         self._ensure_mswitch_homed()
         self._mswitch_connect_in_progress = False
         _LOGGER.info("M-Switch connected | model=%s port=%s", probe.model, probe.port)
+        self._finish_startup_device_auto_connect_stage("mswitch")
 
     def _disconnect_mswitch_controller(self) -> None:
         port = getattr(self._mswitch_probe, "port", None)
@@ -5588,6 +5762,8 @@ class ExperimentControlWindow(QWidget):
 
     def _auto_connect_mswitch(self) -> None:
         if not self._auto_connect_devices:
+            return
+        if not self._startup_auto_connect_enabled:
             return
         if self._port_refresh_in_progress:
             return
@@ -5758,6 +5934,7 @@ class ExperimentControlWindow(QWidget):
             self._client.close()
             self._set_connection_visual(False, f"Connect failed on {probe.port}: {exc}")
             _LOGGER.error("Pump connect failed on %s: %s", probe.port, exc)
+            self._finish_startup_device_auto_connect_stage("pump")
             return
         claim_port(probe.port, "Experiment Control / Pump")
         self._probe = probe
@@ -5765,6 +5942,7 @@ class ExperimentControlWindow(QWidget):
         self._set_connection_visual(True, f"Connected to {probe.model} on {probe.port}.")
         self.availability_changed.emit(probe)
         _LOGGER.info("Pump connected | model=%s port=%s", probe.model, probe.port)
+        self._finish_startup_device_auto_connect_stage("pump")
 
     def _handle_connect_probe_failure(self, generation: int, message: str) -> None:
         if generation != self._connect_generation:
@@ -5777,6 +5955,7 @@ class ExperimentControlWindow(QWidget):
         self._set_connection_visual(False, f"Connect failed on {port}: {message}")
         self.availability_changed.emit(None)
         _LOGGER.error("Pump connect failed on %s: %s", port, message)
+        self._finish_startup_device_auto_connect_stage("pump")
 
     def _apply_probe(self, probe: PumpProbe) -> None:
         self.protocol_value.setText(probe.protocol_version)
@@ -5853,6 +6032,8 @@ class ExperimentControlWindow(QWidget):
 
     def _auto_connect_pump(self) -> None:
         if not self._auto_connect_devices:
+            return
+        if not self._startup_auto_connect_enabled:
             return
         if self._port_refresh_in_progress:
             return
@@ -6708,7 +6889,7 @@ class ExperimentControlWindow(QWidget):
         if event.type() == QEvent.Type.MouseButtonPress and getattr(obj, "property", None) is not None:
             if bool(obj.property("open_popup_on_click")):
                 combo = self._combo_popup_target(obj)
-                if combo is not None:
+                if combo is not None and getattr(self, "_ui_startup_ready", False):
                     QTimer.singleShot(0, combo.showPopup)
         if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.FocusIn) and getattr(obj, "property", None) is not None:
             if bool(obj.property("flow_navigation")):
@@ -6881,7 +7062,7 @@ class ExperimentControlWindow(QWidget):
     def _apply_experiment_control_step_to_pump(self, step: PumpPlanStep, *, start: bool) -> bool:
         previous = self._applied_plan_step
         _LOGGER.info(
-            "Flow step apply requested | step=%s valve=%s previous_valve=%s pump_connected=%s valve_connected=%s switch_connected=%s running=%s holding=%s start=%s",
+            "Experiment control step apply requested | step=%s valve=%s previous_valve=%s pump_connected=%s valve_connected=%s switch_connected=%s running=%s holding=%s start=%s",
             step.step,
             str(step.valve or "").strip() or "-",
             str(previous.valve or "").strip() if previous is not None else "-",
@@ -7258,41 +7439,44 @@ class ExperimentControlWindow(QWidget):
         self._emit_experimental_control_state(event, step, status=status)
 
     def _advance_experiment_control_progress(self) -> None:
-        if self._plan_holding or self._plan_paused:
-            steps = self._read_experiment_control_steps()
-            if steps:
-                self._sync_experiment_control_timeline(steps, self._plan_active_row, refresh_status=True)
-            return
-        if not self._plan_running or self._plan_started_monotonic is None:
-            return
-        steps = self._read_experiment_control_steps()
-        if not steps:
-            self._stop_experiment_control()
-            return
-        elapsed = self._plan_resume_elapsed_s + max(monotonic() - self._plan_started_monotonic, 0.0)
-        current_row = self._plan_active_row if self._plan_active_row is not None else self._selected_experiment_control_row()
-        if current_row is None or not (0 <= current_row < len(steps)):
-            current_row = 0
-        current_step = steps[current_row]
-        if elapsed >= max(float(current_step.duration_s), 0.0):
-            next_row = current_row + 1
-            if next_row >= len(steps):
-                self._plan_elapsed_s = max(float(current_step.duration_s), 0.0)
-                self._plan_resume_elapsed_s = self._plan_elapsed_s
-                self._stop_experiment_control()
-                self._set_status_message("Experiment plan finished.")
-                _LOGGER.info("Experiment plan finished.")
+        def _callback() -> None:
+            if self._plan_holding or self._plan_paused:
+                steps = self._read_experiment_control_steps()
+                if steps:
+                    self._sync_experiment_control_timeline(steps, self._plan_active_row, refresh_status=True)
                 return
-            self._plan_active_row = next_row
-            self._apply_experiment_control_step_to_pump(steps[next_row], start=True)
-            self._plan_elapsed_s = 0.0
-            self._plan_resume_elapsed_s = 0.0
-            self._plan_started_monotonic = monotonic()
-            self._step_started_monotonic = monotonic()
-            self._sync_experiment_control_timeline(steps, next_row, refresh_status=True)
-            return
-        self._plan_elapsed_s = elapsed
-        self._sync_experiment_control_timeline(steps, current_row, refresh_status=True)
+            if not self._plan_running or self._plan_started_monotonic is None:
+                return
+            steps = self._read_experiment_control_steps()
+            if not steps:
+                self._stop_experiment_control()
+                return
+            elapsed = self._plan_resume_elapsed_s + max(monotonic() - self._plan_started_monotonic, 0.0)
+            current_row = self._plan_active_row if self._plan_active_row is not None else self._selected_experiment_control_row()
+            if current_row is None or not (0 <= current_row < len(steps)):
+                current_row = 0
+            current_step = steps[current_row]
+            if elapsed >= max(float(current_step.duration_s), 0.0):
+                next_row = current_row + 1
+                if next_row >= len(steps):
+                    self._plan_elapsed_s = max(float(current_step.duration_s), 0.0)
+                    self._plan_resume_elapsed_s = self._plan_elapsed_s
+                    self._stop_experiment_control()
+                    self._set_status_message("Experiment plan finished.")
+                    _LOGGER.info("Experiment plan finished.")
+                    return
+                self._plan_active_row = next_row
+                self._apply_experiment_control_step_to_pump(steps[next_row], start=True)
+                self._plan_elapsed_s = 0.0
+                self._plan_resume_elapsed_s = 0.0
+                self._plan_started_monotonic = monotonic()
+                self._step_started_monotonic = monotonic()
+                self._sync_experiment_control_timeline(steps, next_row, refresh_status=True)
+                return
+            self._plan_elapsed_s = elapsed
+            self._sync_experiment_control_timeline(steps, current_row, refresh_status=True)
+
+        self._run_gui_callback_timed("experiment_control_progress", _callback)
 
     def _activate_experiment_control_step_for_elapsed(self, elapsed_s: float, *, force: bool) -> None:
         steps = self._read_experiment_control_steps()
@@ -7604,7 +7788,7 @@ class ExperimentControlWindow(QWidget):
         self._experiment_control_steps_cache = deepcopy(steps)
         self._experiment_control_loaded_widget_rows.clear()
         _LOGGER.info(
-            "Flow bootstrap +%.1f ms: populating %d step(s)",
+            "Experiment control bootstrap +%.1f ms: populating %d step(s)",
             (perf_counter() - self._bootstrap_t0) * 1000.0,
             len(steps),
         )
@@ -7635,7 +7819,7 @@ class ExperimentControlWindow(QWidget):
     def _finalize_experiment_control_bootstrap_population(self, state: dict[str, object], steps: list[PumpPlanStep]) -> None:
         try:
             _LOGGER.info(
-                "Flow bootstrap +%.1f ms: finalizing with %d step(s)",
+                "Experiment control bootstrap +%.1f ms: finalizing with %d step(s)",
                 (perf_counter() - self._bootstrap_t0) * 1000.0,
                 len(steps),
             )
@@ -7672,10 +7856,7 @@ class ExperimentControlWindow(QWidget):
             self._experiment_control_bootstrap_in_progress = False
             self._experiment_control_bootstrap_started = False
             self._set_experiment_control_bootstrap_busy(False)
-            if self._auto_connect_devices:
-                QTimer.singleShot(0, self._auto_connect_pump)
-                QTimer.singleShot(0, self._auto_connect_valve)
-                QTimer.singleShot(0, self._auto_connect_mswitch)
+            self._schedule_startup_device_auto_connect()
 
     def _abort_experiment_control_bootstrap_population(self, message: str) -> None:
         self._experiment_plan_import_fill_timer.stop()
@@ -7734,8 +7915,7 @@ class ExperimentControlWindow(QWidget):
         self._experiment_control_visible_rows_timer.start()
 
     def _load_visible_experiment_control_rows(self, force: bool = False) -> None:
-        _ = force
-        return
+        self._run_gui_callback_timed("experiment_control_visible_rows", lambda: None)
 
     def _restore_ui_state(self) -> None:
         state = self._ui_state
@@ -7771,70 +7951,73 @@ class ExperimentControlWindow(QWidget):
         self._start_maximized = bool(maximized)
 
     def save_ui_state(self) -> None:
-        if self.isMaximized():
-            geometry = self.normalGeometry()
-            width = geometry.width()
-            height = geometry.height()
-            x_pos = geometry.x()
-            y_pos = geometry.y()
-        else:
-            width = self.width()
-            height = self.height()
-            x_pos = self.x()
-            y_pos = self.y()
+        def _callback() -> None:
+            if self.isMaximized():
+                geometry = self.normalGeometry()
+                width = geometry.width()
+                height = geometry.height()
+                x_pos = geometry.x()
+                y_pos = geometry.y()
+            else:
+                width = self.width()
+                height = self.height()
+                x_pos = self.x()
+                y_pos = self.y()
 
-        self._remember_experiment_control_view_mode_sizes()
-        self._remember_experiment_control_view_mode_panel_sizes()
+            self._remember_experiment_control_view_mode_sizes()
+            self._remember_experiment_control_view_mode_panel_sizes()
 
-        save_window_ui_state(
-            "experiment_control_window",
-            {
-                "x": int(x_pos),
-                "y": int(y_pos),
-                "width": int(width),
-                "height": int(height),
-                "maximized": bool(self.isMaximized()),
-                "selected_port": self.selected_port(),
-                "time_unit_mode": self._time_unit_mode,
-                "selected_plan_row": self._selected_experiment_control_row(),
-                "plan_steps": self._serialize_experiment_control_steps(self._read_experiment_control_steps()),
-                "color_palette_entries": [
-                    {"name": name, "color": color}
-                    for name, color in self._color_palette_entries
-                ],
-                "custom_plan_colors": list(self._custom_plan_colors),
-                "tube_mm_values": self._tube_mm_values(),
-                "manual_uniform": self.manual_uniform_button.isChecked(),
-                "show_plan_details": self._show_plan_details,
-                "experiment_control_view_mode": self._experiment_control_view_mode,
-                "experiment_control_view_mode_sizes": dict(self._experiment_control_view_mode_sizes),
-                "experiment_control_view_mode_panel_sizes": dict(self._experiment_control_view_mode_panel_sizes),
-                "plan_table_column_widths": self._plan_table_column_widths(),
-                "plan_table_header_state": self._plan_table_header_state(),
-                "flow_editor_splitter_sizes": self._flow_editor_splitter_sizes(),
-                "editor_duration_s": self._editor_duration_seconds,
-                "editor_color": self.step_color_combo.currentData(),
-                "editor_valve": self.step_valve_button.property("valve"),
-                "editor_switch_position": self._current_switch_position_from_editor(),
-                "editor_comment": self.step_comment_edit.text(),
-                "valve_state_labels": dict(self._valve_state_labels),
-                "valve_state_colors": dict(self._valve_state_colors),
-                "switch_solution_mode": self._switch_solution_mode,
-                "wait_for_mswitch_first": self._wait_for_mswitch_first,
-                "switch_solution_labels": list(self._switch_solution_labels),
-                "pause_state_step": self._serialize_experiment_control_pause_template(),
-                "pause_state_dialog_state": dict(getattr(self, "_pause_state_dialog_state", {})),
-                "editor_channels": [
-                    {
-                        "flow_ul_min": self.manual_flow_spins[index].value(),
-                        "direction": self._direction_button_value(self.manual_direction_buttons[index]),
-                    }
-                    for index in range(ACTIVE_PUMP_CHANNELS)
-                ],
-                "selected_valve_port": self._selected_valve_port(),
-                "selected_mswitch_port": self._selected_mswitch_port(),
-            },
-        )
+            save_window_ui_state(
+                "experiment_control_window",
+                {
+                    "x": int(x_pos),
+                    "y": int(y_pos),
+                    "width": int(width),
+                    "height": int(height),
+                    "maximized": bool(self.isMaximized()),
+                    "selected_port": self.selected_port(),
+                    "time_unit_mode": self._time_unit_mode,
+                    "selected_plan_row": self._selected_experiment_control_row(),
+                    "plan_steps": self._serialize_experiment_control_steps(self._read_experiment_control_steps()),
+                    "color_palette_entries": [
+                        {"name": name, "color": color}
+                        for name, color in self._color_palette_entries
+                    ],
+                    "custom_plan_colors": list(self._custom_plan_colors),
+                    "tube_mm_values": self._tube_mm_values(),
+                    "manual_uniform": self.manual_uniform_button.isChecked(),
+                    "show_plan_details": self._show_plan_details,
+                    "experiment_control_view_mode": self._experiment_control_view_mode,
+                    "experiment_control_view_mode_sizes": dict(self._experiment_control_view_mode_sizes),
+                    "experiment_control_view_mode_panel_sizes": dict(self._experiment_control_view_mode_panel_sizes),
+                    "plan_table_column_widths": self._plan_table_column_widths(),
+                    "plan_table_header_state": self._plan_table_header_state(),
+                    "flow_editor_splitter_sizes": self._flow_editor_splitter_sizes(),
+                    "editor_duration_s": self._editor_duration_seconds,
+                    "editor_color": self.step_color_combo.currentData(),
+                    "editor_valve": self.step_valve_button.property("valve"),
+                    "editor_switch_position": self._current_switch_position_from_editor(),
+                    "editor_comment": self.step_comment_edit.text(),
+                    "valve_state_labels": dict(self._valve_state_labels),
+                    "valve_state_colors": dict(self._valve_state_colors),
+                    "switch_solution_mode": self._switch_solution_mode,
+                    "wait_for_mswitch_first": self._wait_for_mswitch_first,
+                    "switch_solution_labels": list(self._switch_solution_labels),
+                    "pause_state_step": self._serialize_experiment_control_pause_template(),
+                    "pause_state_dialog_state": dict(getattr(self, "_pause_state_dialog_state", {})),
+                    "editor_channels": [
+                        {
+                            "flow_ul_min": self.manual_flow_spins[index].value(),
+                            "direction": self._direction_button_value(self.manual_direction_buttons[index]),
+                        }
+                        for index in range(ACTIVE_PUMP_CHANNELS)
+                    ],
+                    "selected_valve_port": self._selected_valve_port(),
+                    "selected_mswitch_port": self._selected_mswitch_port(),
+                },
+            )
+
+        self._run_gui_callback_timed("experiment_control_save_ui_state", _callback)
 
     def showEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
         super().showEvent(event)

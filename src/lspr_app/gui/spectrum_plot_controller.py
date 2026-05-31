@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QPen
 
 from lspr_app.gui.plot_controller import (
     autoscale_spectrum_plot,
@@ -71,42 +71,91 @@ def residual_color_for_value(value: float, scale: float) -> QColor:
     return QColor(int(round(rgb[0])), int(round(rgb[1])), int(round(rgb[2])))
 
 
+def _residual_pen_for_color(window, color: QColor) -> QPen:
+    cache = getattr(window, "_residual_pen_cache", None)
+    if cache is None:
+        cache = {}
+        window._residual_pen_cache = cache
+    key = (int(color.red()), int(color.green()), int(color.blue()), int(color.alpha()))
+    pen = cache.get(key)
+    if pen is None:
+        pen = pg.mkPen(color, width=1.5)
+        cache[key] = pen
+    return pen
+
+
+def _ensure_residual_segment_item(window, index: int) -> pg.PlotCurveItem:
+    segment_items = getattr(window, "_residual_segment_items", None)
+    if segment_items is None:
+        segment_items = []
+        window._residual_segment_items = segment_items
+    while len(segment_items) <= index:
+        item = pg.PlotCurveItem()
+        item.setVisible(False)
+        window.residual_view.addItem(item)
+        segment_items.append(item)
+    return segment_items[index]
+
+
+def _downsample_residual_series_for_view(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    max_points: int = 192,
+) -> tuple[np.ndarray, np.ndarray]:
+    if len(x) <= max_points:
+        return x, y
+    if max_points < 2:
+        max_points = 2
+    indices = np.linspace(0, len(x) - 1, num=max_points, dtype=np.int64)
+    indices = np.unique(indices)
+    if len(indices) < 2:
+        indices = np.asarray([0, len(x) - 1], dtype=np.int64)
+    return x[indices], y[indices]
+
+
 def clear_residual_display(window) -> None:
     window.residual_curve.setData([], [])
     for item in getattr(window, "_residual_segment_items", []):
         try:
-            window.residual_view.removeItem(item)
+            item.setData([], [])
+            item.setVisible(False)
         except Exception:
             pass
-    window._residual_segment_items = []
 
 
 def render_residual_display(window, x_values: np.ndarray, residual_values: np.ndarray) -> None:
-    clear_residual_display(window)
     if len(x_values) == 0 or len(residual_values) == 0:
+        clear_residual_display(window)
         return
     finite = np.isfinite(x_values) & np.isfinite(residual_values)
     if not np.any(finite):
+        clear_residual_display(window)
         return
     x = np.asarray(x_values[finite], dtype=np.float64)
     y = np.asarray(residual_values[finite], dtype=np.float64)
     if len(x) == 0:
+        clear_residual_display(window)
         return
+    x, y = _downsample_residual_series_for_view(x, y)
     scale = float(np.percentile(np.abs(y), 95)) if len(y) > 1 else float(np.max(np.abs(y)))
     scale = max(scale, float(np.max(np.abs(y))), 1e-9)
-    segment_items: list[pg.PlotCurveItem] = []
+    segment_count = max(len(x) - 1, 0)
     if len(x) >= 2:
         for idx in range(len(x) - 1):
             value_scale = max(abs(float(y[idx])), abs(float(y[idx + 1])))
             color = residual_color_for_value(value_scale, scale)
-            segment = pg.PlotCurveItem(
-                x=x[idx : idx + 2],
-                y=y[idx : idx + 2],
-                pen=pg.mkPen(color, width=1.5),
-            )
-            window.residual_view.addItem(segment)
-            segment_items.append(segment)
-    window._residual_segment_items = segment_items
+            segment = _ensure_residual_segment_item(window, idx)
+            segment.setData(x=x[idx : idx + 2], y=y[idx : idx + 2])
+            segment.setPen(_residual_pen_for_color(window, color))
+            segment.setVisible(True)
+        for idx in range(segment_count, len(getattr(window, "_residual_segment_items", []))):
+            try:
+                item = window._residual_segment_items[idx]
+                item.setData([], [])
+                item.setVisible(False)
+            except Exception:
+                pass
     window.residual_curve.setData(x=x, y=y)
     window.residual_curve.setPen(pg.mkPen((0, 0, 0, 0), width=0))
 

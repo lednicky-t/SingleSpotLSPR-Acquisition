@@ -4,7 +4,7 @@ from datetime import datetime
 import pyqtgraph as pg
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QLabel, QSplitter, QSplitterHandle, QToolButton, QVBoxLayout, QSizePolicy, QWidget
 
 
@@ -240,3 +240,30 @@ class InlineWheelDoubleLabel(QLabel):
     def _refresh_text(self) -> None:
         number = f"{self._value:.{self._decimals}f}"
         self.setText(f"{number}{self._suffix}")
+
+
+class ElidingLabel(QLabel):
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full_text = str(text)
+        self.setWordWrap(False)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._refresh_elided_text()
+
+    def setText(self, text: str) -> None:  # type: ignore[override]
+        self._full_text = str(text)
+        self._refresh_elided_text()
+
+    def setFont(self, font) -> None:  # type: ignore[override]
+        super().setFont(font)
+        self._refresh_elided_text()
+
+    def resizeEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
+        super().resizeEvent(event)
+        self._refresh_elided_text()
+
+    def _refresh_elided_text(self) -> None:
+        metrics = QFontMetrics(self.font())
+        available_width = max(self.width() - 4, 20)
+        super().setText(metrics.elidedText(self._full_text, Qt.TextElideMode.ElideRight, available_width))

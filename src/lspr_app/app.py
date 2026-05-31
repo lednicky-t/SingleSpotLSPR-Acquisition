@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import ctypes
 import os
 import socket
@@ -25,9 +26,16 @@ from PyQt6.QtWidgets import (
 )
 
 from lspr_ui import app_icon, apply_base_app_theme
-from lspr_app.storage.app_config import save_app_setting
+from lspr_app.storage.app_config import load_app_setting, save_app_setting
 
 from lspr_app import __version__
+from lspr_app.gui.main_window_logging import build_recording_experiment_log_path
+from lspr_core import (
+    DEFAULT_LAUNCH_PROFILE,
+    LAUNCH_PROFILE_ENV_VAR,
+    launch_profile_spec,
+    normalize_launch_profile,
+)
 
 
 def _brand_logo_path() -> Path:
@@ -322,8 +330,13 @@ class StartupLoader(QObject):
     finished = pyqtSignal(object)
     failed = pyqtSignal(str)
 
+    def __init__(self, launch_profile: str = DEFAULT_LAUNCH_PROFILE) -> None:
+        super().__init__()
+        self._launch_profile_key = normalize_launch_profile(launch_profile)
+
     def run(self) -> None:
         try:
+            profile = launch_profile_spec(self._launch_profile_key)
             self.progress.emit(4, "Checking for an already running instance...")
             lock = QLockFile(str(_lock_file_path()))
             self.progress.emit(6, "Waiting for previous instance to close...")
@@ -339,29 +352,33 @@ class StartupLoader(QObject):
             from lspr_app.domain.session import MeasurementSession
 
             self.progress.emit(30, "Preparing spectrometer backend...")
-            spectrometer = create_spectrometer()
+            spectrometer = create_spectrometer(force_simulator=profile.force_simulator)
             session = MeasurementSession()
 
-            self.progress.emit(45, "Checking connected devices...")
-            pump_probe = discover_pump()
+            if profile.scan_devices:
+                self.progress.emit(45, "Checking connected devices...")
+                pump_probe = discover_pump()
+            else:
+                self.progress.emit(45, "Skipping connected device lookup for this launch mode.")
+                pump_probe = None
 
             self.progress.emit(60, "Loading user interface...")
             from lspr_app.gui.experiment_control_window import ExperimentControlWindow  # noqa: F401
             from lspr_app.gui.main_window import MainWindow
 
             self.progress.emit(88, "Building main window...")
-            self.finished.emit((lock, spectrometer, session, pump_probe, MainWindow))
+            self.finished.emit((lock, spectrometer, session, pump_probe, MainWindow, self._launch_profile_key))
         except Exception as exc:  # pragma: no cover - startup failure path
             self.failed.emit(str(exc))
 
 
-def create_spectrometer():
+def create_spectrometer(*, force_simulator: bool = False):
     from lspr_app.device.base import SpectrometerError
     from lspr_app.device.ocean import OceanSpectrometer
     from lspr_app.device.simulated import SimulatedSpectrometer
 
-    force_simulator = os.environ.get("LSPR_FORCE_SIMULATOR", "").lower() in {"1", "true", "yes"}
-    if force_simulator:
+    force_env = os.environ.get("LSPR_FORCE_SIMULATOR", "").lower() in {"1", "true", "yes"}
+    if force_simulator or force_env:
         return SimulatedSpectrometer()
 
     try:
@@ -388,7 +405,33 @@ def discover_pump():
     return None
 
 
+def _attach_startup_file_logging() -> logging.Handler | None:
+    project_destination = str(load_app_setting("recording_project_destination", "") or "").strip()
+    experiment_name = str(load_app_setting("recording_experiment_name", "") or "").strip()
+    try:
+        log_path = build_recording_experiment_log_path(
+            project_destination,
+            experiment_name,
+            prefix="startup_log",
+            suffix=".log",
+        )
+    except Exception:
+        return None
+
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s %(message)s", "%H:%M:%S"))
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(handler)
+    logging.getLogger("lspr_app").setLevel(logging.INFO)
+    logging.getLogger("lspr_app.bootstrap").setLevel(logging.INFO)
+    return handler
+
+
 def main() -> None:
+    file_handler = _attach_startup_file_logging()
     app = QApplication(sys.argv)
     app.setApplicationDisplayName("LSPR Acquisition")
     app.setApplicationVersion(__version__)
@@ -399,7 +442,7 @@ def main() -> None:
     splash.show_centered()
 
     loader_thread = QThread()
-    loader = StartupLoader()
+    loader = StartupLoader(os.environ.get(LAUNCH_PROFILE_ENV_VAR, DEFAULT_LAUNCH_PROFILE))
     loader.moveToThread(loader_thread)
     loader.progress.connect(splash.update_progress)
 
@@ -411,7 +454,7 @@ def main() -> None:
 
     def _show_main_window(payload: object) -> None:
         try:
-            instance_lock, spectrometer, session, pump_probe, main_window_cls = payload  # type: ignore[misc]
+            instance_lock, spectrometer, session, pump_probe, main_window_cls, launch_profile = payload  # type: ignore[misc]
         except Exception as exc:  # pragma: no cover - defensive startup path
             splash.close()
             QMessageBox.critical(None, "Startup error", f"Failed to unpack startup payload: {exc}")
@@ -419,7 +462,12 @@ def main() -> None:
             return
         splash.update_progress(100, "Ready.")
         app.instance_lock = instance_lock
-        window = main_window_cls(spectrometer=spectrometer, session=session, discovered_pump_probe=pump_probe)
+        window = main_window_cls(
+            spectrometer=spectrometer,
+            session=session,
+            discovered_pump_probe=pump_probe,
+            launch_profile=launch_profile,
+        )
         app.main_window = window
         window._startup_show_requested_t0 = perf_counter()
         window.show()
@@ -437,4 +485,10 @@ def main() -> None:
     loader_thread.started.connect(loader.run)
     loader_thread.start()
 
-    sys.exit(app.exec())
+    try:
+        sys.exit(app.exec())
+    finally:
+        if file_handler is not None:
+            root_logger = logging.getLogger()
+            root_logger.removeHandler(file_handler)
+            file_handler.close()

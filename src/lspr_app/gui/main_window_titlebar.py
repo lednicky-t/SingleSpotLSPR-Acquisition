@@ -4,6 +4,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QMenuBar, QWidget
 
+from lspr_core import DEFAULT_LAUNCH_PROFILE, launch_profile_spec
 from lspr_app.device.connection_registry import snapshot_port_ownership
 from lspr_app.gui.icon_helpers import device_status_icon
 from lspr_app.gui.ui_helpers import make_window_button, window_control_icon
@@ -35,6 +36,10 @@ def device_status_tooltip(label_text: str, state: str, *, port_name: str = "", d
 
 
 def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
+    profile = getattr(window, "_launch_profile_spec", None)
+    if profile is None:
+        profile = launch_profile_spec(DEFAULT_LAUNCH_PROFILE)
+
     brand_icon_label = QLabel()
     brand_icon_label.setObjectName("brandIconLabel")
     brand_icon_label.setFixedSize(22, 22)
@@ -60,6 +65,7 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
     center_layout.addWidget(window._window_mode_label)
     center_layout.addWidget(window._window_mode_icon_label)
     center_cluster.setLayout(center_layout)
+    window._window_mode_cluster = center_cluster
 
     window._window_min_button = make_window_button(
         window_control_icon("minimize"),
@@ -119,6 +125,8 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
         status_layout.addWidget(item)
         window._hw_status_items.append((key, icon_label, text_label))
     status_cluster.setLayout(status_layout)
+    status_cluster.setVisible(bool(profile.show_device_statuses))
+    window._titlebar_status_cluster = status_cluster
 
     left_cluster = QWidget()
     left_layout = QHBoxLayout()
@@ -153,12 +161,21 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
     title_layout.addWidget(right_cluster, 0, 2, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
     title_widget.setLayout(title_layout)
     title_widget.installEventFilter(window)
+    window._update_window_mode_label()
     return title_widget
 
 
 def refresh_hw_device_status_strip(window) -> None:
     items = getattr(window, "_hw_status_items", None)
     if not items:
+        return
+    profile = getattr(window, "_launch_profile_spec", None)
+    if profile is None:
+        profile = launch_profile_spec(DEFAULT_LAUNCH_PROFILE)
+    status_cluster = getattr(window, "_titlebar_status_cluster", None)
+    if status_cluster is not None:
+        status_cluster.setVisible(bool(profile.show_device_statuses))
+    if not bool(profile.show_device_statuses):
         return
     experiment_control_window = getattr(window, "_experiment_control_window", None)
     if experiment_control_window is not None and hasattr(experiment_control_window, "synchronize_device_connections"):

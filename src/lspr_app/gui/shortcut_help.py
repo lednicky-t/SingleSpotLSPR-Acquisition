@@ -13,7 +13,7 @@ def build_shortcuts_help_text() -> str:
         "Ctrl+E = Export current plot\n"
         "Ctrl+Space = Start or stop measurement\n\n"
         "Spectrum and sensorgram\n"
-        "Ctrl+L = Clear trace history\n"
+        "Ctrl+L = Clear metric history\n"
         "Ctrl+Left = Previous pump-plan step\n"
         "Ctrl+Right = Next pump-plan step\n"
         "Click a metric name = switch the displayed sensorgram metric\n"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from time import perf_counter
 
 from PyQt6.QtCore import QRectF
 
@@ -12,7 +13,7 @@ from lspr_app.domain.models import Spectrum
 from lspr_app.gui.history_utils import trim_history_tail_in_place
 
 
-def _current_trace_view_state(window) -> tuple[float | None, float | None, float | None]:
+def _current_metric_view_state(window) -> tuple[float | None, float | None, float | None]:
     trace_plot = getattr(window, "trace_plot", None)
     if trace_plot is None:
         return None, None, None
@@ -75,7 +76,7 @@ def _peak_preserving_downsample_indices(y: np.ndarray, target_bins: int) -> np.n
     return np.unique(np.asarray(keep, dtype=np.int64))
 
 
-def downsample_trace_series_for_view(
+def downsample_metric_series_for_view(
     x: np.ndarray,
     y: np.ndarray,
     *,
@@ -83,9 +84,9 @@ def downsample_trace_series_for_view(
     view_x_max: float | None = None,
     view_width_px: float | None = None,
     enabled: bool = True,
-    minimum_points: int = 256,
-    oversample: float = 2.0,
-    default_points: int = 4096,
+    minimum_points: int = 128,
+    oversample: float = 1.0,
+    default_points: int = 2048,
 ) -> tuple[np.ndarray, np.ndarray]:
     if len(x) == 0 or len(y) == 0:
         return x, y
@@ -117,6 +118,17 @@ def downsample_trace_series_for_view(
     if len(x) <= target_points:
         return x, y
 
+    if view_x_min is not None and view_x_max is not None and view_x_max > view_x_min:
+        # The history is appended in time order, so binary search is cheaper than
+        # building a full boolean mask on every refresh.
+        start = int(np.searchsorted(x, view_x_min, side="left"))
+        stop = int(np.searchsorted(x, view_x_max, side="right"))
+        if stop > start:
+            start = max(start - 1, 0)
+            stop = min(stop + 1, len(x))
+            x = x[start:stop]
+            y = y[start:stop]
+
     target_bins = max(1, target_points // 2)
     keep = _peak_preserving_downsample_indices(y, target_bins)
     if len(keep) == 0:
@@ -132,15 +144,15 @@ def downsample_spectrum_series_for_view(
     view_x_max: float | None = None,
     view_width_px: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    return downsample_trace_series_for_view(
+    return downsample_metric_series_for_view(
         x,
         y,
         view_x_min=view_x_min,
         view_x_max=view_x_max,
         view_width_px=view_width_px,
-        minimum_points=192,
-        oversample=1.5,
-        default_points=2048,
+        minimum_points=128,
+        oversample=1.0,
+        default_points=1024,
     )
 
 
@@ -237,41 +249,45 @@ def downsample_sensorgram_history_for_view(
 
 
 def flush_deferred_ui_refreshes(window) -> None:
-    if window._plots_frozen:
-        return
     did_work = False
     refresh_state = getattr(window, "_ui_refresh_state", None)
     if getattr(refresh_state, "live_estimate_dirty", False):
+        started = perf_counter()
         window._update_live_estimate()
+        window._last_deferred_ui_live_estimate_ms = (perf_counter() - started) * 1000.0
         refresh_state.live_estimate_dirty = False
         did_work = True
     if getattr(refresh_state, "telemetry_dirty", False):
+        started = perf_counter()
         window._refresh_telemetry()
+        window._last_deferred_ui_telemetry_ms = (perf_counter() - started) * 1000.0
         refresh_state.telemetry_dirty = False
         did_work = True
-    if getattr(refresh_state, "trace_plot_dirty", False) and not bool(getattr(window, "_sensorgram_frozen", False)):
-        window._refresh_trace_plot(refresh_state.pending_trace_label or "Peak position (nm)")
-        refresh_state.trace_plot_dirty = False
+    if getattr(refresh_state, "metric_plot_dirty", False) and not bool(getattr(window, "_sensorgram_frozen", False)):
+        started = perf_counter()
+        window._refresh_trace_plot(refresh_state.pending_metric_label or "Peak position (nm)")
+        window._last_deferred_ui_trace_plot_ms = (perf_counter() - started) * 1000.0
+        refresh_state.metric_plot_dirty = False
         did_work = True
     if getattr(refresh_state, "summary_dirty", False):
+        started = perf_counter()
         window._refresh_session_summary()
+        window._last_deferred_ui_summary_ms = (perf_counter() - started) * 1000.0
         refresh_state.summary_dirty = False
         did_work = True
     if getattr(refresh_state, "stats_dirty", False):
+        started = perf_counter()
         window._update_spectrum_stats(window._last_processed_plot, window._last_fit_plot)
         window._update_trace_stats()
+        window._last_deferred_ui_stats_ms = (perf_counter() - started) * 1000.0
         refresh_state.stats_dirty = False
-        did_work = True
-    if getattr(refresh_state, "session_stats_dirty", False):
-        window._refresh_session_statistics()
-        refresh_state.session_stats_dirty = False
         did_work = True
     if did_work:
         window._log_throttled(
             "ui_flush",
             (
                 "UI flush | trace_dirty="
-                f"{int(bool(getattr(refresh_state, 'trace_plot_dirty', False)))} | "
+                f"{int(bool(getattr(refresh_state, 'metric_plot_dirty', False)))} | "
                 f"stats_dirty={int(bool(getattr(refresh_state, 'stats_dirty', False)))} | "
                 f"display_rate={window.live_rate_spin.value():.2f} Hz"
             ),
@@ -287,10 +303,29 @@ def flush_plot_refreshes(window) -> None:
             refresh_state.plot_render_dirty = False
         return
     if getattr(refresh_state, "plot_render_dirty", False):
+        started = perf_counter()
+        previous_finish = getattr(window, "_last_plot_refresh_finished_at", None)
         plot_mode = window.PLOT_MODES[window.plot_selector.currentText()]
         plot_spectrum = window._session.get_plot_data(plot_mode)
         plot_fit = window._last_fit_plot if plot_mode in {"sample", "absorbance"} else None
         window._refresh_spectrum_plot(plot_spectrum, plot_fit)
+        finished = perf_counter()
+        window._last_plot_refresh_ms = (finished - started) * 1000.0
+        window._last_plot_refresh_gap_ms = None if previous_finish is None else (finished - float(previous_finish)) * 1000.0
+        window._last_plot_refresh_finished_at = finished
+        if window._last_plot_refresh_gap_ms is not None and window._last_plot_refresh_gap_ms > 0:
+            window._actual_plot_refresh_rate_hz = 1000.0 / window._last_plot_refresh_gap_ms
+        else:
+            window._actual_plot_refresh_rate_hz = None
+        if processing_debug_mode_enabled():
+            gap_text = "-" if window._last_plot_refresh_gap_ms is None else f"{window._last_plot_refresh_gap_ms:.2f} ms"
+            actual_text = "-" if window._actual_plot_refresh_rate_hz is None else f"{window._actual_plot_refresh_rate_hz:.2f} Hz"
+            window._log_throttled(
+                "gui_plot_refresh",
+                f"GUI plot refresh: {window._last_plot_refresh_ms:.2f} ms | gap={gap_text} | actual={actual_text}",
+                level=logging.INFO,
+                min_interval=0.5,
+            )
         refresh_state.plot_render_dirty = False
 
 
@@ -311,15 +346,26 @@ def autoscale_spectrum_plot(window) -> None:
         return
     y = y[finite]
     x_finite = x[finite]
-    x_pad = max((float(np.max(x_finite)) - float(np.min(x_finite))) * 0.01, 1e-6)
     y_span = float(np.max(y) - np.min(y))
     y_pad = max(y_span * 0.08, 1e-6)
-    window.spectrum_plot.setXRange(float(np.min(x_finite)) - x_pad, float(np.max(x_finite)) + x_pad, padding=0.0)
+    window.spectrum_plot.setXRange(float(np.min(x_finite)), float(np.max(x_finite)), padding=0.0)
     window.spectrum_plot.setYRange(float(np.min(y)) - y_pad, float(np.max(y)) + y_pad, padding=0.0)
     window._autoscale_residual_axis()
 
 
-def autoscale_trace_plot(window) -> None:
+def apply_processing_range_to_spectrum_plot(window) -> None:
+    settings = window._current_processing_settings()
+    low = float(min(settings.wavelength_min_nm, settings.wavelength_max_nm))
+    high = float(max(settings.wavelength_min_nm, settings.wavelength_max_nm))
+    if not np.isfinite(low) or not np.isfinite(high):
+        return
+    if high <= low:
+        high = low + 1e-6
+    window.spectrum_plot.setXRange(low, high, padding=0.0)
+    window._spectrum_render_cache_key = None
+
+
+def autoscale_metric_plot(window) -> None:
     content_mode = getattr(window, "_sensorgram_content_mode", "metric")
     if content_mode == "heatmap":
         window._trace_view_autoscaling = True
@@ -409,73 +455,79 @@ def update_residual_axis_visibility(window, visible: bool | None = None) -> None
         window.residual_view.setVisible(visible)
 
 
-def request_trace_autoscale(window) -> None:
-    if window._plots_frozen or bool(getattr(window, "_sensorgram_frozen", False)):
+def request_metric_autoscale(window) -> None:
+    if bool(getattr(window, "_sensorgram_frozen", False)):
         return
     window._trace_autoscale_timer.start()
 
 
-def refresh_trace_plot(window, trace_label: str) -> None:
+def refresh_metric_plot(window, trace_label: str) -> None:
     if window._plots_frozen:
         return
+    started = perf_counter()
     clock_mode = not bool(window._measurement_active)
     content_mode = getattr(window, "_sensorgram_content_mode", "metric")
+    if content_mode != "heatmap":
+        window._last_sensorgram_heatmap_render_ms = None
     active_series = window._active_trace_series()
-    if content_mode == "heatmap":
-        window._visible_trace_mode = "clock" if clock_mode else "elapsed"
-        window.trace_time_axis.set_mode("clock" if clock_mode else "elapsed")
-        window.trace_plot.setLabel("left", "Wavelength (nm)")
-        window.trace_plot.setLabel("bottom", "Time (local)" if clock_mode else "Time (s)")
+    try:
+        if content_mode == "heatmap":
+            window._visible_trace_mode = "clock" if clock_mode else "elapsed"
+            window.trace_time_axis.set_mode("clock" if clock_mode else "elapsed")
+            window.trace_plot.setLabel("left", "Wavelength (nm)")
+            window.trace_plot.setLabel("bottom", "Time (local)" if clock_mode else "Time (s)")
+            if active_series:
+                render_metric_series(window, active_series, clock_mode=clock_mode)
+            else:
+                for curve in window.trace_curves.values():
+                    curve.setData([], [])
+                    curve.setVisible(False)
+            render_sensorgram_heatmap(window, window._sensorgram_heatmap_history, clock_mode=clock_mode)
+            request_metric_autoscale(window)
+            return
         if active_series:
-            render_trace_series(window, active_series, clock_mode=clock_mode)
-        else:
+            window._visible_trace_mode = "clock" if clock_mode else "elapsed"
+            window.trace_time_axis.set_mode("clock" if clock_mode else "elapsed")
+            window.trace_plot.setLabel("left", trace_label)
+            window.trace_plot.setLabel("bottom", "Time (local)" if clock_mode else "Time (s)")
+            render_metric_series(window, active_series, clock_mode=clock_mode)
+            window.trace_heatmap_image.setVisible(False)
+            if hasattr(window, "trace_legend"):
+                window.trace_legend.setVisible(True)
             for curve in window.trace_curves.values():
-                curve.setData([], [])
-                curve.setVisible(False)
-        render_sensorgram_heatmap(window, window._sensorgram_heatmap_history, clock_mode=clock_mode)
-        request_trace_autoscale(window)
-        return
-    if active_series:
-        window._visible_trace_mode = "clock" if clock_mode else "elapsed"
+                curve.setVisible(True)
+            request_metric_autoscale(window)
+            return
+
+        if content_mode == "heatmap":
+            window.trace_plot.setLabel("left", "Wavelength (nm)")
+        else:
+            window.trace_plot.setLabel("left", trace_label)
         window.trace_time_axis.set_mode("clock" if clock_mode else "elapsed")
-        window.trace_plot.setLabel("left", trace_label)
         window.trace_plot.setLabel("bottom", "Time (local)" if clock_mode else "Time (s)")
-        render_trace_series(window, active_series, clock_mode=clock_mode)
-        window.trace_heatmap_image.setVisible(False)
-        if hasattr(window, "trace_legend"):
-            window.trace_legend.setVisible(True)
         for curve in window.trace_curves.values():
-            curve.setVisible(True)
-        request_trace_autoscale(window)
-        return
-
-    if content_mode == "heatmap":
-        window.trace_plot.setLabel("left", "Wavelength (nm)")
-    else:
-        window.trace_plot.setLabel("left", trace_label)
-    window.trace_time_axis.set_mode("clock" if clock_mode else "elapsed")
-    window.trace_plot.setLabel("bottom", "Time (local)" if clock_mode else "Time (s)")
-    for curve in window.trace_curves.values():
-        curve.setData([], [])
-        curve.setVisible(content_mode != "heatmap")
-    if hasattr(window, "trace_heatmap_image"):
-        window.trace_heatmap_image.setVisible(False)
-    if hasattr(window, "trace_legend"):
-        window.trace_legend.setVisible(content_mode != "heatmap")
-    window._visible_trace_x = None
-    window._visible_trace_y = None
-    window._visible_trace_mode = "clock" if clock_mode else "elapsed"
-    request_trace_autoscale(window)
-    window._log_throttled(
-        "trace_refresh",
-        f"Trace updated | {trace_label}",
-        level=logging.DEBUG,
-        min_interval=1.5,
-    )
-    request_trace_autoscale(window)
+            curve.setData([], [])
+            curve.setVisible(content_mode != "heatmap")
+        if hasattr(window, "trace_heatmap_image"):
+            window.trace_heatmap_image.setVisible(False)
+        if hasattr(window, "trace_legend"):
+            window.trace_legend.setVisible(content_mode != "heatmap")
+        window._visible_trace_x = None
+        window._visible_trace_y = None
+        window._visible_trace_mode = "clock" if clock_mode else "elapsed"
+        request_metric_autoscale(window)
+        window._log_throttled(
+            "trace_refresh",
+            f"Metric updated | {trace_label}",
+            level=logging.DEBUG,
+            min_interval=1.5,
+        )
+        request_metric_autoscale(window)
+    finally:
+        window._last_sensorgram_render_ms = (perf_counter() - started) * 1000.0
 
 
-def render_trace_series(
+def render_metric_series(
     window,
     history: dict[str, tuple[np.ndarray, np.ndarray] | list[tuple[object, float]]],
     clock_mode: bool,
@@ -497,17 +549,17 @@ def render_trace_series(
 
     view_mode = getattr(window, "_sensorgram_view_mode", "absolute")
     trace_view_locked = bool(getattr(window, "_trace_view_locked", False))
-    _, _, view_width_px = _current_trace_view_state(window)
+    _, _, view_width_px = _current_metric_view_state(window)
     view_x_min = view_x_max = None
     if trace_view_locked:
-        view_x_min, view_x_max, view_width_px = _current_trace_view_state(window)
+        view_x_min, view_x_max, view_width_px = _current_metric_view_state(window)
     elif view_mode == "rolling" and len(history) > 0:
         latest_x = None
         for series in history.values():
             x_values, _ = _series_to_arrays(series)
             if len(x_values) == 0:
                 continue
-            series_latest = float(np.nanmax(x_values))
+            series_latest = float(x_values[-1])
             if latest_x is None or series_latest > latest_x:
                 latest_x = series_latest
         if latest_x is not None:
@@ -524,7 +576,7 @@ def render_trace_series(
         if len(x) == 0 or len(y) == 0:
             curve.setData([], [])
             continue
-        x, y = downsample_trace_series_for_view(
+        x, y = downsample_metric_series_for_view(
             x,
             y,
             view_x_min=view_x_min,
@@ -537,12 +589,12 @@ def render_trace_series(
 
     primary_name = window._primary_trace_metric()
     if primary_name in active_series:
-        window._visible_trace_x = active_series[primary_name][0].copy()
-        window._visible_trace_y = active_series[primary_name][1].copy()
+        window._visible_trace_x = active_series[primary_name][0]
+        window._visible_trace_y = active_series[primary_name][1]
     elif active_series:
         first_series = next(iter(active_series.values()))
-        window._visible_trace_x = first_series[0].copy()
-        window._visible_trace_y = first_series[1].copy()
+        window._visible_trace_x = first_series[0]
+        window._visible_trace_y = first_series[1]
     else:
         window._visible_trace_x = None
         window._visible_trace_y = None
@@ -563,12 +615,13 @@ def render_sensorgram_heatmap(
             window.trace_legend.setVisible(False)
         return
 
+    started = perf_counter()
     view_mode = getattr(window, "_sensorgram_view_mode", "absolute")
     trace_view_locked = bool(getattr(window, "_trace_view_locked", False))
-    _, _, _view_width_px = _current_trace_view_state(window)
+    _, _, _view_width_px = _current_metric_view_state(window)
     view_x_min = view_x_max = None
     if trace_view_locked:
-        view_x_min, view_x_max, _view_width_px = _current_trace_view_state(window)
+        view_x_min, view_x_max, _view_width_px = _current_metric_view_state(window)
     elif view_mode == "rolling" and len(history) > 0:
         latest_x = float(history[-1][0])
         window_span = max(float(getattr(window, "_trace_display_window_s", 60.0)), 1e-9)
@@ -602,7 +655,7 @@ def render_sensorgram_heatmap(
         window.trace_heatmap_image.setVisible(False)
         return
 
-    values = [np.asarray(item[1], dtype=np.float64) for item in history]
+    values = [item[1] for item in history]
     expected_length = len(wavelengths)
     if any(len(row) != expected_length for row in values):
         window.trace_heatmap_image.setVisible(False)
@@ -645,12 +698,25 @@ def render_sensorgram_heatmap(
         curve.setVisible(False)
     if hasattr(window, "trace_legend"):
         window.trace_legend.setVisible(False)
-    window._visible_trace_x = times.copy()
+    window._visible_trace_x = times
     safe_matrix = np.where(np.isfinite(matrix), matrix, -np.inf)
     row_max = np.max(safe_matrix, axis=1)
     row_max[~np.isfinite(row_max)] = np.nan
     window._visible_trace_y = row_max
     window._visible_trace_mode = "clock" if clock_mode else "elapsed"
+    elapsed_ms = (perf_counter() - started) * 1000.0
+    window._last_sensorgram_heatmap_render_ms = elapsed_ms
+    if elapsed_ms >= 2.0:
+        window._log_throttled(
+            "sensorgram_heatmap_render",
+            (
+                "Sensorgram heatmap render "
+                f"| rows={len(history)} | cols={len(wavelengths)} | "
+                f"mode={view_mode} | {elapsed_ms:.2f} ms"
+            ),
+            level=logging.INFO,
+            min_interval=1.0,
+        )
 
 
 def update_spectrum_stats(window, processed: Spectrum | None, fit: Spectrum | None) -> None:
@@ -688,7 +754,7 @@ def update_spectrum_stats(window, processed: Spectrum | None, fit: Spectrum | No
     window.spectrum_cursor_label.setText(window._spectrum_cursor_text)
 
 
-def update_trace_stats(window) -> None:
+def update_metric_stats(window) -> None:
     series = window._active_trace_series()
     metric_name = window._trace_stats_metric()
     metric_label = window.TRACE_METRIC_LABELS.get(metric_name, metric_name)
@@ -774,7 +840,7 @@ def handle_spectrum_mouse_moved(window, event) -> None:
     window.spectrum_cursor_label.setText(window._spectrum_cursor_text)
 
 
-def handle_trace_mouse_moved(window, event) -> None:
+def handle_metric_mouse_moved(window, event) -> None:
     pos = event[0]
     if not window.trace_plot.sceneBoundingRect().contains(pos):
         return
@@ -822,3 +888,13 @@ def handle_trace_mouse_moved(window, event) -> None:
             cursor_x = f"{x:.3f}"
     window._trace_cursor_text = f"cursor: {cursor_x}, {y:.3f} nm"
     window.trace_cursor_label.setText(window._trace_cursor_text)
+
+
+_current_trace_view_state = _current_metric_view_state
+downsample_trace_series_for_view = downsample_metric_series_for_view
+autoscale_trace_plot = autoscale_metric_plot
+request_trace_autoscale = request_metric_autoscale
+refresh_trace_plot = refresh_metric_plot
+render_trace_series = render_metric_series
+update_trace_stats = update_metric_stats
+handle_trace_mouse_moved = handle_metric_mouse_moved

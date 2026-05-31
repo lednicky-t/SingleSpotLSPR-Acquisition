@@ -14,5 +14,6 @@ Deferred design notes:
 - [`experiment-control/experiment_plan_migration_plan.md`](./experiment-control/experiment_plan_migration_plan.md)
 - [`experiment-control/experiment_plan_execution_model.md`](./experiment-control/experiment_plan_execution_model.md)
 - [`experiment-control/pause_row_implementation_checklist.md`](./experiment-control/pause_row_implementation_checklist.md)
+- [`docs/architecture/apps/sLSPR/acq/two_level_gui_scheduler.md`](../../../../docs/architecture/apps/sLSPR/acq/two_level_gui_scheduler.md)
 
 Keep large driver installers out of the repo unless offline reproducibility is required.

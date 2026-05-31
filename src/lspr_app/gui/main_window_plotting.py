@@ -12,7 +12,12 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPixmap
 
 from lspr_app.gui.icon_helpers import math_function_tab_icon, prism_tab_icon, transport_icon
-from lspr_app.gui.plot_controller import flush_deferred_ui_refreshes as _flush_deferred_ui_refreshes, flush_plot_refreshes as _flush_plot_refreshes, refresh_plot as _refresh_plot
+from lspr_app.gui.plot_controller import (
+    apply_processing_range_to_spectrum_plot as _apply_processing_range_to_spectrum_plot,
+    flush_deferred_ui_refreshes as _flush_deferred_ui_refreshes,
+    flush_plot_refreshes as _flush_plot_refreshes,
+    refresh_plot as _refresh_plot,
+)
 from lspr_app.gui.spectrum_plot_controller import (
     autoscale_residual_axis as _autoscale_residual_axis,
     autoscale_spectrum_plot as _autoscale_spectrum_plot,
@@ -22,12 +27,12 @@ from lspr_app.gui.spectrum_plot_controller import (
     update_spectrum_stats as _update_spectrum_stats,
 )
 from lspr_app.gui.trace_plot_controller import (
-    autoscale_trace_plot as _autoscale_trace_plot,
-    handle_trace_mouse_moved as _handle_trace_mouse_moved,
-    refresh_trace_plot as _refresh_trace_plot,
-    render_trace_series as _render_trace_series,
-    request_trace_autoscale as _request_trace_autoscale,
-    update_trace_stats as _update_trace_stats,
+    autoscale_metric_plot as _autoscale_metric_plot,
+    handle_metric_mouse_moved as _handle_metric_mouse_moved,
+    refresh_metric_plot as _refresh_metric_plot,
+    render_metric_series as _render_metric_series,
+    request_metric_autoscale as _request_metric_autoscale,
+    update_metric_stats as _update_metric_stats,
 )
 from lspr_app.gui.processing_helpers import (
     analysis_cache_token as _analysis_cache_token,
@@ -42,6 +47,7 @@ from lspr_app.gui.processing_helpers import (
     needs_gaussian_metric as _needs_gaussian_metric,
     processing_cache_token as _processing_cache_token,
 )
+from lspr_app.gui.main_window_logging import build_pipeline_timing_breakdown_for, _timing_plain_text
 from lspr_app.gui.workers import ProcessingRequest, ProcessingResult, ProcessingTask
 
 
@@ -236,6 +242,7 @@ def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
     window._update_poly_warning_indicator(fit)
     window._ui_refresh_state.plot_render_dirty = True
     if not window._plot_refresh_timer.isActive():
+        window._plot_refresh_requested_at = perf_counter()
         window._plot_refresh_timer.start()
     window._log_throttled(
         "plot_refresh",
@@ -252,22 +259,29 @@ def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
 
 def flush_deferred_ui_refreshes_for(window) -> None:
     started = perf_counter()
+    requested_at = getattr(window, "_stats_refresh_requested_at", None)
+    if requested_at is not None:
+        try:
+            window._last_stats_refresh_delay_ms = max((started - float(requested_at)) * 1000.0, 0.0)
+        except (TypeError, ValueError):
+            window._last_stats_refresh_delay_ms = None
     refresh_state = getattr(window, "_ui_refresh_state", None)
     summary_dirty = bool(getattr(refresh_state, "summary_dirty", False))
     telemetry_dirty = bool(getattr(refresh_state, "telemetry_dirty", False))
     live_estimate_dirty = bool(getattr(refresh_state, "live_estimate_dirty", False))
     stats_dirty = bool(getattr(refresh_state, "stats_dirty", False))
-    trace_dirty = bool(getattr(refresh_state, "trace_plot_dirty", False))
+    metric_dirty = bool(getattr(refresh_state, "metric_plot_dirty", False))
     _flush_deferred_ui_refreshes(window)
+    elapsed_ms = (perf_counter() - started) * 1000.0
+    window._last_deferred_ui_refresh_ms = elapsed_ms
     if processing_debug_mode_enabled():
-        elapsed_ms = (perf_counter() - started) * 1000.0
         if elapsed_ms >= 2.0:
             window._log_throttled(
                 "gui_deferred_refresh",
                 (
                     f"GUI deferred refresh: {elapsed_ms:.2f} ms | "
                     f"summary={int(summary_dirty)} telemetry={int(telemetry_dirty)} "
-                    f"live_estimate={int(live_estimate_dirty)} stats={int(stats_dirty)} trace={int(trace_dirty)}"
+                    f"live_estimate={int(live_estimate_dirty)} stats={int(stats_dirty)} trace={int(metric_dirty)}"
                 ),
                 level=logging.INFO,
                 min_interval=0.5,
@@ -276,6 +290,12 @@ def flush_deferred_ui_refreshes_for(window) -> None:
 
 def flush_plot_refreshes_for(window) -> None:
     started = perf_counter()
+    requested_at = getattr(window, "_plot_refresh_requested_at", None)
+    if requested_at is not None:
+        try:
+            window._last_plot_refresh_delay_ms = max((started - float(requested_at)) * 1000.0, 0.0)
+        except (TypeError, ValueError):
+            window._last_plot_refresh_delay_ms = None
     _flush_plot_refreshes(window)
     if processing_debug_mode_enabled():
         elapsed_ms = (perf_counter() - started) * 1000.0
@@ -376,7 +396,7 @@ def set_sensorgram_frozen_for(window, frozen: bool) -> None:
     window._update_sensorgram_freeze_button_icon()
     if not frozen:
         window._refresh_trace_plot("Peak position (nm)")
-        window._ui_refresh_state.trace_plot_dirty = False
+        window._ui_refresh_state.metric_plot_dirty = False
         window._request_trace_autoscale()
     window._schedule_acquisition_state_persist()
 
@@ -401,7 +421,7 @@ def clear_trace_history_for(window) -> None:
         window._peak_reference_processed = None
     window._refresh_trace_plot("Peak position (nm)")
     window._update_trace_stats()
-    window.status_label.setText("Trace history cleared.")
+    window.status_label.setText("Metric history cleared.")
 
 
 def compute_centroid_nm_for(window, processed: Spectrum, fit: Spectrum | None) -> float:
@@ -412,7 +432,12 @@ def reference_peak_nm_for_shift_for(window) -> float | None:
     reference = window._peak_reference_processed
     if reference is None:
         return None
-    return float(reference.wavelengths_nm[int(np.nanargmax(reference.values))])
+    finite = np.isfinite(reference.values)
+    if not np.any(finite):
+        return None
+    finite_indices = np.flatnonzero(finite)
+    peak_index = int(finite_indices[int(np.argmax(np.asarray(reference.values, dtype=np.float64)[finite_indices]))])
+    return float(reference.wavelengths_nm[peak_index])
 
 
 def build_summary_text_for(window) -> str:
@@ -460,7 +485,7 @@ def build_summary_text_for(window) -> str:
             f"  Analysis resolution: {getattr(processing, 'analysis_resolution_nm', 0.001):.6f} nm",
             f"  Noise window: {processing.trace_noise_window_s:.1f} s",
             f"  Peak trace: {peak_tracking_mode}",
-            f"  Trace metrics: {', '.join(processing.trace_metrics)}",
+            f"  Metric traces: {', '.join(processing.trace_metrics)}",
         ]
     )
 
@@ -470,32 +495,94 @@ def update_live_estimate_for(window) -> None:
     proc_text = "-" if window._last_processing_ms is None else f"{window._last_processing_ms:.1f} ms"
     headroom_text = headroom_value_text_for(window._processing_headroom_ratio)
     source_rate_text = "-" if window._effective_raw_rate_hz is None else f"{window._effective_raw_rate_hz:.1f} Hz"
+    desired_refresh_text = f"{window.live_rate_spin.value():.2f} Hz"
+    actual_refresh_text = "-" if getattr(window, "_actual_plot_refresh_rate_hz", None) is None else f"{window._actual_plot_refresh_rate_hz:.2f} Hz"
     wait_text = ""
     if processing_debug_mode_enabled() and window._last_processing_queue_wait_ms is not None:
         wait_text = f" | wait {window._last_processing_queue_wait_ms:.1f} ms"
     window.live_estimate.setText(
-        f"src {source_rate_text} | disp {window.live_rate_spin.value():.2f} Hz | "
+        f"src {source_rate_text} | disp {desired_refresh_text}/{actual_refresh_text} | "
         f"proc {proc_text}{wait_text} | head {headroom_text} | skip {skipped_rate_hz:.1f} Hz"
     )
     window._ui_refresh_state.live_estimate_dirty = False
 
 
+def _timing_share_text(value_ms: float | None, total_ms: float | None) -> str:
+    if value_ms is None:
+        return "-"
+    try:
+        value = float(value_ms)
+        total = float(total_ms) if total_ms is not None else None
+    except (TypeError, ValueError):
+        return "-"
+    if total is None or not np.isfinite(value) or not np.isfinite(total) or total <= 0:
+        return f"{value:.1f} ms"
+    return f"{value:.1f} ms ({value / total * 100.0:.1f}%)"
+
+
 def refresh_telemetry_for(window) -> None:
     if window._last_elapsed_ms is None:
+        if hasattr(window, "telemetry_label"):
+            window.telemetry_label.setStyleSheet("")
         window.telemetry_label.setText("waiting for first spectrum")
         window._ui_refresh_state.telemetry_dirty = False
         return
 
-    spacing = "-" if window._last_spacing_ms is None else f"{window._last_spacing_ms:.1f} ms"
-    overhead = "-" if window._last_overhead_ms is None else f"{window._last_overhead_ms:.1f} ms"
+    live_result_queue = getattr(window, "_live_result_queue", None)
+    live_processed_queue = getattr(window, "_live_processed_queue", None)
+    queue_pressure = False
+    for queue_obj in (live_result_queue, live_processed_queue):
+        if queue_obj is None:
+            continue
+        try:
+            queue_pressure = queue_pressure or int(queue_obj.qsize()) > 0
+        except (AttributeError, NotImplementedError, OSError, TypeError, ValueError):
+            continue
+        if queue_pressure:
+            break
+    if hasattr(window, "telemetry_label"):
+        window.telemetry_label.setStyleSheet(
+            "color: #f4b23d; font-weight: 700;" if queue_pressure else ""
+        )
+    window.telemetry_label.setText(build_pipeline_telemetry_text_for(window))
+    window._ui_refresh_state.telemetry_dirty = False
+
+
+def build_pipeline_telemetry_text_for(window) -> str:
+    breakdown = build_pipeline_timing_breakdown_for(window)
+    spacing = _timing_plain_text(getattr(window, "_last_spacing_ms", None))
+    overhead = _timing_plain_text(getattr(window, "_last_overhead_ms", None))
+    latency = _timing_plain_text(getattr(window, "_last_elapsed_ms", None))
+    processing_total_ms = None
+    if breakdown["processing_wait_ms"] is not None or breakdown["processing_ms"] is not None:
+        processing_total_ms = float(breakdown["processing_wait_ms"] or 0.0) + float(breakdown["processing_ms"] or 0.0)
+    processing_text = _timing_plain_text(processing_total_ms)
+    plot_text = _timing_plain_text(breakdown["plot_render_ms"])
+    ui_text = _timing_plain_text(breakdown["deferred_ui_ms"])
+    idle_text = _timing_plain_text(breakdown["idle_ms"])
+    live_result_queue = getattr(window, "_live_result_queue", None)
+    live_processed_queue = getattr(window, "_live_processed_queue", None)
+    live_result_queue_text = "-"
+    live_processed_queue_text = "-"
+    try:
+        if live_result_queue is not None:
+            live_result_queue_text = str(max(int(live_result_queue.qsize()), 0))
+    except (AttributeError, NotImplementedError, OSError, TypeError, ValueError):
+        live_result_queue_text = "-"
+    try:
+        if live_processed_queue is not None:
+            live_processed_queue_text = str(max(int(live_processed_queue.qsize()), 0))
+    except (AttributeError, NotImplementedError, OSError, TypeError, ValueError):
+        live_processed_queue_text = "-"
     displayed = "-"
     if window._last_display_average_count is not None and window._last_display_period_ms is not None:
         displayed = f"{window._last_display_average_count}/{window._last_display_period_ms:.0f}"
-    window.telemetry_label.setText(
-        f"acq {window._last_elapsed_ms:.1f} ms | int {spacing} | "
+    return (
+        f"gap {spacing} | acq {latency} | proc {processing_text} | "
+        f"plot {plot_text} | ui {ui_text} | idle {idle_text} | "
+        f"srcq {live_result_queue_text} | procq {live_processed_queue_text} | "
         f"ovh {overhead} | show {displayed}"
     )
-    window._ui_refresh_state.telemetry_dirty = False
 
 
 def live_skip_rate_hz_for(window) -> float:
@@ -510,14 +597,7 @@ def live_skip_rate_hz_for(window) -> float:
 def headroom_value_text_for(headroom_ratio: float | None) -> str:
     if headroom_ratio is None or not np.isfinite(float(headroom_ratio)):
         return "-"
-    color = "#6c7783"
-    if headroom_ratio >= 2.0:
-        color = "#2e8b57"
-    elif headroom_ratio >= 1.0:
-        color = "#b8860b"
-    else:
-        color = "#b44a4a"
-    return f"<span style='color:{color}; font-weight:700;'>{headroom_ratio:.2f}x</span>"
+    return f"{headroom_ratio:.2f}x"
 
 
 def handle_live_setting_change_for(window) -> None:
@@ -531,7 +611,11 @@ def handle_live_setting_change_for(window) -> None:
             window._live_worker.update_settings(window._current_settings())
         if window._live_processing_worker is not None:
             window._live_processing_worker.update_settings(window._current_processing_settings())
+        if window._live_result_timer.isActive():
+            window._live_result_requested_at = perf_counter()
+            window._live_result_timer.start(window._live_ui_refresh_delay_ms)
         window._stats_refresh_timer.stop()
+        window._stats_refresh_requested_at = perf_counter()
         window._stats_refresh_timer.start(window._live_ui_refresh_delay_ms)
         window._request_deferred_ui_refresh(trace_plot=True, live_estimate=True)
         window._request_trace_autoscale()
@@ -548,7 +632,11 @@ def handle_live_setting_change_for(window) -> None:
 def handle_simulation_output_rate_change_for(window) -> None:
     if window._live_active and window._source_mode == "simulation" and window._live_worker is not None:
         window._live_worker.update_cycle_period(1.0 / max(window.sim_output_rate_spin.value(), 1e-9))
+        if window._live_result_timer.isActive():
+            window._live_result_requested_at = perf_counter()
+            window._live_result_timer.start(window._live_ui_refresh_delay_ms)
         window._stats_refresh_timer.stop()
+        window._stats_refresh_requested_at = perf_counter()
         window._stats_refresh_timer.start(window._live_ui_refresh_delay_ms)
         window._request_deferred_ui_refresh(trace_plot=True, live_estimate=True)
         window._request_trace_autoscale()
@@ -598,14 +686,21 @@ def update_window_mode_label_for(window) -> None:
 
 # Convenience aliases for window delegation.
 update_spectrum_stats_for = _update_spectrum_stats
-update_trace_stats_for = _update_trace_stats
-refresh_trace_plot_for = _refresh_trace_plot
-render_trace_series_for = _render_trace_series
+update_metric_stats_for = _update_metric_stats
+update_trace_stats_for = _update_metric_stats
 autoscale_spectrum_plot_for = _autoscale_spectrum_plot
-autoscale_trace_plot_for = _autoscale_trace_plot
+apply_processing_range_to_spectrum_plot_for = _apply_processing_range_to_spectrum_plot
+autoscale_metric_plot_for = _autoscale_metric_plot
+autoscale_trace_plot_for = _autoscale_metric_plot
 autoscale_residual_axis_for = _autoscale_residual_axis
 update_residual_view_geometry_for = _update_residual_view_geometry
 update_residual_axis_visibility_for = _update_residual_axis_visibility
-request_trace_autoscale_for = _request_trace_autoscale
+request_metric_autoscale_for = _request_metric_autoscale
+request_trace_autoscale_for = _request_metric_autoscale
 handle_spectrum_mouse_moved_for = _handle_spectrum_mouse_moved
-handle_trace_mouse_moved_for = _handle_trace_mouse_moved
+handle_metric_mouse_moved_for = _handle_metric_mouse_moved
+handle_trace_mouse_moved_for = _handle_metric_mouse_moved
+refresh_metric_plot_for = _refresh_metric_plot
+refresh_trace_plot_for = _refresh_metric_plot
+render_metric_series_for = _render_metric_series
+render_trace_series_for = _render_metric_series
