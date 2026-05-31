@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from time import perf_counter
-
 from PyQt6.QtWidgets import QFileDialog
 
 from lspr_app.domain.models import ProcessingSettings
@@ -199,6 +197,4 @@ def primary_trace_metric(window) -> str:
 
 
 def schedule_processing_refresh(window) -> None:
-    if not window._stats_refresh_timer.isActive():
-        window._stats_refresh_requested_at = perf_counter()
-        window._stats_refresh_timer.start(0)
+    window._request_deferred_ui_refresh(stats=True)

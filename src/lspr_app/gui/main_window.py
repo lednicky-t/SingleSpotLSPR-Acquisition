@@ -2,6 +2,7 @@
 
 import logging
 import math
+import os
 import queue
 import threading
 from html import escape
@@ -59,6 +60,7 @@ from PyQt6.QtWidgets import (
 )
 
 from lspr_app import __version__
+from lspr_app.diagnostics import DiagnosticsConfig
 from lspr_app.device.base import Spectrometer, SpectrometerCapabilities
 from lspr_app.device.amf_mswitch import detect_amf_mswitch_devices
 from lspr_app.device.reglo_icc import RegloICCClient, is_probable_reglo_port
@@ -116,6 +118,41 @@ from lspr_app.gui.main_window_panels import (
     build_spectrometer_page,
     configure_processing_group_controls,
 )
+from lspr_app.gui.main_window_runtime import (
+    drain_gui_housekeeping_tasks as drain_gui_housekeeping_tasks_for,
+    flush_deferred_ui_refreshes as flush_deferred_ui_refreshes_for_runtime,
+    flush_plot_refreshes as flush_plot_refreshes_for_runtime,
+    refresh_session_statistics as refresh_session_statistics_for_runtime,
+    refresh_session_summary as refresh_session_summary_for_runtime,
+    request_deferred_ui_refresh as request_deferred_ui_refresh_for_runtime,
+    request_live_acquisition_poll as request_live_acquisition_poll_for_runtime,
+    request_live_processed_poll as request_live_processed_poll_for_runtime,
+    request_plot_refresh as request_plot_refresh_for_runtime,
+    run_gui_callback_timed as run_gui_callback_timed_for_runtime,
+)
+from lspr_app.gui.main_window_lifecycle import (
+    acquisition_state_payload_for,
+    collapsible_section_state_for,
+    disconnect_all_devices_for,
+    ensure_flow_panel_for,
+    finish_hardware_initialization_for,
+    handle_hardware_init_finished_for,
+    handle_hardware_init_step_for,
+    persist_acquisition_state_for,
+    restore_collapsible_section_state_for,
+    restore_ui_state_for,
+    save_ui_state_for,
+    schedule_acquisition_state_persist_for,
+    schedule_ui_state_persist_for,
+    set_acquisition_state_autosave_enabled_for,
+    set_log_buffering_enabled_for,
+    set_ui_state_autosave_enabled_for,
+    start_hardware_initialization_for,
+    sync_experiment_control_startup_ports_for,
+    sync_hardware_menu_actions_for,
+)
+from lspr_app.gui.main_window_layout import build_main_layout_for, build_recording_context_row_for
+from lspr_app.gui.main_window_logging_ui import initialize_logging_ui_for
 from lspr_app.gui.main_window_state import (
     acquisition_state_payload,
     apply_acquisition_state_to_widgets,
@@ -186,6 +223,7 @@ from lspr_app.gui.main_window_plotting import (
     update_live_estimate_for,
     update_window_mode_label_for,
 )
+from lspr_app.gui.update_scheduler import GuiTaskScheduler
 from lspr_app.gui.main_window_logging import (
     append_log_record,
     append_log_record_now,
@@ -303,7 +341,6 @@ if TYPE_CHECKING:
     from lspr_app.gui.experiment_control_window import ExperimentControlWindow
 
 
-
 class LogTerminalTextEdit(QTextEdit):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -396,35 +433,19 @@ class MainWindow(QMainWindow):
         self._simulation_refresh_timer.setSingleShot(True)
         self._simulation_refresh_timer.setInterval(60)
         self._simulation_refresh_timer.timeout.connect(self._flush_simulation_parameter_change)
-        self._live_result_timer = QTimer(self)
-        self._live_result_timer.setSingleShot(True)
-        self._live_result_timer.timeout.connect(self._flush_live_acquisition_results)
         self._live_result_requested_at: float | None = None
-        self._last_live_result_timer_delay_ms: float | None = None
-        self._live_processed_timer = QTimer(self)
-        self._live_processed_timer.setSingleShot(True)
-        self._live_processed_timer.timeout.connect(self._flush_live_processed_results)
+        self._live_result_requested_delay_ms: float | None = None
+        self._last_live_result_poll_delay_ms: float | None = None
         self._live_processed_requested_at: float | None = None
-        self._last_live_processed_timer_delay_ms: float | None = None
-        self._live_display_timer = QTimer(self)
-        self._live_display_timer.setSingleShot(True)
-        self._live_display_timer.timeout.connect(self._flush_live_processed_results)
-        self._processing_refresh_timer = QTimer(self)
-        self._processing_refresh_timer.setSingleShot(True)
-        self._processing_refresh_timer.timeout.connect(self._enqueue_plot_processing)
-        self._plot_refresh_timer = QTimer(self)
-        self._plot_refresh_timer.setSingleShot(True)
-        self._plot_refresh_timer.setInterval(33)
-        self._plot_refresh_timer.timeout.connect(self._flush_plot_refreshes)
+        self._live_processed_requested_delay_ms: float | None = None
+        self._last_live_processed_poll_delay_ms: float | None = None
         self._plot_refresh_requested_at: float | None = None
         self._last_plot_refresh_delay_ms: float | None = None
+        self._ui_task_scheduler = GuiTaskScheduler(self)
         self._trace_autoscale_timer = QTimer(self)
         self._trace_autoscale_timer.setSingleShot(True)
         self._trace_autoscale_timer.setInterval(120)
         self._trace_autoscale_timer.timeout.connect(self._autoscale_trace_plot)
-        self._stats_refresh_timer = QTimer(self)
-        self._stats_refresh_timer.setSingleShot(True)
-        self._stats_refresh_timer.timeout.connect(self._flush_deferred_ui_refreshes)
         self._stats_refresh_requested_at: float | None = None
         self._last_stats_refresh_delay_ms: float | None = None
         self._session_stats_refresh_requested_at: float | None = None
@@ -484,6 +505,8 @@ class MainWindow(QMainWindow):
         self._last_plot_refresh_gap_ms: float | None = None
         self._last_plot_refresh_finished_at: float | None = None
         self._actual_plot_refresh_rate_hz: float | None = None
+        self._plot_refresh_timestamps: list[float] = []
+        self._plot_refresh_rate_window_s = 5.0
         self._last_plot_refresh_total_ms: float | None = None
         self._last_spectrum_curve_update_ms: float | None = None
         self._last_spectrum_fit_update_ms: float | None = None
@@ -558,6 +581,10 @@ class MainWindow(QMainWindow):
             self._hdf5_compression_enabled = bool(hdf5_compression_setting)
         self._sensorgram_view_mode = "absolute"
         self._sensorgram_content_mode = "metric"
+        self.sensorgram_view_mode_button = QToolButton()
+        self.sensorgram_downsampling_button = QToolButton()
+        self.sensorgram_content_mode_button = QToolButton()
+        self.sensorgram_window_button = QToolButton()
         self._sensorgram_heatmap_history: list[tuple[float, np.ndarray]] = []
         self._sensorgram_heatmap_history_max_rows = 800
         self._sensorgram_heatmap_wavelengths: np.ndarray | None = None
@@ -1249,93 +1276,7 @@ class MainWindow(QMainWindow):
         _startup_mark("startup wiring complete")
 
     def _initialize_logging_ui(self) -> None:
-        if hasattr(self, "log_terminal"):
-            return
-        self.log_terminal = LogTerminalTextEdit()
-        self.log_terminal.setObjectName("logTerminal")
-        self.log_terminal.setReadOnly(True)
-        self.log_terminal.setAcceptRichText(True)
-        self.log_terminal.setUndoRedoEnabled(False)
-        self.log_terminal.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self.log_terminal.setMaximumHeight(190)
-        self.log_terminal.setMinimumHeight(150)
-        log_font = QFont("Consolas", 9)
-        self.log_terminal.setFont(log_font)
-        self.log_terminal.document().setDefaultFont(log_font)
-        self.log_terminal.document().setMaximumBlockCount(220)
-        self.log_terminal.setToolTip("Live event log for acquisition, processing, and controller activity.")
-
-        self._log_history: list[tuple[int, str, str]] = []
-        self._log_history_max_entries = 2000
-        self._log_view_mode = "all"
-        self.log_view_all_button = QToolButton()
-        self.log_view_all_button.setObjectName("logViewButton")
-        self.log_view_all_button.setText("All")
-        self.log_view_all_button.setCheckable(True)
-        self.log_view_all_button.setAutoRaise(False)
-        self.log_view_all_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.log_view_all_button.setFixedHeight(22)
-        self.log_view_all_button.setToolTip("Show all log entries.")
-        self.log_view_all_button.clicked.connect(lambda *_args: self._set_log_view_mode("all"))
-        self.log_view_gui_button = QToolButton()
-        self.log_view_gui_button.setObjectName("logViewButton")
-        self.log_view_gui_button.setText("GUI")
-        self.log_view_gui_button.setCheckable(True)
-        self.log_view_gui_button.setAutoRaise(False)
-        self.log_view_gui_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.log_view_gui_button.setFixedHeight(22)
-        self.log_view_gui_button.setToolTip("Show GUI, processing, and analysis messages.")
-        self.log_view_gui_button.clicked.connect(lambda *_args: self._set_log_view_mode("gui"))
-        self.log_view_devices_button = QToolButton()
-        self.log_view_devices_button.setObjectName("logViewButton")
-        self.log_view_devices_button.setText("Devices")
-        self.log_view_devices_button.setCheckable(True)
-        self.log_view_devices_button.setAutoRaise(False)
-        self.log_view_devices_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.log_view_devices_button.setFixedHeight(22)
-        self.log_view_devices_button.setToolTip("Show spectrometer, pump, valve, and switch messages.")
-        self.log_view_devices_button.clicked.connect(lambda *_args: self._set_log_view_mode("devices"))
-        self._set_log_view_mode("all", refresh=False)
-
-        self.log_clear_button = QPushButton("Clear")
-        self.log_clear_button.setToolTip("Clear the visible log view.")
-        self.log_clear_button.setFixedHeight(24)
-        self.log_follow_button = QPushButton("Follow")
-        self.log_follow_button.setCheckable(True)
-        self.log_follow_button.setChecked(True)
-        self.log_follow_button.setToolTip("Keep the log scrolled to the newest entry.")
-        self.log_follow_button.setFixedHeight(24)
-        self.log_copy_button = QPushButton("Copy")
-        self.log_copy_button.setToolTip("Copy the visible log text to the clipboard.")
-        self.log_copy_button.setFixedHeight(24)
-        self._log_follow_enabled = True
-        self._log_bridge = GuiLogBridge()
-        self._log_bridge.record_received.connect(self._append_log_record)
-        self._log_handler = GuiLogHandler(self._log_bridge)
-        self._log_handler.setFormatter(logging.Formatter("%(message)s"))
-        self._ui_logger = logging.getLogger("lspr_app")
-        self._ui_logger.setLevel(logging.INFO)
-        self._ui_logger.addHandler(self._log_handler)
-        self._ui_logger.propagate = True
-        self._log_buffer: list[tuple[int, str, str]] = []
-        self._log_buffer_timer = QTimer(self)
-        self._log_buffer_timer.setInterval(75)
-        self._log_buffer_timer.timeout.connect(self._flush_log_buffer)
-        self._last_log_buffer_flush_ms: float | None = None
-        self._last_log_buffer_delay_ms: float | None = None
-        self._last_log_buffer_total_ms: float | None = None
-        self._log_buffer_requested_at: float | None = None
-        self._log_throttle_state: dict[str, tuple[float, str]] = {}
-        self._log_emit_levels = {
-            logging.INFO,
-            SUCCESS_LOG_LEVEL,
-            logging.WARNING,
-            logging.ERROR,
-            logging.CRITICAL,
-        }
-        self._ui_startup_ready = False
-        self._ui_heartbeat_expected_at = perf_counter() + self._ui_heartbeat_interval_ms / 1000.0
-        self._ui_heartbeat_timer.start()
+        initialize_logging_ui_for(self)
 
     def _build_spectrometer_page(self) -> QWidget:
         return build_spectrometer_page(self)
@@ -1344,334 +1285,10 @@ class MainWindow(QMainWindow):
         return build_simulation_page(self)
 
     def _build_layout(self) -> None:
-        measurement_bar = QHBoxLayout()
-        measurement_bar.setSpacing(4)
-        measurement_bar.addStretch(1)
-
-        processing_group = build_processing_group(self)
-
-        source_block = QWidget()
-        source_layout = QVBoxLayout()
-        source_layout.setContentsMargins(0, 0, 0, 0)
-        source_layout.setSpacing(6)
-        source_layout.addWidget(self.source_tabs)
-        source_block.setLayout(source_layout)
-
-        plot_bar = QHBoxLayout()
-        plot_bar.setSpacing(6)
-        plot_bar.addWidget(QLabel("Plot"))
-        plot_bar.addWidget(self.plot_selector)
-        plot_bar.addWidget(self.acquire_dark_button)
-        plot_bar.addWidget(self.acquire_reference_button)
-        plot_bar.addWidget(self.show_residual_button)
-        plot_bar.addWidget(self.freeze_plots_button)
-        plot_bar.addStretch(1)
-
-        spectrum_stats_bar = QHBoxLayout()
-        spectrum_stats_bar.setSpacing(8)
-        spectrum_stats_bar.addWidget(self.spectrum_stats_label, 1)
-        spectrum_stats_bar.addWidget(self.spectrum_cursor_label)
-
-        trace_title = QLabel("Sensorgram")
-        trace_title.setObjectName("sensorgramHeaderLabel")
-        trace_title.setStyleSheet("color: #8FE3A1;")
-        self.sensorgram_view_mode_button = QToolButton()
-        self.sensorgram_view_mode_button.setObjectName("sensorgramViewModeButton")
-        self.sensorgram_view_mode_button.setAutoRaise(True)
-        self.sensorgram_view_mode_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.sensorgram_view_mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.sensorgram_view_mode_button.clicked.connect(self._cycle_sensorgram_view_mode)
-        self._update_sensorgram_view_mode_button()
-        self.sensorgram_downsampling_button = QToolButton()
-        self.sensorgram_downsampling_button.setObjectName("sensorgramDownsamplingButton")
-        self.sensorgram_downsampling_button.setAutoRaise(True)
-        self.sensorgram_downsampling_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.sensorgram_downsampling_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.sensorgram_downsampling_button.clicked.connect(self._cycle_sensorgram_downsampling_enabled)
-        self._update_sensorgram_downsampling_button()
-        self.sensorgram_content_mode_button = QToolButton()
-        self.sensorgram_content_mode_button.setObjectName("sensorgramContentModeButton")
-        self.sensorgram_content_mode_button.setAutoRaise(True)
-        self.sensorgram_content_mode_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.sensorgram_content_mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.sensorgram_content_mode_button.clicked.connect(self._cycle_sensorgram_content_mode)
-        self._update_sensorgram_content_mode_button()
-        self.sensorgram_window_button = QToolButton()
-        self.sensorgram_window_button.setObjectName("sensorgramWindowButton")
-        self.sensorgram_window_button.setAutoRaise(True)
-        self.sensorgram_window_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.sensorgram_window_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.sensorgram_window_button.clicked.connect(self._cycle_sensorgram_display_window)
-        self._update_sensorgram_display_window_button()
-        self._update_sensorgram_header_control_visibility()
-
-        trace_title_row = QHBoxLayout()
-        trace_title_row.setContentsMargins(0, 0, 0, 0)
-        trace_title_row.setSpacing(6)
-        trace_title_row.addWidget(trace_title)
-        trace_title_row.addWidget(self.sensorgram_view_mode_button)
-        trace_title_row.addWidget(self.sensorgram_downsampling_button)
-        trace_title_row.addWidget(self.sensorgram_window_button)
-        trace_title_row.addWidget(self.sensorgram_content_mode_button)
-        trace_title_row.addStretch(1)
-        trace_title_row_widget = QWidget()
-        trace_title_row_widget.setLayout(trace_title_row)
-        trace_title_row_widget.setContentsMargins(0, 0, 0, 0)
-
-        trace_left_field = QHBoxLayout()
-        trace_left_field.setContentsMargins(0, 0, 0, 0)
-        trace_left_field.setSpacing(6)
-        trace_left_field.addWidget(self.trace_record_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        trace_left_field.addWidget(self.sensorgram_freeze_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        trace_left_field.addWidget(self.clear_trace_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        trace_left_field.addStretch(1)
-
-        trace_right_field = QVBoxLayout()
-        trace_right_field.setContentsMargins(0, 0, 0, 0)
-        trace_right_field.setSpacing(0)
-
-        trace_metrics_row = QHBoxLayout()
-        trace_metrics_row.setContentsMargins(0, 0, 0, 0)
-        trace_metrics_row.setSpacing(6)
-        trace_metrics_row.addWidget(self.trace_stats_label, 1)
-        trace_metrics_widget = QWidget()
-        trace_metrics_widget.setLayout(trace_metrics_row)
-        trace_metrics_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-        trace_noise_row = QHBoxLayout()
-        trace_noise_row.setContentsMargins(0, 0, 0, 0)
-        trace_noise_row.setSpacing(6)
-        trace_noise_row.addWidget(QLabel("Noise"))
-        trace_noise_row.addWidget(self.trace_noise_window_spin)
-        trace_noise_row.addWidget(self.trace_noise_summary_label, 1)
-        trace_noise_widget = QWidget()
-        trace_noise_widget.setLayout(trace_noise_row)
-        trace_noise_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-        trace_noise_cursor_row = QHBoxLayout()
-        trace_noise_cursor_row.setContentsMargins(0, 0, 0, 0)
-        trace_noise_cursor_row.setSpacing(6)
-        trace_noise_cursor_row.addWidget(trace_noise_widget, 0, Qt.AlignmentFlag.AlignLeft)
-        trace_noise_cursor_row.addStretch(1)
-        trace_noise_cursor_row.addWidget(self.trace_cursor_label, 0, Qt.AlignmentFlag.AlignRight)
-
-        trace_noise_cursor_widget = QWidget()
-        trace_noise_cursor_widget.setLayout(trace_noise_cursor_row)
-        trace_noise_cursor_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-        trace_right_field.addWidget(trace_metrics_widget)
-        trace_right_field.addWidget(trace_noise_cursor_widget)
-        trace_metrics_widget.setFixedHeight(trace_metrics_widget.sizeHint().height())
-        trace_noise_widget.setFixedHeight(trace_noise_widget.sizeHint().height())
-        trace_noise_cursor_widget.setFixedHeight(max(trace_noise_widget.sizeHint().height(), self.trace_cursor_label.sizeHint().height()))
-
-        trace_left_widget = QWidget()
-        trace_left_widget.setLayout(trace_left_field)
-        trace_left_widget.setMinimumWidth(160)
-        trace_left_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        trace_right_widget = QWidget()
-        trace_right_widget.setLayout(trace_right_field)
-        trace_right_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-
-        trace_body_splitter = CompactSplitter(Qt.Orientation.Horizontal)
-        trace_body_splitter.setObjectName("sensorgramHeaderSplitter")
-        trace_body_splitter.setChildrenCollapsible(False)
-        trace_body_splitter.setOpaqueResize(True)
-        trace_body_splitter.setHandleWidth(12)
-        trace_body_splitter.addWidget(trace_left_widget)
-        trace_body_splitter.addWidget(trace_right_widget)
-        trace_body_splitter.setStretchFactor(0, 0)
-        trace_body_splitter.setStretchFactor(1, 1)
-        trace_body_splitter.setSizes([170, 610])
-        self.sensorgram_header_splitter = trace_body_splitter
-
-        source_section = CollapsibleSection("Light source", source_block, expanded=True)
-        processing_section = CollapsibleSection("Processing", processing_group, expanded=False)
-        session_top_row = QHBoxLayout()
-        session_top_row.setContentsMargins(0, 0, 0, 0)
-        session_top_row.setSpacing(6)
-        session_rate_label = QLabel("Refresh rate")
-        session_rate_label.setToolTip("GUI display refresh rate for live spectra and sensorgram updates.")
-        session_top_row.addWidget(session_rate_label)
-        session_top_row.addWidget(self.live_rate_spin)
-        session_top_row.addStretch(1)
-        session_top_row.addWidget(self.session_stats_snapshot_button)
-        session_top_row.addWidget(self.session_stats_save_button)
-        session_top_row.addWidget(self.session_stats_record_button)
-
-        session_block = QWidget()
-        session_layout = QVBoxLayout()
-        session_layout.setContentsMargins(0, 0, 0, 0)
-        session_layout.setSpacing(4)
-        session_layout.addLayout(session_top_row)
-        session_layout.addWidget(self.session_summary, 1)
-        session_block.setLayout(session_layout)
-        session_section = CollapsibleSection("Session", session_block, expanded=False)
-
-        log_header_row = QHBoxLayout()
-        log_header_row.setContentsMargins(0, 0, 0, 0)
-        log_header_row.setSpacing(6)
-        log_header_row.addWidget(QLabel("View"))
-        log_header_row.addWidget(self.log_view_all_button)
-        log_header_row.addWidget(self.log_view_gui_button)
-        log_header_row.addWidget(self.log_view_devices_button)
-        log_header_row.addStretch(1)
-        log_header_row.addWidget(self.log_follow_button)
-        log_header_row.addWidget(self.log_copy_button)
-        log_header_row.addWidget(self.log_clear_button)
-        log_block = QWidget()
-        log_layout = QVBoxLayout()
-        log_layout.setContentsMargins(0, 0, 0, 0)
-        log_layout.setSpacing(4)
-        log_layout.addLayout(log_header_row)
-        log_layout.addWidget(self.log_terminal)
-        log_block.setLayout(log_layout)
-        log_section = CollapsibleSection("Log", log_block, expanded=True)
-
-        self._source_section = source_section
-        self._processing_section = processing_section
-        self._session_section = session_section
-        self._log_section = log_section
-        self._restore_collapsible_section_state()
-
-        left_panel = QVBoxLayout()
-        left_panel.setSpacing(6)
-        left_panel.addLayout(measurement_bar)
-        left_panel.addWidget(source_section)
-        left_panel.addWidget(processing_section)
-        left_panel.addWidget(session_section)
-        left_panel.addWidget(log_section)
-        left_panel.addStretch(1)
-
-        left_widget = QWidget()
-        left_widget.setLayout(left_panel)
-        left_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-
-        left_scroll = QScrollArea()
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        left_scroll.setWidget(left_widget)
-        left_scroll.setMinimumWidth(250)
-        left_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-        self._left_controls_scroll = left_scroll
-
-        spectrum_block = QWidget()
-        spectrum_layout = QVBoxLayout()
-        spectrum_layout.setContentsMargins(0, 0, 0, 0)
-        spectrum_layout.setSpacing(4)
-        spectrum_header = QLabel("Processed Spectrum")
-        spectrum_header.setStyleSheet("font-size: 13px; font-weight: 800; letter-spacing: 0.8px; color: #5b6775;")
-        spectrum_layout.addWidget(spectrum_header)
-        spectrum_layout.addLayout(plot_bar)
-        spectrum_layout.addLayout(spectrum_stats_bar)
-        spectrum_layout.addWidget(self.spectrum_plot, 1)
-        spectrum_block.setLayout(spectrum_layout)
-        self._spectra_block = spectrum_block
-
-        trace_block = QWidget()
-        trace_layout = QVBoxLayout()
-        trace_layout.setContentsMargins(0, 0, 0, 0)
-        trace_layout.setSpacing(4)
-        trace_layout.addWidget(trace_title_row_widget)
-        trace_layout.addWidget(trace_body_splitter)
-        trace_layout.addWidget(self.trace_plot, 1)
-        trace_block.setLayout(trace_layout)
-        self._sensorgram_block = trace_block
-
-        self._top_content_stack = QStackedWidget()
-        self._top_content_stack.addWidget(spectrum_block)
-        self._experiment_control_panel_placeholder = QWidget()
-        self._flow_panel_placeholder = self._experiment_control_panel_placeholder
-        self._top_content_stack.addWidget(self._experiment_control_panel_placeholder)
-        self._top_content_stack.setCurrentIndex(0)
-
-        footer_bar = QHBoxLayout()
-        footer_bar.setContentsMargins(0, 0, 0, 0)
-        footer_bar.setSpacing(6)
-        footer_bar.addWidget(self.status_label, 1)
-        footer_bar.addWidget(self.live_estimate, 1)
-        footer_bar.addWidget(self.telemetry_label, 2)
-        self._window_size_grip = QSizeGrip(self)
-        self._window_size_grip.setToolTip("Drag to resize the window.")
-        footer_bar.addWidget(self._window_size_grip, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
-        footer_widget = QWidget()
-        footer_widget.setLayout(footer_bar)
-        footer_widget.setObjectName("mainWindowStatusFooter")
-        footer_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-        plot_splitter = CompactSplitter(Qt.Orientation.Vertical)
-        plot_splitter.setChildrenCollapsible(False)
-        plot_splitter.addWidget(self._top_content_stack)
-        plot_splitter.addWidget(trace_block)
-        plot_splitter.setStretchFactor(0, 2)
-        plot_splitter.setStretchFactor(1, 3)
-        plot_splitter.setSizes([430, 470])
-        self.plot_splitter = plot_splitter
-
-        right_panel = QVBoxLayout()
-        right_panel.addWidget(self.plot_splitter, 1)
-        right_panel.addWidget(footer_widget, 0)
-
-        right_widget = QWidget()
-        right_widget.setLayout(right_panel)
-        right_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-
-        splitter = CompactSplitter(Qt.Orientation.Horizontal)
-        splitter.setChildrenCollapsible(False)
-        splitter.addWidget(left_scroll)
-        splitter.addWidget(right_widget)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([260, 1100])
-        self.left_right_splitter = splitter
-
-        recording_context_row = None
-        if self._launch_profile_spec.show_recording_context:
-            recording_context_row = self._build_recording_context_row()
-        self._recording_context_row = recording_context_row
-
-        root_layout = QVBoxLayout()
-        root_layout.setContentsMargins(6, 4, 6, 6)
-        root_layout.setSpacing(5)
-        if recording_context_row is not None:
-            root_layout.addWidget(recording_context_row)
-        root_layout.addWidget(splitter, 1)
-        root_layout.addWidget(footer_widget, 0)
-
-        container = QWidget()
-        container.setLayout(root_layout)
-        self._main_content_widget = container
-        self.setCentralWidget(container)
-        self._sensorgram_header_controls_ready = True
-        self._update_sensorgram_header_control_visibility()
+        build_main_layout_for(self)
 
     def _build_recording_context_row(self) -> QWidget:
-        panel = QWidget()
-        panel.setObjectName("recordingContextPanel")
-        layout = QHBoxLayout()
-        layout.setContentsMargins(6, 0, 6, 0)
-        layout.setSpacing(5)
-        controls_row = QHBoxLayout()
-        controls_row.setContentsMargins(0, 0, 0, 0)
-        controls_row.setSpacing(5)
-        project_label = QLabel("Project's destination")
-        project_label.setToolTip("Root folder for saved experiment folders.")
-        experiment_label = QLabel("Experiment name")
-        experiment_label.setToolTip("Folder name and filename component for the current experiment.")
-        controls_row.addWidget(project_label)
-        controls_row.addWidget(self.project_destination_edit, 3)
-        controls_row.addWidget(self.project_destination_browse_button)
-        controls_row.addSpacing(6)
-        controls_row.addWidget(experiment_label)
-        controls_row.addWidget(self.experiment_name_edit, 2)
-        controls_row.addSpacing(4)
-        controls_row.addWidget(self.measurement_compression_button)
-        layout.addLayout(controls_row)
-        panel.setLayout(layout)
-        panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        panel.setFixedHeight(28)
-        return panel
+        return build_recording_context_row_for(self)
 
     def recording_project_destination(self) -> str:
         return self.project_destination_edit.text().strip()
@@ -2445,54 +2062,7 @@ class MainWindow(QMainWindow):
         self._run_gui_callback_timed("gui_housekeeping", lambda: self._drain_gui_housekeeping_tasks())
 
     def _drain_gui_housekeeping_tasks(self) -> None:
-        if self._closing:
-            return
-
-        now = perf_counter()
-        refresh_state = getattr(self, "_ui_refresh_state", None)
-
-        def _due(requested_at: float | None, interval_ms: float) -> bool:
-            if requested_at is None:
-                return False
-            try:
-                return (now - float(requested_at)) * 1000.0 >= float(interval_ms)
-            except (TypeError, ValueError):
-                return False
-
-        log_buffer = getattr(self, "_log_buffer", None)
-        log_buffer_timer = getattr(self, "_log_buffer_timer", None)
-        if log_buffer and _due(getattr(self, "_log_buffer_requested_at", None), float(log_buffer_timer.interval()) if log_buffer_timer is not None else 75.0):
-            self._flush_log_buffer()
-            return
-
-        ui_state_timer = getattr(self, "_ui_state_timer", None)
-        if _due(getattr(self, "_ui_state_requested_at", None), float(ui_state_timer.interval()) if ui_state_timer is not None else 250.0):
-            self._save_ui_state()
-            return
-
-        acquisition_state_timer = getattr(self, "_acquisition_state_timer", None)
-        if _due(
-            getattr(self, "_acquisition_state_requested_at", None),
-            float(acquisition_state_timer.interval()) if acquisition_state_timer is not None else 250.0,
-        ):
-            self._persist_acquisition_state()
-            return
-
-        if bool(getattr(self, "_session_stats_recording_active", False)):
-            session_timer = getattr(self, "_session_stats_recording_timer", None)
-            interval_ms = float(session_timer.interval()) if session_timer is not None else 1000.0
-            if _due(getattr(self, "_session_stats_recording_requested_at", None), interval_ms):
-                self._capture_session_stats_recording_snapshot()
-                return
-
-        if refresh_state is not None and bool(getattr(refresh_state, "session_stats_dirty", False)):
-            if self._session_stats_refresh_requested_at is None:
-                self._session_stats_refresh_requested_at = now
-            elif _due(self._session_stats_refresh_requested_at, self._session_stats_refresh_delay_ms):
-                self._refresh_session_statistics(force=True)
-                refresh_state.session_stats_dirty = False
-                self._session_stats_refresh_requested_at = None
-                return
+        drain_gui_housekeeping_tasks_for(self)
 
     def _append_log_record(self, levelno: int, source: str, text: str) -> None:
         append_log_record(self, levelno, source, text)
@@ -2616,92 +2186,37 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self._start_live_acquisition)
 
     def _restore_ui_state(self) -> None:
-        restore_ui_state(self)
+        restore_ui_state_for(self)
 
     def _save_ui_state(self) -> None:
-        started = perf_counter()
-        requested_at = getattr(self, "_ui_state_requested_at", None)
-        if requested_at is not None:
-            try:
-                self._last_ui_state_delay_ms = max((started - float(requested_at)) * 1000.0, 0.0)
-            except (TypeError, ValueError):
-                self._last_ui_state_delay_ms = None
-
-        def _callback() -> None:
-            save_ui_state(self)
-
-        self._run_gui_callback_timed("ui_state_save", _callback)
-        self._last_ui_state_save_ms = (perf_counter() - started) * 1000.0
-        self._ui_state_requested_at = None
+        save_ui_state_for(self)
 
     def _schedule_ui_state_persist(self) -> None:
-        if not getattr(self, "_ui_state_autosave_enabled", True):
-            self._ui_state_requested_at = None
-            timer = getattr(self, "_ui_state_timer", None)
-            if timer is not None:
-                timer.stop()
-            return
-        self._ui_state_requested_at = perf_counter()
+        schedule_ui_state_persist_for(self)
 
     def _collapsible_section_state(self) -> dict[str, bool]:
-        return collapsible_section_state(self)
+        return collapsible_section_state_for(self)
 
     def _restore_collapsible_section_state(self) -> None:
-        restore_collapsible_section_state(self)
+        restore_collapsible_section_state_for(self)
 
     def _acquisition_state_payload(self) -> dict[str, object]:
-        return acquisition_state_payload(self)
+        return acquisition_state_payload_for(self)
 
     def _persist_acquisition_state(self) -> None:
-        started = perf_counter()
-        requested_at = getattr(self, "_acquisition_state_requested_at", None)
-        if requested_at is not None:
-            try:
-                self._last_acquisition_state_delay_ms = max((started - float(requested_at)) * 1000.0, 0.0)
-            except (TypeError, ValueError):
-                self._last_acquisition_state_delay_ms = None
-
-        def _callback() -> None:
-            persist_acquisition_state(self)
-
-        self._run_gui_callback_timed("acquisition_state_save", _callback)
-        self._last_acquisition_state_save_ms = (perf_counter() - started) * 1000.0
-        self._acquisition_state_requested_at = None
+        persist_acquisition_state_for(self)
 
     def _schedule_acquisition_state_persist(self) -> None:
-        schedule_acquisition_state_persist(self)
+        schedule_acquisition_state_persist_for(self)
 
     def _set_ui_state_autosave_enabled(self, enabled: bool) -> None:
-        self._ui_state_autosave_enabled = bool(enabled)
-        save_app_setting("ui_state_autosave_enabled", self._ui_state_autosave_enabled)
-        timer = getattr(self, "_ui_state_timer", None)
-        if not self._ui_state_autosave_enabled and timer is not None:
-            timer.stop()
-            self._ui_state_requested_at = None
-        state_text = "enabled" if self._ui_state_autosave_enabled else "disabled"
-        self._log_info(f"UI state autosave {state_text}.")
+        set_ui_state_autosave_enabled_for(self, enabled)
 
     def _set_acquisition_state_autosave_enabled(self, enabled: bool) -> None:
-        self._acquisition_state_autosave_enabled = bool(enabled)
-        save_app_setting("acquisition_state_autosave_enabled", self._acquisition_state_autosave_enabled)
-        timer = getattr(self, "_acquisition_state_timer", None)
-        if not self._acquisition_state_autosave_enabled and timer is not None:
-            timer.stop()
-            self._acquisition_state_requested_at = None
-        state_text = "enabled" if self._acquisition_state_autosave_enabled else "disabled"
-        self._log_info(f"Acquisition state autosave {state_text}.")
+        set_acquisition_state_autosave_enabled_for(self, enabled)
 
     def _set_log_buffering_enabled(self, enabled: bool) -> None:
-        self._log_buffering_enabled = bool(enabled)
-        save_app_setting("log_buffering_enabled", self._log_buffering_enabled)
-        buffer_timer = getattr(self, "_log_buffer_timer", None)
-        if not self._log_buffering_enabled and buffer_timer is not None:
-            if buffer_timer.isActive() or getattr(self, "_log_buffer", None):
-                self._flush_log_buffer()
-            buffer_timer.stop()
-            self._log_buffer_requested_at = None
-        state_text = "enabled" if self._log_buffering_enabled else "disabled"
-        self._log_info(f"Log buffering {state_text}.")
+        set_log_buffering_enabled_for(self, enabled)
 
     def _apply_acquisition_state_to_widgets(self, state: dict[str, object]) -> None:
         apply_acquisition_state_to_widgets(self, state)
@@ -2724,39 +2239,7 @@ class MainWindow(QMainWindow):
         self._toggle_flow_panel_visibility(checked)
 
     def _ensure_flow_panel(self) -> None:
-        if self._experiment_control_window is None:
-            from lspr_app.gui.experiment_control_window import ExperimentControlWindow
-            profile = self._launch_profile_settings()
-
-            self._experiment_control_window = ExperimentControlWindow(
-                self._experiment_control_window_ui_state,
-                known_probe=self._discovered_pump_probe,
-                theme_mode=self._theme_mode,
-                initial_mswitch_devices=[probe for probe in self._initial_mswitch_devices if probe is not None],
-                auto_connect_devices=profile.scan_devices,
-                show_runtime_controls=profile.show_runtime_controls,
-                parent=getattr(self, "_top_content_stack", self),
-            )
-            self._experiment_control_window.availability_changed.connect(self._handle_flow_availability_changed)
-            self._experiment_control_window.valve_availability_changed.connect(self._handle_valve_availability_changed)
-            self._experiment_control_window.mswitch_availability_changed.connect(self._handle_mswitch_availability_changed)
-            self._experiment_control_window.recording_control_requested.connect(self._handle_flow_recording_control)
-            self._experiment_control_window.experimental_control_state_recorded.connect(self._handle_experimental_control_state_recorded)
-            self._experiment_control_window.recording_controller = self
-            self._experiment_control_window.theme_changed.connect(self.set_theme)
-            if hasattr(self._experiment_control_window, "_set_record_with_flow_recording_active"):
-                self._experiment_control_window._set_record_with_flow_recording_active(bool(self._measurement_active))
-            self._experiment_control_window._ui_startup_ready = bool(getattr(self, "_ui_startup_ready", False))
-            self._sync_experiment_control_startup_ports()
-            if hasattr(self, "_top_content_stack"):
-                placeholder = getattr(self, "_experiment_control_panel_placeholder", getattr(self, "_flow_panel_placeholder", None))
-                if placeholder is not None:
-                    index = self._top_content_stack.indexOf(placeholder)
-                    if index >= 0:
-                        self._top_content_stack.removeWidget(placeholder)
-                        placeholder.setParent(None)
-                    self._top_content_stack.addWidget(self._experiment_control_window)
-            self._log_info("Experiment control panel created.")
+        ensure_flow_panel_for(self)
 
     def _ensure_experimental_control_panel(self) -> None:
         self._ensure_flow_panel()
@@ -3220,6 +2703,12 @@ class MainWindow(QMainWindow):
     def _flush_live_processed_results(self) -> None:
         flush_live_processed_results(self)
 
+    def _request_live_acquisition_poll(self, delay_ms: float | None = None) -> None:
+        request_live_acquisition_poll_for_runtime(self, delay_ms=delay_ms)
+
+    def _request_live_processed_poll(self, delay_ms: float | None = None) -> None:
+        request_live_processed_poll_for_runtime(self, delay_ms=delay_ms)
+
     def _reset_live_accumulator(self) -> None:
         self._accumulator_sum = None
         self._accumulator_count = 0
@@ -3341,15 +2830,10 @@ class MainWindow(QMainWindow):
         return get_processed_spectrum_for(self, spectrum, settings)
 
     def _refresh_session_summary(self, force: bool = False) -> None:
-        self._run_gui_callback_timed("session_summary_refresh", lambda: refresh_session_summary_for(self, force=force))
+        refresh_session_summary_for_runtime(self, force=force)
 
     def _refresh_session_statistics(self, force: bool = False) -> None:
-        self._run_gui_callback_timed("session_stats_refresh", lambda: refresh_session_statistics_for(self, force=force))
-        if force:
-            refresh_state = getattr(self, "_ui_refresh_state", None)
-            if refresh_state is not None:
-                refresh_state.session_stats_dirty = False
-            self._session_stats_refresh_requested_at = None
+        refresh_session_statistics_for_runtime(self, force=force)
 
     def _copy_session_stats_log(self) -> None:
         copy_session_stats_log_for(self)
@@ -3703,145 +3187,25 @@ class MainWindow(QMainWindow):
         label.setPixmap(pixmap)
 
     def _finish_hardware_initialization(self, text: str = "Hardware initialization scan finished.") -> None:
-        self.status_label.setText(text)
-        if self._hardware_init_ready_emitted:
-            return
-        self._hardware_init_ready_emitted = True
-        self._hardware_status_overrides.clear()
-        refresh_hw_device_status_strip(self)
-        self._sync_hardware_menu_actions()
-        self._emit_hardware_init_progress(100, text)
-        self._set_startup_loading_indicator(False)
-        self.hardware_init_finished.emit()
+        finish_hardware_initialization_for(self, text)
 
     def _start_hardware_initialization(self) -> None:
-        if self._hardware_init_task is not None:
-            return
-        experiment_control_window = getattr(self, "_experiment_control_window", None)
-        if experiment_control_window is not None and hasattr(experiment_control_window, "shutdown_devices"):
-            self._log_info("Resetting live hardware connections before reinitialization.")
-            try:
-                experiment_control_window.shutdown_devices()
-            except Exception as exc:
-                self._log_warning(f"Could not reset live hardware connections: {exc}")
-        self.status_label.setText("Scanning connected devices...")
-        self._emit_hardware_init_progress(12, "Scanning connected devices...")
-        self._log_info("Hardware initialization queued.")
-        self._sync_hardware_menu_actions()
-        task = HardwareInitTask(self._hardware_init_steps())
-        task.signals.progress.connect(self._emit_hardware_init_progress)
-        task.signals.step.connect(self._handle_hardware_init_step)
-        task.signals.finished.connect(self._handle_hardware_init_finished)
-        self._hardware_init_task = task
-        self._thread_pool.start(task)
+        start_hardware_initialization_for(self)
 
     def _handle_hardware_init_step(self, result: object) -> None:
-        if not isinstance(result, HardwareInitStepResult):
-            return
-        self._hardware_status_overrides[result.key] = (bool(result.connected), result.message)
-        self.status_label.setText(result.message)
-        if result.key == "spectrometer":
-            self._hardware_available = not isinstance(self._spectrometer, SimulatedSpectrometer)
-        elif result.key == "pump":
-            self._discovered_pump_probe = result.probe
-            self._update_pump_status(result.probe)
-        elif result.key == "mswitch":
-            self._initial_mswitch_devices = list(result.payload or [])
-            self._mswitch_probe = result.probe if result.probe is not None else None
-        refresh_hw_device_status_strip(self)
+        handle_hardware_init_step_for(self, result)
 
     def _handle_hardware_init_finished(self, result: object) -> None:
-        self._hardware_init_task = None
-        experiment_control_window = getattr(self, "_experiment_control_window", None)
-        if not isinstance(result, HardwareInitResult):
-            self._log_warning("Hardware initialization finished with an unexpected result payload.")
-            self._finish_hardware_initialization("Hardware initialization finished.")
-            return
-        if result.pump_probe is not None:
-            self._discovered_pump_probe = result.pump_probe
-            self._update_pump_status(result.pump_probe)
-            self._log_info(f"Pump controller discovered on {result.pump_probe.port}.")
-        elif result.pump_error:
-            self._log_warning(f"Pump controller scan completed with no usable device ({result.pump_error}).")
-        else:
-            self._log_warning("No pump controller discovered.")
-
-        if result.spectrometer_name:
-            if isinstance(self._spectrometer, SimulatedSpectrometer):
-                self._log_info(result.spectrometer_name)
-            else:
-                self._log_success(result.spectrometer_name)
-        else:
-            self._log_warning("Spectrometer initialization produced no name.")
-
-        self._initial_mswitch_devices = list(result.mswitch_devices)
-        self._mswitch_probe = result.mswitch_devices[0] if result.mswitch_devices else None
-        refresh_hw_device_status_strip(self)
-        if self._mswitch_probe is not None:
-            self._log_info(f"M-Switch discovered on {self._mswitch_probe.port}.")
-        elif result.mswitch_error:
-            self._log_warning(f"M-Switch scan failed: {result.mswitch_error}")
-        else:
-            self._log_warning("M-Switch not discovered at startup.")
-
-        if result.valve_probe is not None:
-            self._log_info(f"Valve controller discovered on {result.valve_probe.port}.")
-        elif result.valve_error:
-            self._log_warning(f"Valve controller scan failed: {result.valve_error}")
-        else:
-            self._log_warning("No valve controller discovered.")
-
-        self._emit_hardware_init_progress(100, "Hardware initialization complete.")
-        self._finish_hardware_initialization("Hardware initialization complete.")
-        self._sync_experiment_control_startup_ports()
+        handle_hardware_init_finished_for(self, result)
 
     def _disconnect_all_devices(self) -> None:
-        experiment_control_window = getattr(self, "_experiment_control_window", None)
-        if experiment_control_window is None or not hasattr(experiment_control_window, "shutdown_devices"):
-            self._log_info("No hardware controller window is available to disconnect.")
-            return
-        self._log_info("Disconnecting all hardware devices.")
-        try:
-            experiment_control_window.shutdown_devices()
-        except Exception as exc:
-            self._log_warning(f"Disconnect all devices failed: {exc}")
-            return
-        refresh_hw_device_status_strip(self)
-        self._log_info("All hardware devices disconnected.")
+        disconnect_all_devices_for(self)
 
     def _sync_hardware_menu_actions(self) -> None:
-        action = getattr(self, "_hw_disconnect_all_action", None)
-        if action is None:
-            return
-        action.setEnabled(self._hardware_init_task is None)
+        sync_hardware_menu_actions_for(self)
 
     def _sync_experiment_control_startup_ports(self) -> None:
-        try:
-            hardware_init_ready = bool(object.__getattribute__(self, "_hardware_init_ready_emitted"))
-        except Exception:
-            hardware_init_ready = False
-        if not hardware_init_ready:
-            return
-        profile = self._launch_profile_settings()
-        if not bool(getattr(profile, "scan_devices", False)):
-            return
-        experiment_control_window = getattr(self, "_experiment_control_window", None)
-        if experiment_control_window is None:
-            return
-        if hasattr(experiment_control_window, "enable_startup_device_auto_connect"):
-            try:
-                experiment_control_window.enable_startup_device_auto_connect()
-            except Exception as exc:
-                self._log_warning(f"Could not enable experiment-control startup auto-connect: {exc}")
-        if not hasattr(experiment_control_window, "refresh_device_ports"):
-            return
-        try:
-            refreshed = bool(experiment_control_window.refresh_device_ports())
-        except Exception as exc:
-            self._log_warning(f"Could not refresh experiment-control ports after initialization: {exc}")
-        else:
-            if refreshed:
-                self._log_info("Refreshing experiment-control ports after initialization.")
+        sync_experiment_control_startup_ports_for(self)
 
     def _build_menu_bar(self) -> None:
         menu_bar = build_menu_bar(self)
@@ -4016,28 +3380,19 @@ class MainWindow(QMainWindow):
         session_stats: bool = False,
         trace_label: str | None = None,
     ) -> None:
-        if stats:
-            self._ui_refresh_state.stats_dirty = True
-        if trace_plot:
-            self._ui_refresh_state.metric_plot_dirty = True
-        if summary:
-            self._ui_refresh_state.summary_dirty = True
-        if telemetry:
-            self._ui_refresh_state.telemetry_dirty = True
-        if live_estimate:
-            self._ui_refresh_state.live_estimate_dirty = True
-        if session_stats or stats or trace_plot or summary or telemetry or live_estimate or trace_label is not None:
-            self._ui_refresh_state.session_stats_dirty = True
-            if self._session_stats_refresh_requested_at is None:
-                self._session_stats_refresh_requested_at = perf_counter()
-        if trace_label is not None:
-            self._ui_refresh_state.pending_metric_label = trace_label
-        delay_ms = self._live_ui_refresh_delay_ms if self._live_active else self._stats_refresh_delay_ms
-        if self._live_active and (trace_plot or live_estimate or telemetry):
-            delay_ms = max(delay_ms, 220)
-        if not self._stats_refresh_timer.isActive():
-            self._stats_refresh_requested_at = perf_counter()
-            self._stats_refresh_timer.start(delay_ms)
+        request_deferred_ui_refresh_for_runtime(
+            self,
+            stats=stats,
+            trace_plot=trace_plot,
+            summary=summary,
+            telemetry=telemetry,
+            live_estimate=live_estimate,
+            session_stats=session_stats,
+            trace_label=trace_label,
+        )
+
+    def _request_plot_refresh(self, delay_ms: float | None = None) -> None:
+        request_plot_refresh_for_runtime(self, delay_ms=delay_ms)
 
     def _temporal_history_token(self, processed: Spectrum | None) -> tuple[object, ...] | None:
         if processed is None:
@@ -4154,9 +3509,7 @@ class MainWindow(QMainWindow):
         self._analysis_metrics_cache_result = {}
         self._update_poly_warning_indicator(fit)
         self._ui_refresh_state.plot_render_dirty = True
-        if not self._plot_refresh_timer.isActive():
-            self._plot_refresh_requested_at = perf_counter()
-            self._plot_refresh_timer.start()
+        self._request_plot_refresh()
         self._log_throttled(
             "plot_refresh",
             f"Plot refreshed | mode={self.plot_selector.currentText().lower()} | fit={'on' if fit is not None else 'off'}",
@@ -4171,10 +3524,10 @@ class MainWindow(QMainWindow):
             self._start_plot_processing_task(pending)
 
     def _flush_deferred_ui_refreshes(self) -> None:
-        self._run_gui_callback_timed("deferred_ui_flush", lambda: flush_deferred_ui_refreshes_for(self))
+        flush_deferred_ui_refreshes_for_runtime(self)
 
     def _flush_plot_refreshes(self) -> None:
-        self._run_gui_callback_timed("plot_refresh", lambda: flush_plot_refreshes_for(self))
+        flush_plot_refreshes_for_runtime(self)
 
     def _refresh_plot(self) -> None:
         refresh_plot_for(self)
@@ -4829,44 +4182,7 @@ class MainWindow(QMainWindow):
         return button
 
     def _run_gui_callback_timed(self, label: str, callback: Callable[[], None], *, warn_ms: float = 20.0) -> None:
-        started = perf_counter()
-        try:
-            callback()
-        finally:
-            elapsed_ms = (perf_counter() - started) * 1000.0
-            attr_name = {
-                "ui_state_save": "_last_ui_state_total_ms",
-                "acquisition_state_save": "_last_acquisition_state_total_ms",
-                "session_stats_snapshot": "_last_session_stats_recording_total_ms",
-                "session_summary_refresh": "_last_session_summary_refresh_total_ms",
-                "session_stats_refresh": "_last_session_stats_refresh_total_ms",
-                "deferred_ui_flush": "_last_deferred_ui_refresh_total_ms",
-                "plot_refresh": "_last_plot_refresh_total_ms",
-                "log_buffer": "_last_log_buffer_total_ms",
-                "ui_heartbeat": "_last_ui_heartbeat_total_ms",
-                "gui_housekeeping": "_last_gui_housekeeping_total_ms",
-            }.get(label, f"_last_{label}_total_ms")
-            if hasattr(self, attr_name):
-                setattr(self, attr_name, elapsed_ms)
-            warning_threshold_ms = {
-                "ui_heartbeat": 50.0,
-                "gui_housekeeping": 100.0,
-                "deferred_ui_flush": 100.0,
-                "plot_refresh": 75.0,
-                "session_stats_refresh": 75.0,
-                "session_summary_refresh": 75.0,
-                "log_buffer": 100.0,
-                "ui_state_save": 75.0,
-                "acquisition_state_save": 75.0,
-                "session_stats_snapshot": 75.0,
-            }.get(label, warn_ms)
-            if elapsed_ms >= warning_threshold_ms:
-                self._log_throttled(
-                    f"gui_callback_{label}",
-                    f"GUI callback {label} took {elapsed_ms:.2f} ms",
-                    level=logging.WARNING,
-                    min_interval=5.0,
-                )
+        run_gui_callback_timed_for_runtime(self, label, callback, warn_ms=warn_ms)
 
     def _toggle_window_max_restore(self) -> None:
         if self.isMaximized():
@@ -4963,10 +4279,8 @@ class MainWindow(QMainWindow):
         self._resume_live_after_auto_integration = False
         self._live_active = False
         self._simulation_refresh_timer.stop()
-        self._plot_refresh_timer.stop()
-        self._stats_refresh_timer.stop()
+        self._ui_task_scheduler.clear()
         self._ui_heartbeat_timer.stop()
-        self._processing_refresh_timer.stop()
         self._live_stop_event.set()
         if self._live_worker is not None and self._live_worker.is_alive():
             try:
@@ -4990,7 +4304,6 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 self._log_warning(f"Live processing worker shutdown failed: {exc}")
         self._live_processing_worker = None
-        self._live_result_timer.stop()
         self._reset_live_accumulator()
         if self._measurement_active:
             self._stop_measurement_run()
@@ -5004,7 +4317,9 @@ class MainWindow(QMainWindow):
         except TypeError:
             self._thread_pool.waitForDone()
         try:
-            self._ui_logger.removeHandler(self._log_handler)
+            log_handler = getattr(self, "_log_handler", None)
+            if log_handler is not None:
+                self._ui_logger.removeHandler(log_handler)
         except Exception:
             pass
         super().closeEvent(event)

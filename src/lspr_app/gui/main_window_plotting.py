@@ -241,9 +241,7 @@ def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
     window._analysis_metrics_cache_result = {}
     window._update_poly_warning_indicator(fit)
     window._ui_refresh_state.plot_render_dirty = True
-    if not window._plot_refresh_timer.isActive():
-        window._plot_refresh_requested_at = perf_counter()
-        window._plot_refresh_timer.start()
+    window._request_plot_refresh()
     window._log_throttled(
         "plot_refresh",
         f"Plot refreshed | mode={window.plot_selector.currentText().lower()} | fit={'on' if fit is not None else 'off'}",
@@ -501,7 +499,7 @@ def update_live_estimate_for(window) -> None:
     if processing_debug_mode_enabled() and window._last_processing_queue_wait_ms is not None:
         wait_text = f" | wait {window._last_processing_queue_wait_ms:.1f} ms"
     window.live_estimate.setText(
-        f"src {source_rate_text} | disp {desired_refresh_text}/{actual_refresh_text} | "
+        f"src {source_rate_text} | disp target {desired_refresh_text} | recent avg {actual_refresh_text} | "
         f"proc {proc_text}{wait_text} | head {headroom_text} | skip {skipped_rate_hz:.1f} Hz"
     )
     window._ui_refresh_state.live_estimate_dirty = False
@@ -611,13 +609,8 @@ def handle_live_setting_change_for(window) -> None:
             window._live_worker.update_settings(window._current_settings())
         if window._live_processing_worker is not None:
             window._live_processing_worker.update_settings(window._current_processing_settings())
-        if window._live_result_timer.isActive():
-            window._live_result_requested_at = perf_counter()
-            window._live_result_timer.start(window._live_ui_refresh_delay_ms)
-        window._stats_refresh_timer.stop()
-        window._stats_refresh_requested_at = perf_counter()
-        window._stats_refresh_timer.start(window._live_ui_refresh_delay_ms)
         window._request_deferred_ui_refresh(trace_plot=True, live_estimate=True)
+        window._request_plot_refresh()
         window._request_trace_autoscale()
         window.status_label.setText("Live display window reset after settings change.")
         window._log_debug("Live display reset after settings change.")
@@ -632,13 +625,8 @@ def handle_live_setting_change_for(window) -> None:
 def handle_simulation_output_rate_change_for(window) -> None:
     if window._live_active and window._source_mode == "simulation" and window._live_worker is not None:
         window._live_worker.update_cycle_period(1.0 / max(window.sim_output_rate_spin.value(), 1e-9))
-        if window._live_result_timer.isActive():
-            window._live_result_requested_at = perf_counter()
-            window._live_result_timer.start(window._live_ui_refresh_delay_ms)
-        window._stats_refresh_timer.stop()
-        window._stats_refresh_requested_at = perf_counter()
-        window._stats_refresh_timer.start(window._live_ui_refresh_delay_ms)
         window._request_deferred_ui_refresh(trace_plot=True, live_estimate=True)
+        window._request_plot_refresh()
         window._request_trace_autoscale()
     window._schedule_acquisition_state_persist()
     window._log_throttled(

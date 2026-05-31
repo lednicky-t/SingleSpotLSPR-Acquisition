@@ -29,6 +29,7 @@ from lspr_ui import app_icon, apply_base_app_theme
 from lspr_app.storage.app_config import load_app_setting, save_app_setting
 
 from lspr_app import __version__
+from lspr_app.diagnostics import DiagnosticsConfig, apply_diagnostic_info_filter
 from lspr_app.gui.main_window_logging import build_recording_experiment_log_path
 from lspr_core import (
     DEFAULT_LAUNCH_PROFILE,
@@ -421,6 +422,7 @@ def _attach_startup_file_logging() -> logging.Handler | None:
     handler = logging.FileHandler(log_path, encoding="utf-8")
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s %(message)s", "%H:%M:%S"))
+    apply_diagnostic_info_filter(handler, DiagnosticsConfig.from_env())
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
@@ -462,12 +464,22 @@ def main() -> None:
             return
         splash.update_progress(100, "Ready.")
         app.instance_lock = instance_lock
-        window = main_window_cls(
-            spectrometer=spectrometer,
-            session=session,
-            discovered_pump_probe=pump_probe,
-            launch_profile=launch_profile,
-        )
+        bootstrap_logger = logging.getLogger("lspr_app.bootstrap")
+        bootstrap_logger.info("Constructing main window...")
+        try:
+            window = main_window_cls(
+                spectrometer=spectrometer,
+                session=session,
+                discovered_pump_probe=pump_probe,
+                launch_profile=launch_profile,
+            )
+        except Exception as exc:  # pragma: no cover - defensive startup path
+            bootstrap_logger.exception("Main window construction failed.")
+            splash.close()
+            QMessageBox.critical(None, "Startup error", f"Failed to construct main window: {exc}")
+            app.quit()
+            return
+        bootstrap_logger.info("Main window constructed.")
         app.main_window = window
         window._startup_show_requested_t0 = perf_counter()
         window.show()

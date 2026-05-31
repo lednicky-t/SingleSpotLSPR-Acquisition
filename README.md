@@ -46,7 +46,8 @@ python -m lspr_app.app
 - The suite launcher can start the app in three profiles:
   - `Full`: current behavior, including startup hardware discovery and experiment-control auto-connect.
   - `Simulation`: skips startup device discovery and runs the acquisition UI in simulation mode.
-  - `Control editor`: opens the experiment-control editor without the runtime transport controls and without startup device discovery.
+- `Control editor`: opens the experiment-control editor without the runtime transport controls and without startup device discovery.
+- The suite launcher also has a `File info` toggle for the acquisition card; when off, INFO-level diagnostics are filtered out of the startup/session log file to make A/B tests stricter.
 - Measurement files and local settings are ignored by Git so the repository stays clean.
 - The project name shown in the UI is `LSPR Acquisition`.
 - Versioning is documented in `docs/versioning.md`.

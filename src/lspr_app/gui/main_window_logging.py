@@ -11,6 +11,8 @@ import numpy as np
 from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import QApplication
 
+from lspr_app.diagnostics import DiagnosticsConfig
+from lspr_app.gui.runtime_diagnostics import SessionDiagnosticsSnapshot, build_session_statistics_lines
 from lspr_app.gui.logging_utils import SUCCESS_LOG_LEVEL
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -193,9 +195,9 @@ def build_recording_experiment_log_path(
 def build_pipeline_timing_breakdown_for(window) -> dict[str, float | None]:
     reference_ms = _frame_gap_reference_ms(window)
     acquisition_ms = _timing_value_ms(getattr(window, "_last_elapsed_ms", None))
-    live_result_delay_ms = _timing_value_ms(getattr(window, "_last_live_result_timer_delay_ms", None))
+    live_result_delay_ms = _timing_value_ms(getattr(window, "_last_live_result_poll_delay_ms", None))
     live_acquisition_flush_ms = _timing_value_ms(getattr(window, "_last_live_acquisition_flush_ms", None))
-    live_processed_delay_ms = _timing_value_ms(getattr(window, "_last_live_processed_timer_delay_ms", None))
+    live_processed_delay_ms = _timing_value_ms(getattr(window, "_last_live_processed_poll_delay_ms", None))
     live_processed_flush_ms = _timing_value_ms(getattr(window, "_last_live_processed_flush_ms", None))
     stats_refresh_delay_ms = _timing_value_ms(getattr(window, "_last_stats_refresh_delay_ms", None))
     summary_refresh_ms = _timing_value_ms(getattr(window, "_last_summary_refresh_ms", None))
@@ -260,6 +262,7 @@ def build_pipeline_timing_breakdown_for(window) -> dict[str, float | None]:
 
 def _pipeline_timing_line(label: str, value_ms: float | None) -> str:
     return f"  {label}: {_timing_plain_text(value_ms)}"
+
 
 def set_log_following(window, enabled: bool) -> None:
     window._log_follow_enabled = bool(enabled)
@@ -676,175 +679,8 @@ def build_session_panel_html_for(window) -> str:
 
 
 def build_session_statistics_text_for(window) -> str:
-    skip_rate = window._live_skip_rate_hz() if hasattr(window, "_live_skip_rate_hz") else 0.0
-    display_rate_text = f"{float(window.live_rate_spin.value()):.2f} Hz" if hasattr(window, "live_rate_spin") else "-"
-    simulation_rate_text = "-"
-    if hasattr(window, "sim_output_rate_spin"):
-        try:
-            simulation_rate_text = f"{float(window.sim_output_rate_spin.value()):.2f} Hz"
-        except (TypeError, ValueError):
-            simulation_rate_text = "-"
-    actual_rate_text = "-"
-    if getattr(window, "_actual_plot_refresh_rate_hz", None) is not None:
-        actual_rate_text = f"{float(window._actual_plot_refresh_rate_hz):.2f} Hz"
-    processing_text = "-" if getattr(window, "_last_processing_ms", None) is None else f"{window._last_processing_ms:.1f} ms"
-    headroom_value = getattr(window, "_processing_headroom_ratio", None)
-    headroom_text = "-" if headroom_value is None else f"{float(headroom_value):.2f}x"
-    wait_text = "-"
-    if getattr(window, "_last_processing_queue_wait_ms", None) is not None:
-        wait_text = f"{window._last_processing_queue_wait_ms:.1f} ms"
-    acquisition_latency_text = "-"
-    if getattr(window, "_last_elapsed_ms", None) is not None:
-        acquisition_latency_text = f"{window._last_elapsed_ms:.1f} ms"
-    acquisition_overhead_text = "-"
-    if getattr(window, "_last_overhead_ms", None) is not None:
-        acquisition_overhead_text = f"{window._last_overhead_ms:.1f} ms"
-    frame_spacing_text = "-"
-    if getattr(window, "_last_spacing_ms", None) is not None:
-        frame_spacing_text = f"{window._last_spacing_ms:.1f} ms"
-    acquisition_latency_text = _timing_plain_text(getattr(window, "_last_elapsed_ms", None))
-    acquisition_overhead_text = _timing_plain_text(getattr(window, "_last_overhead_ms", None))
-    frame_spacing_text = _timing_plain_text(getattr(window, "_last_spacing_ms", None))
-    breakdown = build_pipeline_timing_breakdown_for(window)
-    source_rate_text = "-"
-    if getattr(window, "_effective_raw_rate_hz", None) is not None:
-        source_rate_text = f"{window._effective_raw_rate_hz:.2f} Hz"
-    ui_state_delay_text = _timing_plain_text(getattr(window, "_last_ui_state_delay_ms", None))
-    ui_state_save_text = _timing_plain_text(getattr(window, "_last_ui_state_save_ms", None))
-    ui_state_total_text = _timing_plain_text(getattr(window, "_last_ui_state_total_ms", None))
-    acquisition_state_delay_text = _timing_plain_text(getattr(window, "_last_acquisition_state_delay_ms", None))
-    acquisition_state_save_text = _timing_plain_text(getattr(window, "_last_acquisition_state_save_ms", None))
-    acquisition_state_total_text = _timing_plain_text(getattr(window, "_last_acquisition_state_total_ms", None))
-    session_stats_recording_delay_text = _timing_plain_text(getattr(window, "_last_session_stats_recording_delay_ms", None))
-    session_stats_recording_snapshot_text = _timing_plain_text(getattr(window, "_last_session_stats_recording_snapshot_ms", None))
-    session_stats_recording_total_text = _timing_plain_text(getattr(window, "_last_session_stats_recording_total_ms", None))
-    measurement_state_text = "recording" if getattr(window, "_measurement_active", False) else "idle"
-    current_measurement_runtime_text = "-"
-    total_measurement_runtime_text = "-"
-    started_at = getattr(window, "_measurement_started_at", None)
-    if started_at is not None:
-        elapsed_s = max((datetime.now(timezone.utc) - started_at).total_seconds(), 0.0)
-        current_measurement_runtime_text = f"{elapsed_s:.1f} s"
-        total_measurement_runtime_text = f"{elapsed_s:.1f} s"
-    ui_heartbeat_delay_text = _timing_plain_text(getattr(window, "_last_ui_heartbeat_delay_ms", None))
-    ui_heartbeat_max_delay_text = _timing_plain_text(getattr(window, "_ui_heartbeat_max_delay_ms", None))
-    ui_heartbeat_total_text = _timing_plain_text(getattr(window, "_last_ui_heartbeat_total_ms", None))
-    log_buffer_total_text = _timing_plain_text(getattr(window, "_last_log_buffer_total_ms", None))
-    gui_housekeeping_total_text = _timing_plain_text(getattr(window, "_last_gui_housekeeping_total_ms", None))
-    plot_refresh_total_text = _timing_plain_text(getattr(window, "_last_plot_refresh_total_ms", None))
-    deferred_ui_total_text = _timing_plain_text(getattr(window, "_last_deferred_ui_refresh_total_ms", None))
-    deferred_ui_live_estimate_text = _timing_plain_text(getattr(window, "_last_deferred_ui_live_estimate_ms", None))
-    deferred_ui_telemetry_text = _timing_plain_text(getattr(window, "_last_deferred_ui_telemetry_ms", None))
-    deferred_ui_trace_plot_text = _timing_plain_text(getattr(window, "_last_deferred_ui_trace_plot_ms", None))
-    deferred_ui_summary_text = _timing_plain_text(getattr(window, "_last_deferred_ui_summary_ms", None))
-    deferred_ui_stats_text = _timing_plain_text(getattr(window, "_last_deferred_ui_stats_ms", None))
-    session_summary_total_text = _timing_plain_text(getattr(window, "_last_session_summary_refresh_total_ms", None))
-    session_stats_total_text = _timing_plain_text(getattr(window, "_last_session_stats_refresh_total_ms", None))
-    trace_points_text = "-"
-    peak_history = getattr(window, "_peak_history", None)
-    if peak_history:
-        try:
-            trace_points_text = str(max(len(buffer) for buffer in peak_history.values()))
-        except ValueError:
-            trace_points_text = "0"
-    trace_buffer_points_text = "-"
-    peak_history_buffers = getattr(window, "_peak_history_buffers", None)
-    if peak_history_buffers:
-        try:
-            trace_buffer_points_text = str(max(len(buffer) for buffer in peak_history_buffers.values()))
-        except ValueError:
-            trace_buffer_points_text = "0"
-    heatmap_rows_text = str(len(getattr(window, "_sensorgram_heatmap_history", []) or []))
-    dropped_frames_value = getattr(window, "_live_display_dropped_frames", None)
-    dropped_frames_text = "-" if dropped_frames_value is None else str(max(int(dropped_frames_value), 0))
-    live_result_queue_text = _queue_depth_text(window, "_live_result_queue")
-    live_result_queue_max_text = _queue_depth_max_text(getattr(window, "_live_result_queue_max_depth", None))
-    live_processed_queue_text = _queue_depth_text(window, "_live_processed_queue")
-    live_processed_queue_max_text = _queue_depth_max_text(getattr(window, "_live_processed_queue_max_depth", None))
-    return "\n".join(
-        [
-            "App",
-            f"  Refresh rate: {display_rate_text}",
-            f"  Simulation output rate: {simulation_rate_text}",
-            f"  Actual refresh: {actual_rate_text}",
-            f"  Frame skip rate: {skip_rate:.1f} Hz",
-            f"  State: {measurement_state_text}",
-            f"  Runtime: {current_measurement_runtime_text}",
-            f"  Total runtime: {total_measurement_runtime_text}",
-            "",
-            "UI event loop heartbeat",
-            f"  Current delay: {ui_heartbeat_delay_text}",
-            f"  Max delay: {ui_heartbeat_max_delay_text}",
-            f"  Callback time: {ui_heartbeat_total_text}",
-            "",
-            "Periodic callbacks",
-            f"  UI state save delay: {ui_state_delay_text}",
-            f"  UI state save time: {ui_state_save_text}",
-            f"  UI state save total: {ui_state_total_text}",
-            f"  Acquisition state delay: {acquisition_state_delay_text}",
-            f"  Acquisition state save time: {acquisition_state_save_text}",
-            f"  Acquisition state save total: {acquisition_state_total_text}",
-            f"  Session stats snapshot delay: {session_stats_recording_delay_text}",
-            f"  Session stats snapshot time: {session_stats_recording_snapshot_text}",
-            f"  Session stats snapshot total: {session_stats_recording_total_text}",
-            "",
-            "GUI callback wall time",
-            f"  Plot refresh total: {plot_refresh_total_text}",
-            f"  Deferred UI total: {deferred_ui_total_text}",
-            f"  Deferred UI live estimate: {deferred_ui_live_estimate_text}",
-            f"  Deferred UI telemetry: {deferred_ui_telemetry_text}",
-            f"  Deferred UI metric plot: {deferred_ui_trace_plot_text}",
-            f"  Deferred UI summary: {deferred_ui_summary_text}",
-            f"  Deferred UI stats: {deferred_ui_stats_text}",
-            f"  Session summary total: {session_summary_total_text}",
-            f"  Session stats total: {session_stats_total_text}",
-            f"  Log buffer total: {log_buffer_total_text}",
-            f"  GUI housekeeping total: {gui_housekeeping_total_text}",
-            f"  Metric history points: {trace_points_text}",
-            f"  Metric display buffer points: {trace_buffer_points_text}",
-            f"  Heatmap rows: {heatmap_rows_text}",
-            f"  Live result queue: {live_result_queue_text} | max: {live_result_queue_max_text}",
-            f"  Live processed queue: {live_processed_queue_text} | max: {live_processed_queue_max_text}",
-            "",
-            "Processing",
-            f"  Time per spectrum: {processing_text}",
-            f"  Queue wait: {wait_text}",
-            f"  Headroom: {headroom_text}",
-            "",
-            "Pipeline gap breakdown",
-            _pipeline_timing_line("Acquisition latency", getattr(window, "_last_elapsed_ms", None)),
-            _pipeline_timing_line("Live acquisition timer delay", breakdown["live_result_delay_ms"]),
-            _pipeline_timing_line("Live acquisition flush", getattr(window, "_last_live_acquisition_flush_ms", None)),
-            _pipeline_timing_line("Live processing timer delay", breakdown["live_processed_delay_ms"]),
-            _pipeline_timing_line("Live processing flush", getattr(window, "_last_live_processed_flush_ms", None)),
-            _pipeline_timing_line("Stats refresh timer delay", breakdown["stats_refresh_delay_ms"]),
-            _pipeline_timing_line("Session summary refresh", getattr(window, "_last_summary_refresh_ms", None)),
-            _pipeline_timing_line("Session stats refresh", getattr(window, "_last_session_stats_refresh_ms", None)),
-            _pipeline_timing_line("Log buffer timer delay", breakdown["log_buffer_delay_ms"]),
-            _pipeline_timing_line("Log buffer flush", getattr(window, "_last_log_buffer_flush_ms", None)),
-            _pipeline_timing_line("Processing queue wait", getattr(window, "_last_processing_queue_wait_ms", None)),
-            _pipeline_timing_line("Processing compute", getattr(window, "_last_processing_ms", None)),
-            _pipeline_timing_line("Plot refresh timer delay", breakdown["plot_refresh_delay_ms"]),
-            _pipeline_timing_line("Plot render", getattr(window, "_last_plot_refresh_ms", None)),
-            _pipeline_timing_line("Sensorgram render", getattr(window, "_last_sensorgram_render_ms", None)),
-            _pipeline_timing_line("Sensorgram heatmap render", getattr(window, "_last_sensorgram_heatmap_render_ms", None)),
-            _pipeline_timing_line("Deferred UI flush", getattr(window, "_last_deferred_ui_refresh_ms", None)),
-            _pipeline_timing_line("Unattributed / idle", breakdown["idle_ms"]),
-            "",
-            "Spectrum redraw breakdown",
-            _pipeline_timing_line("Curve update", getattr(window, "_last_spectrum_curve_update_ms", None)),
-            _pipeline_timing_line("Fit update", getattr(window, "_last_spectrum_fit_update_ms", None)),
-            _pipeline_timing_line("Marker update", getattr(window, "_last_spectrum_marker_update_ms", None)),
-            _pipeline_timing_line("Residual update", getattr(window, "_last_spectrum_residual_update_ms", None)),
-            "",
-            "Device acquisition",
-            f"  Acquisition latency: {acquisition_latency_text}",
-            f"  Acquisition overhead: {acquisition_overhead_text}",
-            f"  Frame spacing: {frame_spacing_text}",
-            f"  Effective source rate: {source_rate_text}",
-            f"  Dropped frames: {dropped_frames_text}",
-        ]
-    )
+    snapshot = SessionDiagnosticsSnapshot.from_window(window)
+    return "\n".join(build_session_statistics_lines(snapshot))
 
 
 def append_session_stats_log_snapshot_for(window, text: str | None = None) -> None:

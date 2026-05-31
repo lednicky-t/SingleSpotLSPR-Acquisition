@@ -10,6 +10,7 @@ import numpy as np
 import pyqtgraph as pg
 
 from lspr_app.domain.models import Spectrum
+from lspr_app.domain.processing import processing_debug_mode_enabled
 from lspr_app.gui.history_utils import trim_history_tail_in_place
 
 
@@ -313,16 +314,34 @@ def flush_plot_refreshes(window) -> None:
         window._last_plot_refresh_ms = (finished - started) * 1000.0
         window._last_plot_refresh_gap_ms = None if previous_finish is None else (finished - float(previous_finish)) * 1000.0
         window._last_plot_refresh_finished_at = finished
-        if window._last_plot_refresh_gap_ms is not None and window._last_plot_refresh_gap_ms > 0:
-            window._actual_plot_refresh_rate_hz = 1000.0 / window._last_plot_refresh_gap_ms
+        refresh_timestamps = getattr(window, "_plot_refresh_timestamps", None)
+        if refresh_timestamps is None:
+            refresh_timestamps = []
+            window._plot_refresh_timestamps = refresh_timestamps
+        refresh_timestamps.append(finished)
+        window._plot_refresh_timestamps = [
+            timestamp
+            for timestamp in refresh_timestamps
+            if (finished - float(timestamp)) <= float(getattr(window, "_plot_refresh_rate_window_s", 5.0))
+        ]
+        if len(window._plot_refresh_timestamps) >= 2:
+            first_timestamp = float(window._plot_refresh_timestamps[0])
+            last_timestamp = float(window._plot_refresh_timestamps[-1])
+            span_s = last_timestamp - first_timestamp
+            if span_s > 0:
+                window._actual_plot_refresh_rate_hz = (len(window._plot_refresh_timestamps) - 1) / span_s
+            else:
+                window._actual_plot_refresh_rate_hz = None
         else:
             window._actual_plot_refresh_rate_hz = None
         if processing_debug_mode_enabled():
             gap_text = "-" if window._last_plot_refresh_gap_ms is None else f"{window._last_plot_refresh_gap_ms:.2f} ms"
+            window._plot_refresh_rate_window_s = float(getattr(window, "_plot_refresh_rate_window_s", 5.0))
+            refresh_window_text = f"{window._plot_refresh_rate_window_s:.1f} s"
             actual_text = "-" if window._actual_plot_refresh_rate_hz is None else f"{window._actual_plot_refresh_rate_hz:.2f} Hz"
             window._log_throttled(
                 "gui_plot_refresh",
-                f"GUI plot refresh: {window._last_plot_refresh_ms:.2f} ms | gap={gap_text} | actual={actual_text}",
+                f"GUI plot refresh: {window._last_plot_refresh_ms:.2f} ms | gap={gap_text} | avg={actual_text} | window={refresh_window_text}",
                 level=logging.INFO,
                 min_interval=0.5,
             )
