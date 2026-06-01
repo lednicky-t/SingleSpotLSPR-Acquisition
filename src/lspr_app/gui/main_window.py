@@ -119,9 +119,11 @@ from lspr_app.gui.main_window_panels import (
     configure_processing_group_controls,
 )
 from lspr_app.gui.main_window_runtime import (
+    build_runtime_drift_lines as build_runtime_drift_lines_for_runtime,
     drain_gui_housekeeping_tasks as drain_gui_housekeeping_tasks_for,
     flush_deferred_ui_refreshes as flush_deferred_ui_refreshes_for_runtime,
     flush_plot_refreshes as flush_plot_refreshes_for_runtime,
+    initialize_runtime_drift_probe as initialize_runtime_drift_probe_for_runtime,
     refresh_session_statistics as refresh_session_statistics_for_runtime,
     refresh_session_summary as refresh_session_summary_for_runtime,
     request_deferred_ui_refresh as request_deferred_ui_refresh_for_runtime,
@@ -223,6 +225,13 @@ from lspr_app.gui.main_window_plotting import (
     update_live_estimate_for,
     update_window_mode_label_for,
 )
+from lspr_app.gui.plot_view_cache import (
+    PlotViewCache,
+    build_active_trace_series_token,
+    extract_series_arrays,
+    derive_heatmap_levels_from_matrix,
+    expand_heatmap_levels,
+)
 from lspr_app.gui.update_scheduler import GuiTaskScheduler
 from lspr_app.gui.main_window_logging import (
     append_log_record,
@@ -282,7 +291,6 @@ from lspr_app.gui.spectrum_plot_controller import (
     update_residual_view_geometry,
     update_spectrum_stats,
 )
-from lspr_app.gui.history_utils import trim_history_tail_in_place
 from lspr_app.gui.trace_plot_controller import (
     autoscale_metric_plot,
     handle_metric_mouse_moved,
@@ -479,6 +487,7 @@ class MainWindow(QMainWindow):
         self._measurement_flush_interval_s = 5.0
         self._measurement_axis_lock: np.ndarray | None = None
         self._peak_history: dict[str, AppendOnlyMetricHistoryBuffer] = {}
+        self._plot_view_cache = PlotViewCache()
         self._peak_reference_processed: Spectrum | None = None
         self._live_trace_started_at: datetime | None = None
         self._pending_manual_kind: str | None = None
@@ -545,6 +554,8 @@ class MainWindow(QMainWindow):
         self._ui_state_autosave_enabled = bool(load_app_setting("ui_state_autosave_enabled", True))
         self._acquisition_state_autosave_enabled = bool(load_app_setting("acquisition_state_autosave_enabled", True))
         self._log_buffering_enabled = bool(load_app_setting("log_buffering_enabled", True))
+        self._sensorgram_heatmap_enabled = bool(load_app_setting("sensorgram_heatmap_enabled", True))
+        self._metric_plot_enabled = bool(load_app_setting("metric_plot_enabled", True))
         self._last_processed_plot: Spectrum | None = None
         self._last_fit_plot: Spectrum | None = None
         self._processed_cache_key: tuple[object, ...] | None = None
@@ -586,9 +597,11 @@ class MainWindow(QMainWindow):
         self.sensorgram_content_mode_button = QToolButton()
         self.sensorgram_window_button = QToolButton()
         self._sensorgram_heatmap_history: list[tuple[float, np.ndarray]] = []
+        self._sensorgram_heatmap_history_revision = 0
         self._sensorgram_heatmap_history_max_rows = 800
         self._sensorgram_heatmap_wavelengths: np.ndarray | None = None
         self._sensorgram_heatmap_axis_key: tuple[int, float, float] | None = None
+        self._sensorgram_heatmap_levels: tuple[float, float] | None = None
         self._peak_history_buffers: dict[str, MetricHistoryBuffer] = {}
         self._last_summary_text: str = ""
         self._last_summary_refresh_ts: float = 0.0
@@ -605,6 +618,7 @@ class MainWindow(QMainWindow):
         self._visible_trace_x: np.ndarray | None = None
         self._visible_trace_y: np.ndarray | None = None
         self._visible_trace_mode = "elapsed"
+        self._metric_render_display_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._plots_frozen = False
         self._sensorgram_frozen = False
         self._measurement_compression_blink_visible = True
@@ -1149,13 +1163,27 @@ class MainWindow(QMainWindow):
         }
         for curve in self.trace_curves.values():
             curve.setClipToView(True)
-            curve.setDownsampling(auto=True, method="peak")
+            curve.setDownsampling(auto=False, ds=1)
         self.trace_heatmap_image = pg.ImageItem(axisOrder="row-major")
         self.trace_heatmap_image.setVisible(False)
         self.trace_heatmap_image.setZValue(-10)
         self.trace_heatmap_image.setAutoDownsample(True)
         self.trace_heatmap_image.setLookupTable(self._sensorgram_heatmap_lookup_table())
         self.trace_plot.addItem(self.trace_heatmap_image, ignoreBounds=True)
+        self.trace_heatmap_notice_item = pg.TextItem(
+            html=(
+                "<div style='text-align:center;'>"
+                "<span style='font-size:12pt; font-weight:600; color:#d8dee9;'>Heatmap unavailable</span><br>"
+                "<span style='font-size:9pt; color:#9aa4b2;'>Enable it in Help &gt; Performance switches.</span>"
+                "</div>"
+            ),
+            anchor=(0.5, 0.5),
+            fill=pg.mkBrush(18, 24, 31, 210),
+            border=pg.mkPen(120, 130, 145, 160),
+        )
+        self.trace_heatmap_notice_item.setVisible(False)
+        self.trace_heatmap_notice_item.setZValue(50)
+        self.trace_plot.addItem(self.trace_heatmap_notice_item, ignoreBounds=True)
         self.trace_legend = self.trace_plot.addLegend(offset=(10, 10))
         self.trace_vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#666666", width=1))
         self.trace_hline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#666666", width=1))
@@ -1266,6 +1294,7 @@ class MainWindow(QMainWindow):
         else:
             self._refresh_plot()
         self._set_measurement_buttons_enabled(True)
+        initialize_runtime_drift_probe_for_runtime(self)
         self.hardware_init_progress.connect(self._update_startup_loading_indicator)
         self.hardware_init_finished.connect(lambda: self._set_startup_loading_indicator(False))
         if self._launch_profile_spec.scan_devices:
@@ -1289,6 +1318,9 @@ class MainWindow(QMainWindow):
 
     def _build_recording_context_row(self) -> QWidget:
         return build_recording_context_row_for(self)
+
+    def _build_runtime_drift_lines(self) -> list[str]:
+        return build_runtime_drift_lines_for_runtime(self)
 
     def recording_project_destination(self) -> str:
         return self.project_destination_edit.text().strip()
@@ -2218,6 +2250,28 @@ class MainWindow(QMainWindow):
     def _set_log_buffering_enabled(self, enabled: bool) -> None:
         set_log_buffering_enabled_for(self, enabled)
 
+    def _set_sensorgram_heatmap_enabled(self, enabled: bool) -> None:
+        self._sensorgram_heatmap_enabled = bool(enabled)
+        save_app_setting("sensorgram_heatmap_enabled", self._sensorgram_heatmap_enabled)
+        state_text = "enabled" if self._sensorgram_heatmap_enabled else "disabled"
+        self.status_label.setText(f"Sensorgram heatmap {state_text}.")
+        self._log_info(f"Sensorgram heatmap {state_text}.")
+        if hasattr(self, "trace_heatmap_notice_item"):
+            self.trace_heatmap_notice_item.setVisible(False)
+        self._refresh_trace_plot("Peak position (nm)")
+        self._request_deferred_ui_refresh(trace_plot=True, stats=True)
+
+    def _set_metric_plot_enabled(self, enabled: bool) -> None:
+        self._metric_plot_enabled = bool(enabled)
+        save_app_setting("metric_plot_enabled", self._metric_plot_enabled)
+        state_text = "enabled" if self._metric_plot_enabled else "disabled"
+        self.status_label.setText(f"Metric plot {state_text}.")
+        self._log_info(f"Metric plot {state_text}.")
+        if hasattr(self, "trace_heatmap_notice_item"):
+            self.trace_heatmap_notice_item.setVisible(False)
+        self._refresh_trace_plot("Peak position (nm)")
+        self._request_deferred_ui_refresh(trace_plot=True, stats=True)
+
     def _apply_acquisition_state_to_widgets(self, state: dict[str, object]) -> None:
         apply_acquisition_state_to_widgets(self, state)
 
@@ -2535,6 +2589,9 @@ class MainWindow(QMainWindow):
         self._peak_history.clear()
         self._peak_history_buffers.clear()
         self._sensorgram_heatmap_history.clear()
+        self._sensorgram_heatmap_history_revision += 1
+        if hasattr(self, "_plot_view_cache"):
+            self._plot_view_cache.clear()
         self._sensorgram_heatmap_wavelengths = None
         self._sensorgram_heatmap_axis_key = None
         self._peak_reference_processed = None
@@ -4035,52 +4092,49 @@ class MainWindow(QMainWindow):
             self._sensorgram_heatmap_wavelengths = wavelengths.copy()
             self._sensorgram_heatmap_axis_key = axis_key
             self._sensorgram_heatmap_history.clear()
+            self._sensorgram_heatmap_history_revision += 1
+            self._sensorgram_heatmap_levels = None
         self._sensorgram_heatmap_history.append((float(time_value), values.copy()))
-        trim_history_tail_in_place(
-            self._sensorgram_heatmap_history,
-            int(getattr(self, "_sensorgram_heatmap_history_max_rows", 2000)),
-        )
+        self._sensorgram_heatmap_history_revision += 1
+        self._sensorgram_heatmap_levels = expand_heatmap_levels(self._sensorgram_heatmap_levels, values)
 
     def _active_trace_series(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-        selected_metrics = set(self._selected_trace_metrics())
-        view_mode = self._normalize_sensorgram_view_mode(getattr(self, "_sensorgram_view_mode", "absolute"))
-        def _series_to_arrays(series: object) -> tuple[np.ndarray, np.ndarray]:
-            if hasattr(series, "to_arrays"):
-                return series.to_arrays()  # type: ignore[no-any-return]
-            if isinstance(series, tuple) and len(series) == 2:
-                return np.asarray(series[0], dtype=np.float64), np.asarray(series[1], dtype=np.float64)
-            if not series:
-                return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
-            return (
-                np.asarray([float(item[0]) for item in series], dtype=np.float64),
-                np.asarray([float(item[1]) for item in series], dtype=np.float64),
-            )
-        if view_mode == "absolute":
-            peak_history = getattr(self, "_peak_history", None)
-            if peak_history:
+        cache = getattr(self, "_plot_view_cache", None)
+
+        def _build_active_series() -> dict[str, tuple[np.ndarray, np.ndarray]]:
+            selected_metrics = set(self._selected_trace_metrics())
+            view_mode = self._normalize_sensorgram_view_mode(getattr(self, "_sensorgram_view_mode", "absolute"))
+            if view_mode == "absolute":
+                peak_history = getattr(self, "_peak_history", None)
+                if peak_history:
+                    active = {
+                        name: extract_series_arrays(buffer)
+                        for name, buffer in peak_history.items()
+                        if name in selected_metrics and len(buffer) > 0
+                    }
+                    if active:
+                        return active
+            peak_history_buffers = getattr(self, "_peak_history_buffers", None)
+            if peak_history_buffers:
                 active = {
-                    name: _series_to_arrays(buffer)
-                    for name, buffer in peak_history.items()
+                    name: extract_series_arrays(buffer)
+                    for name, buffer in peak_history_buffers.items()
                     if name in selected_metrics and len(buffer) > 0
                 }
                 if active:
                     return active
-        peak_history_buffers = getattr(self, "_peak_history_buffers", None)
-        if peak_history_buffers:
-            active = {
-                name: _series_to_arrays(buffer)
-                for name, buffer in peak_history_buffers.items()
-                if name in selected_metrics and len(buffer) > 0
-            }
-            if active:
-                return active
-        if self._peak_history:
-            return {
-                name: _series_to_arrays(series)
-                for name, series in self._peak_history.items()
-                if name in selected_metrics and series
-            }
-        return {}
+            if self._peak_history:
+                return {
+                    name: extract_series_arrays(series)
+                    for name, series in self._peak_history.items()
+                    if name in selected_metrics and series
+                }
+            return {}
+
+        token = build_active_trace_series_token(self)
+        if cache is None:
+            return _build_active_series()
+        return cache.cached_active_trace_series(token, _build_active_series)
 
     def _update_spectrum_stats(self, processed: Spectrum | None, fit: Spectrum | None) -> None:
         update_spectrum_stats_for(self, processed, fit)

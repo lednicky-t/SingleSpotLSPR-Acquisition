@@ -403,8 +403,14 @@ def clear_trace_history_for(window) -> None:
     window._peak_history.clear()
     if hasattr(window, "_peak_history_buffers"):
         window._peak_history_buffers.clear()
+    if hasattr(window, "_metric_render_display_cache"):
+        window._metric_render_display_cache.clear()
     if hasattr(window, "_sensorgram_heatmap_history"):
         window._sensorgram_heatmap_history.clear()
+    if hasattr(window, "_sensorgram_heatmap_history_revision"):
+        window._sensorgram_heatmap_history_revision += 1
+    if hasattr(window, "_plot_view_cache"):
+        window._plot_view_cache.clear()
     if hasattr(window, "_sensorgram_heatmap_wavelengths"):
         window._sensorgram_heatmap_wavelengths = None
     if hasattr(window, "_sensorgram_heatmap_axis_key"):

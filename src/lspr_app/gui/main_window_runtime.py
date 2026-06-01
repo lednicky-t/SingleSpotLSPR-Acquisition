@@ -6,6 +6,11 @@ from time import perf_counter
 
 from lspr_app.gui.main_window_logging import refresh_session_statistics_for, refresh_session_summary_for
 from lspr_app.gui.main_window_plotting import flush_deferred_ui_refreshes_for, flush_plot_refreshes_for
+from lspr_app.gui.runtime_probe import (
+    build_runtime_drift_lines_for,
+    capture_runtime_drift_sample_for,
+    initialize_runtime_drift_probe_for,
+)
 
 
 def run_gui_callback_timed(window, label: str, callback: Callable[[], None], *, warn_ms: float = 20.0) -> None:
@@ -40,9 +45,7 @@ def run_gui_callback_timed(window, label: str, callback: Callable[[], None], *, 
             "acquisition_state_save": 75.0,
             "session_stats_snapshot": 75.0,
         }.get(label, warn_ms)
-        if elapsed_ms >= warning_threshold_ms:
-            if getattr(window, "_quiet_diagnostics_mode", False):
-                return
+        if elapsed_ms >= warning_threshold_ms and not getattr(window, "_quiet_diagnostics_mode", False):
             window._log_throttled(
                 f"gui_callback_{label}",
                 f"GUI callback {label} took {elapsed_ms:.2f} ms",
@@ -179,3 +182,15 @@ def flush_deferred_ui_refreshes(window) -> None:
 
 def flush_plot_refreshes(window) -> None:
     window._run_gui_callback_timed("plot_refresh", lambda: flush_plot_refreshes_for(window))
+
+
+def initialize_runtime_drift_probe(window) -> None:
+    initialize_runtime_drift_probe_for(window)
+
+
+def capture_runtime_drift_sample(window) -> None:
+    capture_runtime_drift_sample_for(window)
+
+
+def build_runtime_drift_lines(window) -> list[str]:
+    return build_runtime_drift_lines_for(window)

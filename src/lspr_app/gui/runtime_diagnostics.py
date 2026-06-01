@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from lspr_app.diagnostics import DiagnosticsConfig
+from lspr_app.gui.runtime_probe import build_runtime_drift_lines_for
 
 
 def _timing_plain_text(value: float | int | None) -> str:
@@ -124,6 +125,7 @@ class SessionDiagnosticsSnapshot:
     pipeline_gap_lines: list[str]
     spectrum_redraw_lines: list[str]
     device_acquisition_lines: list[str]
+    runtime_drift_lines: list[str]
 
     @classmethod
     def from_window(cls, window: Any) -> "SessionDiagnosticsSnapshot":
@@ -303,6 +305,7 @@ class SessionDiagnosticsSnapshot:
             pipeline_gap_lines=pipeline_gap_lines,
             spectrum_redraw_lines=spectrum_redraw_lines,
             device_acquisition_lines=device_acquisition_lines,
+            runtime_drift_lines=build_runtime_drift_lines_for(window),
         )
 
 
@@ -368,6 +371,9 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         "",
         "Device acquisition",
         *snapshot.device_acquisition_lines,
+        "",
+        "Runtime drift probe",
+        *snapshot.runtime_drift_lines,
     ]
     lines.extend(f"  {line}" for line in snapshot.diagnostics.summary_lines())
     return lines

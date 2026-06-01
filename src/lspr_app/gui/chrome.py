@@ -127,6 +127,22 @@ def build_menu_bar(window) -> QMenuBar:
     log_buffering_action.setToolTip("Batch log writes before rendering them in the log panel.")
     log_buffering_action.toggled.connect(window._set_log_buffering_enabled)
 
+    sensorgram_heatmap_action = performance_menu.addAction("Sensorgram heatmap")
+    sensorgram_heatmap_action.setCheckable(True)
+    sensorgram_heatmap_action.setChecked(bool(getattr(window, "_sensorgram_heatmap_enabled", True)))
+    sensorgram_heatmap_action.setToolTip(
+        "Enable the heatmap layer in the sensorgram plot. Turn it off to isolate metric plot performance."
+    )
+    sensorgram_heatmap_action.toggled.connect(window._set_sensorgram_heatmap_enabled)
+
+    metric_plot_action = performance_menu.addAction("Metric plot")
+    metric_plot_action.setCheckable(True)
+    metric_plot_action.setChecked(bool(getattr(window, "_metric_plot_enabled", True)))
+    metric_plot_action.setToolTip(
+        "Enable the sensorgram metric line plot. Turn it off to isolate heatmap rendering performance."
+    )
+    metric_plot_action.toggled.connect(window._set_metric_plot_enabled)
+
     help_menu.addSeparator()
     about_action = help_menu.addAction("About")
     about_action.setToolTip("Show application information.")

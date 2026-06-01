@@ -1039,10 +1039,16 @@ def start_measurement_run(window) -> None:
         window._peak_history_buffers.clear()
     if hasattr(window, "_sensorgram_heatmap_history"):
         window._sensorgram_heatmap_history.clear()
+    if hasattr(window, "_sensorgram_heatmap_history_revision"):
+        window._sensorgram_heatmap_history_revision += 1
+    if hasattr(window, "_plot_view_cache"):
+        window._plot_view_cache.clear()
     if hasattr(window, "_sensorgram_heatmap_wavelengths"):
         window._sensorgram_heatmap_wavelengths = None
     if hasattr(window, "_sensorgram_heatmap_axis_key"):
         window._sensorgram_heatmap_axis_key = None
+    if hasattr(window, "_sensorgram_heatmap_levels"):
+        window._sensorgram_heatmap_levels = None
     window._trace_display_cursor_s = 0.0
     window._live_trace_started_at = None
     window._peak_reference_processed = None
@@ -1116,6 +1122,10 @@ def stop_measurement_run(window) -> None:
             local_timestamp = (started_at + timedelta(seconds=float(elapsed_s))).astimezone().timestamp()
             converted_heatmap_history.append((float(local_timestamp), np.asarray(values, dtype=np.float64).copy()))
         window._sensorgram_heatmap_history = converted_heatmap_history
+        if hasattr(window, "_sensorgram_heatmap_history_revision"):
+            window._sensorgram_heatmap_history_revision += 1
+        if hasattr(window, "_plot_view_cache"):
+            window._plot_view_cache.clear()
     window._trace_view_locked = False
     window._trace_display_cursor_s = 0.0
     window._live_trace_started_at = None

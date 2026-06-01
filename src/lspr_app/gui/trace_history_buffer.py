@@ -10,12 +10,15 @@ class MetricHistoryBuffer:
         self._values = np.empty(self.capacity, dtype=np.float64)
         self._start = 0
         self._size = 0
+        self._revision = 0
 
     def clear(self) -> None:
+        self._revision += 1
         self._start = 0
         self._size = 0
 
     def append(self, time_s: float, value: float) -> None:
+        self._revision += 1
         index = (self._start + self._size) % self.capacity
         self._times[index] = float(time_s)
         self._values[index] = float(value)
@@ -26,6 +29,10 @@ class MetricHistoryBuffer:
 
     def __len__(self) -> int:
         return self._size
+
+    @property
+    def revision(self) -> int:
+        return self._revision
 
     def to_arrays(self) -> tuple[np.ndarray, np.ndarray]:
         if self._size <= 0:
@@ -47,11 +54,14 @@ class AppendOnlyMetricHistoryBuffer:
         self._times = np.empty(self.capacity, dtype=np.float64)
         self._values = np.empty(self.capacity, dtype=np.float64)
         self._size = 0
+        self._revision = 0
 
     def clear(self) -> None:
+        self._revision += 1
         self._size = 0
 
     def append(self, time_s: float, value: float) -> None:
+        self._revision += 1
         if self._size >= self.capacity:
             new_capacity = max(self.capacity * 2, self.capacity + 1)
             new_times = np.empty(new_capacity, dtype=np.float64)
@@ -68,6 +78,10 @@ class AppendOnlyMetricHistoryBuffer:
 
     def __len__(self) -> int:
         return self._size
+
+    @property
+    def revision(self) -> int:
+        return self._revision
 
     def to_arrays(self) -> tuple[np.ndarray, np.ndarray]:
         if self._size <= 0:
