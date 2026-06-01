@@ -14,6 +14,8 @@ from PyQt6.QtGui import QColor, QPixmap
 from lspr_app.gui.icon_helpers import math_function_tab_icon, prism_tab_icon, transport_icon
 from lspr_app.gui.plot_controller import (
     apply_processing_range_to_spectrum_plot as _apply_processing_range_to_spectrum_plot,
+    flush_deferred_display_refreshes as _flush_deferred_display_refreshes,
+    flush_deferred_stats_refreshes as _flush_deferred_stats_refreshes,
     flush_deferred_ui_refreshes as _flush_deferred_ui_refreshes,
     flush_plot_refreshes as _flush_plot_refreshes,
     refresh_plot as _refresh_plot,
@@ -257,18 +259,6 @@ def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
 
 def flush_deferred_ui_refreshes_for(window) -> None:
     started = perf_counter()
-    requested_at = getattr(window, "_stats_refresh_requested_at", None)
-    if requested_at is not None:
-        try:
-            window._last_stats_refresh_delay_ms = max((started - float(requested_at)) * 1000.0, 0.0)
-        except (TypeError, ValueError):
-            window._last_stats_refresh_delay_ms = None
-    refresh_state = getattr(window, "_ui_refresh_state", None)
-    summary_dirty = bool(getattr(refresh_state, "summary_dirty", False))
-    telemetry_dirty = bool(getattr(refresh_state, "telemetry_dirty", False))
-    live_estimate_dirty = bool(getattr(refresh_state, "live_estimate_dirty", False))
-    stats_dirty = bool(getattr(refresh_state, "stats_dirty", False))
-    metric_dirty = bool(getattr(refresh_state, "metric_plot_dirty", False))
     _flush_deferred_ui_refreshes(window)
     elapsed_ms = (perf_counter() - started) * 1000.0
     window._last_deferred_ui_refresh_ms = elapsed_ms
@@ -276,11 +266,60 @@ def flush_deferred_ui_refreshes_for(window) -> None:
         if elapsed_ms >= 2.0:
             window._log_throttled(
                 "gui_deferred_refresh",
+                f"GUI deferred refresh: {elapsed_ms:.2f} ms",
+                level=logging.INFO,
+                min_interval=0.5,
+            )
+
+
+def flush_deferred_display_refreshes_for(window) -> None:
+    started = perf_counter()
+    requested_at = getattr(window, "_display_refresh_requested_at", None)
+    if requested_at is not None:
+        try:
+            window._last_display_refresh_delay_ms = max((started - float(requested_at)) * 1000.0, 0.0)
+        except (TypeError, ValueError):
+            window._last_display_refresh_delay_ms = None
+    refresh_state = getattr(window, "_ui_refresh_state", None)
+    summary_dirty = bool(getattr(refresh_state, "summary_dirty", False))
+    telemetry_dirty = bool(getattr(refresh_state, "telemetry_dirty", False))
+    live_estimate_dirty = bool(getattr(refresh_state, "live_estimate_dirty", False))
+    metric_dirty = bool(getattr(refresh_state, "metric_plot_dirty", False))
+    _flush_deferred_display_refreshes(window)
+    elapsed_ms = (perf_counter() - started) * 1000.0
+    window._last_deferred_display_refresh_ms = elapsed_ms
+    if processing_debug_mode_enabled():
+        if elapsed_ms >= 2.0:
+            window._log_throttled(
+                "gui_deferred_display_refresh",
                 (
-                    f"GUI deferred refresh: {elapsed_ms:.2f} ms | "
+                    f"GUI deferred display refresh: {elapsed_ms:.2f} ms | "
                     f"summary={int(summary_dirty)} telemetry={int(telemetry_dirty)} "
-                    f"live_estimate={int(live_estimate_dirty)} stats={int(stats_dirty)} trace={int(metric_dirty)}"
+                    f"live_estimate={int(live_estimate_dirty)} trace={int(metric_dirty)}"
                 ),
+                level=logging.INFO,
+                min_interval=0.5,
+            )
+
+
+def flush_deferred_stats_refreshes_for(window) -> None:
+    started = perf_counter()
+    requested_at = getattr(window, "_stats_refresh_requested_at", None)
+    if requested_at is not None:
+        try:
+            window._last_stats_refresh_delay_ms = max((started - float(requested_at)) * 1000.0, 0.0)
+        except (TypeError, ValueError):
+            window._last_stats_refresh_delay_ms = None
+    refresh_state = getattr(window, "_ui_refresh_state", None)
+    stats_dirty = bool(getattr(refresh_state, "stats_dirty", False))
+    _flush_deferred_stats_refreshes(window)
+    elapsed_ms = (perf_counter() - started) * 1000.0
+    window._last_deferred_stats_refresh_ms = elapsed_ms
+    if processing_debug_mode_enabled():
+        if elapsed_ms >= 2.0:
+            window._log_throttled(
+                "gui_deferred_stats_refresh",
+                f"GUI deferred stats refresh: {elapsed_ms:.2f} ms | stats={int(stats_dirty)}",
                 level=logging.INFO,
                 min_interval=0.5,
             )
@@ -562,7 +601,8 @@ def build_pipeline_telemetry_text_for(window) -> str:
         processing_total_ms = float(breakdown["processing_wait_ms"] or 0.0) + float(breakdown["processing_ms"] or 0.0)
     processing_text = _timing_plain_text(processing_total_ms)
     plot_text = _timing_plain_text(breakdown["plot_render_ms"])
-    ui_text = _timing_plain_text(breakdown["deferred_ui_ms"])
+    display_text = _timing_plain_text(breakdown["deferred_display_ms"])
+    stats_text = _timing_plain_text(breakdown["deferred_stats_ms"])
     idle_text = _timing_plain_text(breakdown["idle_ms"])
     live_result_queue = getattr(window, "_live_result_queue", None)
     live_processed_queue = getattr(window, "_live_processed_queue", None)
@@ -583,7 +623,7 @@ def build_pipeline_telemetry_text_for(window) -> str:
         displayed = f"{window._last_display_average_count}/{window._last_display_period_ms:.0f}"
     return (
         f"gap {spacing} | acq {latency} | proc {processing_text} | "
-        f"plot {plot_text} | ui {ui_text} | idle {idle_text} | "
+        f"plot {plot_text} | disp {display_text} | stats {stats_text} | idle {idle_text} | "
         f"srcq {live_result_queue_text} | procq {live_processed_queue_text} | "
         f"ovh {overhead} | show {displayed}"
     )

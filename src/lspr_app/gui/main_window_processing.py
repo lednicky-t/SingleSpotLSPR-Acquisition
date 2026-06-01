@@ -142,7 +142,24 @@ def apply_processing_settings_to_widgets(window, settings: ProcessingSettings) -
     window.trace_gaussian_check.setChecked("gaussian_center" in trace_metrics)
     if window._trace_stats_metric_name not in selected_trace_metrics(window):
         window._trace_stats_metric_name = primary_trace_metric(window)
+    sync_processing_crop_parameter_widget(window)
     window._suspend_processing_autosave = False
+
+
+def sync_processing_crop_parameter_widget(window) -> None:
+    stack = getattr(window, "crop_parameter_stack", None)
+    label = getattr(window, "crop_parameter_label", None)
+    if stack is None or label is None:
+        return
+    crop_method = window.crop_method_combo.currentText()
+    if crop_method == "threshold":
+        stack.setCurrentWidget(window.crop_fraction_spin)
+        label.setText("Fraction")
+        label.setToolTip("Threshold fraction of peak height used to crop the fit range.")
+        return
+    stack.setCurrentWidget(window.fit_window_spin)
+    label.setText("Range")
+    label.setToolTip("Fit-range width in nm used to crop the fit range when the crop method is fixed_width.")
 
 
 def persist_processing_settings(window) -> None:

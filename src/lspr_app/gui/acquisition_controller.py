@@ -86,6 +86,37 @@ def _request_live_processed_poll_for(window, delay_ms: float) -> None:
         request(delay_ms)
 
 
+def _update_live_source_rate_from_event(window, event: LiveAcquisitionEvent, now: float) -> None:
+    previous_finish = getattr(window, "_raw_last_finish_ts", None)
+    previous_sample_index = getattr(window, "_raw_last_sample_index", None)
+    current_sample_index = getattr(event, "source_sample_index", None)
+    window._raw_last_finish_ts = now
+    if (
+        previous_finish is not None
+        and previous_sample_index is not None
+        and current_sample_index is not None
+    ):
+        try:
+            delta_samples = int(current_sample_index) - int(previous_sample_index)
+        except (TypeError, ValueError):
+            delta_samples = 0
+        if delta_samples > 0:
+            spacing_ms = max((now - previous_finish) * 1000.0 / float(delta_samples), 0.0)
+            window._last_spacing_ms = spacing_ms
+            if spacing_ms > 0:
+                window._effective_raw_rate_hz = 1000.0 / spacing_ms
+            window._raw_last_sample_index = int(current_sample_index)
+            return
+    window._last_spacing_ms = None if previous_finish is None else (now - previous_finish) * 1000.0
+    if window._last_spacing_ms and window._last_spacing_ms > 0:
+        window._effective_raw_rate_hz = 1000.0 / window._last_spacing_ms
+    if current_sample_index is not None:
+        try:
+            window._raw_last_sample_index = int(current_sample_index)
+        except (TypeError, ValueError):
+            pass
+
+
 def _start_measurement_file_compression(window, path: Path) -> None:
     if hasattr(window, "_set_measurement_compression_busy_indicator"):
         window._set_measurement_compression_busy_indicator(True)
@@ -392,10 +423,8 @@ def flush_live_acquisition_results(window) -> None:
         spectrum = result.spectrum
         _archive_live_sample_if_needed(window, spectrum)
         now = latest_event.produced_at_perf if latest_event.produced_at_perf is not None else perf_counter()
-        previous_finish = window._raw_last_finish_ts
-        window._raw_last_finish_ts = now
         window._last_elapsed_ms = result.elapsed_ms
-        window._last_spacing_ms = None if previous_finish is None else (now - previous_finish) * 1000.0
+        _update_live_source_rate_from_event(window, latest_event, now)
         if window._source_mode == "simulation":
             window._last_overhead_ms = None
         else:
@@ -404,11 +433,15 @@ def flush_live_acquisition_results(window) -> None:
                 window._last_overhead_ms = max(result.elapsed_ms - float(expected_budget_ms), 0.0)
             else:
                 window._last_overhead_ms = None
-        if window._last_spacing_ms and window._last_spacing_ms > 0:
-            window._effective_raw_rate_hz = 1000.0 / window._last_spacing_ms
+        if window._effective_raw_rate_hz is not None:
             window._log_throttled(
                 "raw_rate",
-                f"Raw source rate {window._effective_raw_rate_hz:.2f} Hz | display_rate={window.live_rate_spin.value():.2f} Hz",
+                (
+                    "Raw source rate "
+                    f"{window._effective_raw_rate_hz:.2f} Hz | "
+                    f"display_rate={window.live_rate_spin.value():.2f} Hz | "
+                    f"sample={getattr(latest_event, 'source_sample_index', 0)}"
+                ),
                 level=logging.DEBUG,
                 min_interval=1.0,
             )
@@ -606,6 +639,7 @@ def start_live_acquisition(window) -> None:
     window._display_window_ms = 1000.0 / max(window.live_rate_spin.value(), 1e-9)
     window._live_ui_refresh_delay_ms = max(int(round(window._display_window_ms)), 16)
     window._raw_last_finish_ts = None
+    window._raw_last_sample_index = None
     window._last_display_average_count = None
     window._last_display_period_ms = None
     window._last_plot_refresh_ms = None
@@ -623,6 +657,10 @@ def start_live_acquisition(window) -> None:
     window._last_sensorgram_heatmap_render_ms = None
     window._last_deferred_ui_refresh_ms = None
     window._last_deferred_ui_refresh_total_ms = None
+    window._last_deferred_display_refresh_ms = None
+    window._last_deferred_stats_refresh_ms = None
+    window._display_refresh_requested_at = None
+    window._stats_refresh_requested_at = None
     window._last_deferred_ui_live_estimate_ms = None
     window._last_deferred_ui_telemetry_ms = None
     window._last_deferred_ui_trace_plot_ms = None
@@ -747,6 +785,10 @@ def stop_live_acquisition(window, message: str = "Live acquisition stopped.") ->
     window._last_sensorgram_heatmap_render_ms = None
     window._last_deferred_ui_refresh_ms = None
     window._last_deferred_ui_refresh_total_ms = None
+    window._last_deferred_display_refresh_ms = None
+    window._last_deferred_stats_refresh_ms = None
+    window._display_refresh_requested_at = None
+    window._stats_refresh_requested_at = None
     window._last_deferred_ui_live_estimate_ms = None
     window._last_deferred_ui_telemetry_ms = None
     window._last_deferred_ui_trace_plot_ms = None

@@ -1,13 +1,11 @@
 ﻿from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QMenuBar, QWidget
 
 from lspr_core import DEFAULT_LAUNCH_PROFILE, launch_profile_spec
 from lspr_app.device.connection_registry import snapshot_port_ownership
 from lspr_app.gui.icon_helpers import device_status_icon
-from lspr_app.gui.ui_helpers import make_window_button, window_control_icon
 
 
 def device_status_state(connected: bool, discovered: bool) -> str:
@@ -40,12 +38,6 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
     if profile is None:
         profile = launch_profile_spec(DEFAULT_LAUNCH_PROFILE)
 
-    brand_icon_label = QLabel()
-    brand_icon_label.setObjectName("brandIconLabel")
-    brand_icon_label.setFixedSize(22, 22)
-    brand_icon_label.setToolTip("LSPR Acquisition brand icon.")
-    brand_icon_label.setPixmap(QIcon(str(brand_icon_path)).pixmap(22, 22))
-
     window._window_mode_label = QLabel()
     window._window_mode_label.setObjectName("windowModeLabel")
     window._window_mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -66,23 +58,6 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
     center_layout.addWidget(window._window_mode_icon_label)
     center_cluster.setLayout(center_layout)
     window._window_mode_cluster = center_cluster
-
-    window._window_min_button = make_window_button(
-        window_control_icon("minimize"),
-        "Minimize window",
-        window.showMinimized,
-    )
-    window._window_max_button = make_window_button(
-        window_control_icon("maximize"),
-        "Maximize window",
-        window._toggle_window_max_restore,
-    )
-    window._window_close_button = make_window_button(
-        window_control_icon("close"),
-        "Close application",
-        window.close,
-    )
-    window._window_max_button.setToolTip("Maximize or restore the window.")
 
     status_cluster = QWidget()
     status_layout = QHBoxLayout()
@@ -132,7 +107,6 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
     left_layout = QHBoxLayout()
     left_layout.setContentsMargins(0, 0, 0, 0)
     left_layout.setSpacing(6)
-    left_layout.addWidget(brand_icon_label)
     left_layout.addWidget(menu_bar)
     left_cluster.setLayout(left_layout)
 
@@ -142,9 +116,6 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
     right_layout.setSpacing(4)
     right_layout.addWidget(window._startup_loading_label)
     right_layout.addWidget(status_cluster)
-    right_layout.addWidget(window._window_min_button)
-    right_layout.addWidget(window._window_max_button)
-    right_layout.addWidget(window._window_close_button)
     right_cluster.setLayout(right_layout)
 
     title_widget = QWidget()
@@ -272,9 +243,5 @@ def refresh_hw_device_status_strip(window) -> None:
 
 
 def sync_window_control_icons(window) -> None:
-    if not hasattr(window, "_window_max_button"):
-        return
-    maximized = window.isMaximized()
-    window._window_max_button.setIcon(window_control_icon("restore" if maximized else "maximize"))
-    window._window_max_button.setToolTip("Restore window" if maximized else "Maximize window")
+    return
 

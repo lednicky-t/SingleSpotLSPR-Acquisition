@@ -127,6 +127,15 @@ def build_menu_bar(window) -> QMenuBar:
     log_buffering_action.setToolTip("Batch log writes before rendering them in the log panel.")
     log_buffering_action.toggled.connect(window._set_log_buffering_enabled)
 
+    gui_housekeeping_action = performance_menu.addAction("GUI housekeeping")
+    gui_housekeeping_action.setCheckable(True)
+    gui_housekeeping_action.setChecked(bool(getattr(window, "_gui_housekeeping_enabled", True)))
+    gui_housekeeping_action.setToolTip(
+        "Enable deferred GUI maintenance tasks such as log flushing and state saves. "
+        "Turn it off to isolate housekeeping overhead."
+    )
+    gui_housekeeping_action.toggled.connect(window._set_gui_housekeeping_enabled)
+
     sensorgram_heatmap_action = performance_menu.addAction("Sensorgram heatmap")
     sensorgram_heatmap_action.setCheckable(True)
     sensorgram_heatmap_action.setChecked(bool(getattr(window, "_sensorgram_heatmap_enabled", True)))

@@ -93,7 +93,8 @@ class SessionDiagnosticsSnapshot:
     session_stats_recording_snapshot_text: str
     session_stats_recording_total_text: str
     plot_refresh_total_text: str
-    deferred_ui_total_text: str
+    deferred_display_total_text: str
+    deferred_stats_total_text: str
     deferred_ui_live_estimate_text: str
     deferred_ui_telemetry_text: str
     deferred_ui_trace_plot_text: str
@@ -101,6 +102,7 @@ class SessionDiagnosticsSnapshot:
     deferred_ui_stats_text: str
     session_summary_total_text: str
     session_stats_total_text: str
+    gui_housekeeping_enabled_text: str
     housekeeping_log_buffer_text: str
     housekeeping_ui_state_text: str
     housekeeping_acquisition_state_text: str
@@ -179,6 +181,7 @@ class SessionDiagnosticsSnapshot:
         live_acquisition_flush_ms = getattr(window, "_last_live_acquisition_flush_ms", None)
         live_processed_delay_ms = getattr(window, "_last_live_processed_poll_delay_ms", None)
         live_processed_flush_ms = getattr(window, "_last_live_processed_flush_ms", None)
+        display_refresh_delay_ms = getattr(window, "_last_display_refresh_delay_ms", None)
         stats_refresh_delay_ms = getattr(window, "_last_stats_refresh_delay_ms", None)
         summary_refresh_ms = getattr(window, "_last_summary_refresh_ms", None)
         session_stats_refresh_ms = getattr(window, "_last_session_stats_refresh_ms", None)
@@ -199,6 +202,7 @@ class SessionDiagnosticsSnapshot:
                 live_acquisition_flush_ms,
                 live_processed_delay_ms,
                 live_processed_flush_ms,
+                display_refresh_delay_ms,
                 stats_refresh_delay_ms,
                 summary_refresh_ms,
                 session_stats_refresh_ms,
@@ -221,6 +225,7 @@ class SessionDiagnosticsSnapshot:
             _timing_line("Live acquisition flush", live_acquisition_flush_ms),
             _timing_line("Live processing timer delay", live_processed_delay_ms),
             _timing_line("Live processing flush", live_processed_flush_ms),
+            _timing_line("Display refresh timer delay", display_refresh_delay_ms),
             _timing_line("Stats refresh timer delay", stats_refresh_delay_ms),
             _timing_line("Session summary refresh", summary_refresh_ms),
             _timing_line("Session stats refresh", session_stats_refresh_ms),
@@ -270,7 +275,8 @@ class SessionDiagnosticsSnapshot:
             session_stats_recording_snapshot_text=_timing_plain_text(getattr(window, "_last_session_stats_recording_snapshot_ms", None)),
             session_stats_recording_total_text=_timing_plain_text(getattr(window, "_last_session_stats_recording_total_ms", None)),
             plot_refresh_total_text=_timing_plain_text(getattr(window, "_last_plot_refresh_total_ms", None)),
-            deferred_ui_total_text=_timing_plain_text(getattr(window, "_last_deferred_ui_refresh_total_ms", None)),
+            deferred_display_total_text=_timing_plain_text(getattr(window, "_last_deferred_display_refresh_ms", None)),
+            deferred_stats_total_text=_timing_plain_text(getattr(window, "_last_deferred_stats_refresh_ms", None)),
             deferred_ui_live_estimate_text=_timing_plain_text(getattr(window, "_last_deferred_ui_live_estimate_ms", None)),
             deferred_ui_telemetry_text=_timing_plain_text(getattr(window, "_last_deferred_ui_telemetry_ms", None)),
             deferred_ui_trace_plot_text=_timing_plain_text(getattr(window, "_last_deferred_ui_trace_plot_ms", None)),
@@ -278,6 +284,7 @@ class SessionDiagnosticsSnapshot:
             deferred_ui_stats_text=_timing_plain_text(getattr(window, "_last_deferred_ui_stats_ms", None)),
             session_summary_total_text=_timing_plain_text(getattr(window, "_last_session_summary_refresh_total_ms", None)),
             session_stats_total_text=_timing_plain_text(getattr(window, "_last_session_stats_refresh_total_ms", None)),
+            gui_housekeeping_enabled_text="enabled" if bool(getattr(window, "_gui_housekeeping_enabled", True)) else "disabled",
             housekeeping_log_buffer_text=_timing_plain_text(getattr(window, "_last_gui_housekeeping_log_buffer_ms", None)),
             housekeeping_ui_state_text=_timing_plain_text(getattr(window, "_last_gui_housekeeping_ui_state_ms", None)),
             housekeeping_acquisition_state_text=_timing_plain_text(getattr(window, "_last_gui_housekeeping_acquisition_state_ms", None)),
@@ -348,7 +355,8 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         "",
         "GUI callback wall time",
         f"  Plot refresh total: {snapshot.plot_refresh_total_text}",
-        f"  Deferred UI total: {snapshot.deferred_ui_total_text}",
+        f"  Deferred display total: {snapshot.deferred_display_total_text}",
+        f"  Deferred stats total: {snapshot.deferred_stats_total_text}",
         f"  Deferred UI live estimate: {snapshot.deferred_ui_live_estimate_text}",
         f"  Deferred UI telemetry: {snapshot.deferred_ui_telemetry_text}",
         f"  Deferred UI metric plot: {snapshot.deferred_ui_trace_plot_text}",
@@ -356,6 +364,7 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         f"  Deferred UI stats: {snapshot.deferred_ui_stats_text}",
         f"  Session summary total: {snapshot.session_summary_total_text}",
         f"  Session stats total: {snapshot.session_stats_total_text}",
+        f"  GUI housekeeping switch: {snapshot.gui_housekeeping_enabled_text}",
         f"  Scheduler dispatch lag: {snapshot.scheduler_lag_text}",
         f"  Scheduler dispatch time: {snapshot.scheduler_duration_text}",
         f"  Scheduler dispatch tasks: {snapshot.scheduler_task_count_text}",

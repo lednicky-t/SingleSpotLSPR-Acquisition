@@ -121,7 +121,9 @@ from lspr_app.gui.main_window_panels import (
 from lspr_app.gui.main_window_runtime import (
     build_runtime_drift_lines as build_runtime_drift_lines_for_runtime,
     drain_gui_housekeeping_tasks as drain_gui_housekeeping_tasks_for,
+    flush_deferred_display_refreshes as flush_deferred_display_refreshes_for_runtime,
     flush_deferred_ui_refreshes as flush_deferred_ui_refreshes_for_runtime,
+    flush_deferred_stats_refreshes as flush_deferred_stats_refreshes_for_runtime,
     flush_plot_refreshes as flush_plot_refreshes_for_runtime,
     initialize_runtime_drift_probe as initialize_runtime_drift_probe_for_runtime,
     refresh_session_statistics as refresh_session_statistics_for_runtime,
@@ -176,6 +178,7 @@ from lspr_app.gui.main_window_processing import (
     save_processing_settings_dialog,
     selected_trace_metrics,
     schedule_processing_refresh,
+    sync_processing_crop_parameter_widget,
 )
 from lspr_app.gui.main_window_plotting import (
     analysis_cache_token_for,
@@ -454,6 +457,8 @@ class MainWindow(QMainWindow):
         self._trace_autoscale_timer.setSingleShot(True)
         self._trace_autoscale_timer.setInterval(120)
         self._trace_autoscale_timer.timeout.connect(self._autoscale_trace_plot)
+        self._display_refresh_requested_at: float | None = None
+        self._last_display_refresh_delay_ms: float | None = None
         self._stats_refresh_requested_at: float | None = None
         self._last_stats_refresh_delay_ms: float | None = None
         self._session_stats_refresh_requested_at: float | None = None
@@ -498,6 +503,7 @@ class MainWindow(QMainWindow):
         self._resume_live_after_auto_integration = False
         self._display_window_ms = 0.0
         self._raw_last_finish_ts: float | None = None
+        self._raw_last_sample_index: int | None = None
         self._last_elapsed_ms: float | None = None
         self._last_spacing_ms: float | None = None
         self._last_overhead_ms: float | None = None
@@ -525,6 +531,8 @@ class MainWindow(QMainWindow):
         self._last_sensorgram_heatmap_render_ms: float | None = None
         self._last_deferred_ui_refresh_ms: float | None = None
         self._last_deferred_ui_refresh_total_ms: float | None = None
+        self._last_deferred_display_refresh_ms: float | None = None
+        self._last_deferred_stats_refresh_ms: float | None = None
         self._last_deferred_ui_live_estimate_ms: float | None = None
         self._last_deferred_ui_telemetry_ms: float | None = None
         self._last_deferred_ui_trace_plot_ms: float | None = None
@@ -554,6 +562,7 @@ class MainWindow(QMainWindow):
         self._ui_state_autosave_enabled = bool(load_app_setting("ui_state_autosave_enabled", True))
         self._acquisition_state_autosave_enabled = bool(load_app_setting("acquisition_state_autosave_enabled", True))
         self._log_buffering_enabled = bool(load_app_setting("log_buffering_enabled", True))
+        self._gui_housekeeping_enabled = bool(load_app_setting("gui_housekeeping_enabled", True))
         self._sensorgram_heatmap_enabled = bool(load_app_setting("sensorgram_heatmap_enabled", True))
         self._metric_plot_enabled = bool(load_app_setting("metric_plot_enabled", True))
         self._last_processed_plot: Spectrum | None = None
@@ -618,6 +627,7 @@ class MainWindow(QMainWindow):
         self._visible_trace_x: np.ndarray | None = None
         self._visible_trace_y: np.ndarray | None = None
         self._visible_trace_mode = "elapsed"
+        self._trace_time_axis_relative_labels_enabled = False
         self._metric_render_display_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._plots_frozen = False
         self._sensorgram_frozen = False
@@ -713,7 +723,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"LSPR Acquisition {__version__}")
         self.setWindowIcon(QIcon(str(self._brand_icon_path)))
         self.resize(1380, 920)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
         _startup_mark("window flags and icon set")
 
         pg.setConfigOptions(antialias=True)
@@ -869,11 +878,11 @@ class MainWindow(QMainWindow):
         self.spectrum_cursor_label.setToolTip("Spectrum cursor readout under the mouse pointer.")
         self.trace_stats_label = QLabel("latest: - | min/max: - | span: - | dt -")
         self.trace_stats_label.setWordWrap(False)
-        self.trace_stats_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.trace_stats_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.trace_stats_label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         self.trace_stats_label.setToolTip(
-            "Metric stats: click to cycle through selected metric traces. Shows latest value, min/max, span, and average time step."
+            "Metric stats: latest value, min/max, span, and average time step."
         )
-        self.trace_stats_label.mousePressEvent = self._handle_trace_stats_label_click  # type: ignore[assignment]
         self.trace_cursor_label = QLabel("cursor: -")
         self.trace_cursor_label.setToolTip("Metric cursor readout under the mouse pointer.")
         self.trace_noise_window_spin = InlineWheelDoubleLabel(10.0)
@@ -887,6 +896,7 @@ class MainWindow(QMainWindow):
         )
         self.trace_noise_summary_label = QLabel("noise: -")
         self.trace_noise_summary_label.setWordWrap(False)
+        self.trace_noise_summary_label.setTextFormat(Qt.TextFormat.PlainText)
         self.trace_noise_summary_label.setToolTip("Noise estimate for each trace metric over the selected window.")
         self.show_residual_button = self._make_frameless_icon_button(
             residual_icon(False),
@@ -969,7 +979,9 @@ class MainWindow(QMainWindow):
         )
         self.crop_method_combo = QComboBox()
         self.crop_method_combo.addItems(["fixed_width", "threshold"])
-        self.crop_method_combo.setToolTip("Choose how the fit region is cropped around the detected peak.")
+        self.crop_method_combo.setToolTip(
+            "Choose how the fit region is cropped around the detected peak. The parameter control below switches between width and fraction."
+        )
         self.crop_fraction_spin = QDoubleSpinBox()
         make_compact_spinbox(self.crop_fraction_spin)
         self.crop_fraction_spin.setRange(0.05, 0.95)
@@ -978,7 +990,7 @@ class MainWindow(QMainWindow):
         self.crop_fraction_spin.setValue(0.70)
         self.crop_fraction_spin.setPrefix("frac ")
         self.crop_fraction_spin.setToolTip(
-            "Crop the fit region using either a fixed width around the local maximum or a threshold fraction of peak height."
+            "Threshold fraction of peak height used when the crop method is set to threshold."
         )
 
         self.fit_method_combo = QComboBox()
@@ -997,7 +1009,16 @@ class MainWindow(QMainWindow):
         self.fit_window_spin.setRange(0, 5000)
         self.fit_window_spin.setValue(120)
         self.fit_window_spin.setSuffix(" nm")
-        self.fit_window_spin.setToolTip("Fit range width in nm around the detected local peak maximum.")
+        self.fit_window_spin.setToolTip(
+            "Fit range width in nm around the detected local peak maximum. Used when the crop method is set to fixed_width."
+        )
+        self.crop_parameter_label = QLabel("Range")
+        self.crop_parameter_label.setToolTip(
+            "Fit-range width in nm when the crop method is fixed_width, or threshold fraction when the crop method is threshold."
+        )
+        self.crop_parameter_stack = QStackedWidget()
+        self.crop_parameter_stack.addWidget(self.fit_window_spin)
+        self.crop_parameter_stack.addWidget(self.crop_fraction_spin)
         self.analysis_resolution_spin = QComboBox()
         populate_analysis_resolution_combo(self.analysis_resolution_spin)
         self.analysis_resolution_spin.setCurrentIndex(2)
@@ -1072,8 +1093,11 @@ class MainWindow(QMainWindow):
         _startup_mark("source tabs configured")
 
         self.trace_time_axis = FlexibleTimeAxis("bottom")
+        self.trace_time_axis.doubleClicked.connect(self._toggle_trace_time_axis_relative_labels)
         _startup_mark("building spectrum and metric plots")
         self.spectrum_plot = pg.PlotWidget(axisItems={"left": ScientificAxis("left")}, background="w")
+        if hasattr(self.spectrum_plot, "setMenuEnabled"):
+            self.spectrum_plot.setMenuEnabled(False)
         self.spectrum_plot.showGrid(x=True, y=True, alpha=0.18)
         self.spectrum_plot.setLabel("bottom", "Wavelength (nm)")
         self.spectrum_plot.setMouseEnabled(x=True, y=True)
@@ -1157,6 +1181,8 @@ class MainWindow(QMainWindow):
             axisItems={"bottom": self.trace_time_axis, "left": ScientificAxis("left")},
             background="w",
         )
+        if hasattr(self.trace_plot, "setMenuEnabled"):
+            self.trace_plot.setMenuEnabled(False)
         self.trace_plot.showGrid(x=True, y=True, alpha=0.18)
         self.trace_plot.setMouseEnabled(x=True, y=True)
         self.trace_curves = {
@@ -1175,20 +1201,26 @@ class MainWindow(QMainWindow):
         self.trace_heatmap_image.setAutoDownsample(True)
         self.trace_heatmap_image.setLookupTable(self._sensorgram_heatmap_lookup_table())
         self.trace_plot.addItem(self.trace_heatmap_image, ignoreBounds=True)
-        self.trace_heatmap_notice_item = pg.TextItem(
-            html=(
-                "<div style='text-align:center;'>"
-                "<span style='font-size:12pt; font-weight:600; color:#d8dee9;'>Heatmap unavailable</span><br>"
-                "<span style='font-size:9pt; color:#9aa4b2;'>Enable it in Help &gt; Performance switches.</span>"
-                "</div>"
-            ),
-            anchor=(0.5, 0.5),
-            fill=pg.mkBrush(18, 24, 31, 210),
-            border=pg.mkPen(120, 130, 145, 160),
+        self.trace_heatmap_notice_item = QLabel(self.trace_plot.viewport())
+        self.trace_heatmap_notice_item.setObjectName("traceHeatmapNotice")
+        self.trace_heatmap_notice_item.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.trace_heatmap_notice_item.setWordWrap(True)
+        self.trace_heatmap_notice_item.setTextFormat(Qt.TextFormat.PlainText)
+        self.trace_heatmap_notice_item.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.trace_heatmap_notice_item.setStyleSheet(
+            "#traceHeatmapNotice {"
+            "  background-color: rgba(18, 24, 31, 210);"
+            "  border: 1px solid rgba(120, 130, 145, 160);"
+            "  border-radius: 8px;"
+            "  color: #d8dee9;"
+            "  padding: 12px 16px;"
+            "  font-size: 12pt;"
+            "  font-weight: 600;"
+            "}"
         )
+        self.trace_heatmap_notice_item.setMaximumWidth(340)
         self.trace_heatmap_notice_item.setVisible(False)
-        self.trace_heatmap_notice_item.setZValue(50)
-        self.trace_plot.addItem(self.trace_heatmap_notice_item, ignoreBounds=True)
+        self.trace_plot.viewport().installEventFilter(self)
         self.trace_legend = self.trace_plot.addLegend(offset=(10, 10))
         self.trace_vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#666666", width=1))
         self.trace_hline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#666666", width=1))
@@ -1202,6 +1234,7 @@ class MainWindow(QMainWindow):
         self.trace_plot.getPlotItem().vb.sigRangeChanged.connect(self._handle_trace_view_range_changed)
         self._style_plot_widgets()
         self._apply_sensorgram_display_style()
+        self._sync_trace_heatmap_notice_overlay()
         _startup_mark("plot widgets styled")
 
         session_font = QFont("Consolas", 9)
@@ -1251,9 +1284,10 @@ class MainWindow(QMainWindow):
         _startup_mark("menu bar built")
         self._sync_view_actions()
         if self._launch_profile_spec.key == LAUNCH_PROFILE_FULL:
-            self._ensure_flow_panel()
-            _startup_mark("experimental control panel initialized for full mode")
+            self._flow_panel_bootstrap_pending = True
+            _startup_mark("experimental control panel deferred until first show")
         else:
+            self._flow_panel_bootstrap_pending = False
             _startup_mark("experimental control panel deferred")
         self.log_clear_button.clicked.connect(self._clear_log_terminal)
         self.log_copy_button.clicked.connect(self._copy_log_terminal)
@@ -2221,6 +2255,9 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self._start_hardware_initialization)
             elif self._launch_profile_spec.start_live_acquisition:
                 QTimer.singleShot(0, self._start_live_acquisition)
+        if getattr(self, "_flow_panel_bootstrap_pending", False):
+            self._flow_panel_bootstrap_pending = False
+            QTimer.singleShot(250, self._ensure_flow_panel)
 
     def _restore_ui_state(self) -> None:
         restore_ui_state_for(self)
@@ -2254,6 +2291,14 @@ class MainWindow(QMainWindow):
 
     def _set_log_buffering_enabled(self, enabled: bool) -> None:
         set_log_buffering_enabled_for(self, enabled)
+
+    def _set_gui_housekeeping_enabled(self, enabled: bool) -> None:
+        self._gui_housekeeping_enabled = bool(enabled)
+        save_app_setting("gui_housekeeping_enabled", self._gui_housekeeping_enabled)
+        state_text = "enabled" if self._gui_housekeeping_enabled else "disabled"
+        self.status_label.setText(f"GUI housekeeping {state_text}.")
+        self._log_info(f"GUI housekeeping {state_text}.")
+        self._request_deferred_ui_refresh(stats=True)
 
     def _set_sensorgram_heatmap_enabled(self, enabled: bool) -> None:
         self._sensorgram_heatmap_enabled = bool(enabled)
@@ -2550,7 +2595,7 @@ class MainWindow(QMainWindow):
         self.sim_peak_width_value.setText(f"{self.sim_peak_width_slider.value()} nm")
         self.sim_peak_height_value.setText(str(self.sim_peak_height_slider.value()))
         self.sim_baseline_value.setText(str(self.sim_baseline_slider.value()))
-        self.sim_slope_value.setText(f"{self.sim_slope_slider.value() / 100.0:.2f}")
+        self.sim_slope_value.setText(f"{self.sim_slope_slider.value() / 100.0:.0%}")
         self.sim_noise_value.setText(str(self.sim_noise_slider.value()))
 
     def _handle_simulation_parameter_change(self) -> None:
@@ -2585,6 +2630,7 @@ class MainWindow(QMainWindow):
         self._source_epoch += 1
         self._session = self._hardware_session if new_mode == "spectrometer" else self._simulation_session
         self._raw_last_finish_ts = None
+        self._raw_last_sample_index = None
         self._last_elapsed_ms = None
         self._last_spacing_ms = None
         self._last_overhead_ms = None
@@ -3286,6 +3332,11 @@ class MainWindow(QMainWindow):
             if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
                 self._choose_recording_project_destination()
                 return True
+        trace_viewport = getattr(getattr(self, "trace_plot", None), "viewport", None)
+        if trace_viewport is not None and obj is trace_viewport():
+            event_type = event.type()
+            if event_type in {QEvent.Type.Resize, QEvent.Type.Show}:
+                self._sync_trace_heatmap_notice_overlay()
         if obj is self._title_bar_widget:
             event_type = event.type()
             if event_type == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
@@ -3588,6 +3639,12 @@ class MainWindow(QMainWindow):
     def _flush_deferred_ui_refreshes(self) -> None:
         flush_deferred_ui_refreshes_for_runtime(self)
 
+    def _flush_deferred_display_refreshes(self) -> None:
+        flush_deferred_display_refreshes_for_runtime(self)
+
+    def _flush_deferred_stats_refreshes(self) -> None:
+        flush_deferred_stats_refreshes_for_runtime(self)
+
     def _flush_plot_refreshes(self) -> None:
         flush_plot_refreshes_for_runtime(self)
 
@@ -3845,6 +3902,32 @@ class MainWindow(QMainWindow):
             return
         self._trace_view_locked = True
 
+    def _sync_trace_heatmap_notice_overlay(self) -> None:
+        notice = getattr(self, "trace_heatmap_notice_item", None)
+        trace_plot = getattr(self, "trace_plot", None)
+        if notice is None or trace_plot is None:
+            return
+        try:
+            viewport = trace_plot.viewport()
+            if viewport is None:
+                return
+            viewport_rect = viewport.rect()
+            if viewport_rect.isEmpty():
+                return
+            max_width = max(min(viewport_rect.width() - 40, 340), 220)
+            notice.setMaximumWidth(max_width)
+            notice.adjustSize()
+            notice_width = notice.width()
+            notice_height = notice.height()
+            if notice_width <= 0 or notice_height <= 0:
+                return
+            x_pos = max((viewport_rect.width() - notice_width) // 2, 0)
+            y_pos = max((viewport_rect.height() - notice_height) // 2, 0)
+            notice.move(int(x_pos), int(y_pos))
+            notice.raise_()
+        except Exception:
+            return
+
     def _primary_trace_metric(self) -> str:
         return primary_trace_metric(self)
 
@@ -3875,13 +3958,6 @@ class MainWindow(QMainWindow):
         self._trace_stats_metric_name = next_metric
         self._update_trace_stats()
         self._schedule_acquisition_state_persist()
-
-    def _handle_trace_stats_label_click(self, event) -> None:  # pragma: no cover - GUI runtime path
-        if event is not None and hasattr(event, "button") and event.button() != Qt.MouseButton.LeftButton:
-            return
-        self._cycle_trace_stats_metric()
-        if event is not None and hasattr(event, "accept"):
-            event.accept()
 
     def _normalize_sensorgram_view_mode(self, mode: object) -> str:
         normalized = str(mode or "").strip().lower()
@@ -4193,6 +4269,7 @@ class MainWindow(QMainWindow):
     def _handle_processing_setting_change(self) -> None:
         if self._suspend_processing_autosave:
             return
+        sync_processing_crop_parameter_widget(self)
         self._persist_processing_settings()
         apply_processing_range_to_spectrum_plot_for(self)
         if self._live_processing_worker is not None:
@@ -4205,6 +4282,17 @@ class MainWindow(QMainWindow):
             level=logging.DEBUG,
             min_interval=1.0,
         )
+
+    def _toggle_trace_time_axis_relative_labels(self) -> None:
+        self._trace_time_axis_relative_labels_enabled = not bool(self._trace_time_axis_relative_labels_enabled)
+        mode_text = "relative" if self._trace_time_axis_relative_labels_enabled else "local"
+        self._log_throttled(
+            "trace_time_axis_mode",
+            f"Trace time axis set to {mode_text} labels.",
+            level=logging.INFO,
+            min_interval=0.5,
+        )
+        self._request_plot_refresh()
 
     def _schedule_processing_refresh(self) -> None:
         schedule_processing_refresh(self)

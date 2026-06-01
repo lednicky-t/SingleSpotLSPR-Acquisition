@@ -22,7 +22,8 @@ class RuntimeDriftSample:
     scheduler_pending: int
     gui_housekeeping_total_ms: float | None
     log_buffer_total_ms: float | None
-    deferred_ui_total_ms: float | None
+    deferred_display_total_ms: float | None
+    deferred_stats_total_ms: float | None
     plot_refresh_total_ms: float | None
     live_result_queue_size: int
     live_processed_queue_size: int
@@ -126,7 +127,8 @@ def _sample_runtime_drift(window: Any) -> RuntimeDriftSample:
         scheduler_pending=int(getattr(scheduler, "pending_count", lambda: 0)() if scheduler is not None else 0),
         gui_housekeeping_total_ms=_timing_value_ms(getattr(window, "_last_gui_housekeeping_total_ms", None)),
         log_buffer_total_ms=_timing_value_ms(getattr(window, "_last_log_buffer_total_ms", None)),
-        deferred_ui_total_ms=_timing_value_ms(getattr(window, "_last_deferred_ui_refresh_total_ms", None)),
+        deferred_display_total_ms=_timing_value_ms(getattr(window, "_last_deferred_display_refresh_ms", None)),
+        deferred_stats_total_ms=_timing_value_ms(getattr(window, "_last_deferred_stats_refresh_ms", None)),
         plot_refresh_total_ms=_timing_value_ms(getattr(window, "_last_plot_refresh_total_ms", None)),
         live_result_queue_size=_safe_queue_size(getattr(window, "_live_result_queue", None)),
         live_processed_queue_size=_safe_queue_size(getattr(window, "_live_processed_queue", None)),
@@ -255,6 +257,8 @@ def _top_growth_contributors(first: RuntimeDriftSample, latest: RuntimeDriftSamp
         ("Live result queue", first.live_result_queue_size, latest.live_result_queue_size, "count", 1),
         ("Live processed queue", first.live_processed_queue_size, latest.live_processed_queue_size, "count", 1),
         ("GUI housekeeping", first.gui_housekeeping_total_ms, latest.gui_housekeeping_total_ms, "ms", 1),
+        ("Deferred display", first.deferred_display_total_ms, latest.deferred_display_total_ms, "ms", 1),
+        ("Deferred stats", first.deferred_stats_total_ms, latest.deferred_stats_total_ms, "ms", 1),
     ):
         item = _growth_line(label, start, end, span_s, unit=unit, precision=precision)
         if item is not None:
@@ -282,7 +286,8 @@ def build_runtime_drift_lines_for(window) -> list[str]:
     max_scheduler_duration = max((sample.scheduler_duration_ms or 0.0) for sample in samples)
     max_gui_housekeeping = max((sample.gui_housekeeping_total_ms or 0.0) for sample in samples)
     max_log_buffer = max((sample.log_buffer_total_ms or 0.0) for sample in samples)
-    max_deferred_ui = max((sample.deferred_ui_total_ms or 0.0) for sample in samples)
+    max_deferred_display = max((sample.deferred_display_total_ms or 0.0) for sample in samples)
+    max_deferred_stats = max((sample.deferred_stats_total_ms or 0.0) for sample in samples)
     max_plot_refresh = max((sample.plot_refresh_total_ms or 0.0) for sample in samples)
     max_peak_history_points = max(sample.peak_history_points for sample in samples)
     max_peak_history_buffer_points = max(sample.peak_history_buffer_points for sample in samples)
@@ -297,7 +302,8 @@ def build_runtime_drift_lines_for(window) -> list[str]:
         f"  Scheduler pending: {_format_count(first.scheduler_pending)} -> {_format_count(latest.scheduler_pending)}",
         f"  GUI housekeeping total: {_format_timing(first.gui_housekeeping_total_ms)} -> {_format_timing(latest.gui_housekeeping_total_ms)} | max {_format_timing(max_gui_housekeeping)}",
         f"  Log buffer total: {_format_timing(first.log_buffer_total_ms)} -> {_format_timing(latest.log_buffer_total_ms)} | max {_format_timing(max_log_buffer)}",
-        f"  Deferred UI total: {_format_timing(first.deferred_ui_total_ms)} -> {_format_timing(latest.deferred_ui_total_ms)} | max {_format_timing(max_deferred_ui)}",
+        f"  Deferred display total: {_format_timing(first.deferred_display_total_ms)} -> {_format_timing(latest.deferred_display_total_ms)} | max {_format_timing(max_deferred_display)}",
+        f"  Deferred stats total: {_format_timing(first.deferred_stats_total_ms)} -> {_format_timing(latest.deferred_stats_total_ms)} | max {_format_timing(max_deferred_stats)}",
         f"  Plot refresh total: {_format_timing(first.plot_refresh_total_ms)} -> {_format_timing(latest.plot_refresh_total_ms)} | max {_format_timing(max_plot_refresh)}",
         f"  Log history entries: {_format_count(first.log_history_count)} -> {_format_count(latest.log_history_count)}{_numeric_delta(first.log_history_count, latest.log_history_count)}",
         f"  Log buffer entries: {_format_count(first.log_buffer_count)} -> {_format_count(latest.log_buffer_count)}{_numeric_delta(first.log_buffer_count, latest.log_buffer_count)}",

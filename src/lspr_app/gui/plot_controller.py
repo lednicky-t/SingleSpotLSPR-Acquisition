@@ -46,6 +46,30 @@ def _current_metric_view_state(window) -> tuple[float | None, float | None, floa
         return None, None, None
 
 
+def _set_trace_time_axis_mode(window, x_values: np.ndarray | None, *, clock_mode: bool) -> str:
+    axis = getattr(window, "trace_time_axis", None)
+    relative_enabled = bool(getattr(window, "_trace_time_axis_relative_labels_enabled", False))
+    mode = "relative" if relative_enabled else ("clock" if clock_mode else "elapsed")
+    if axis is not None:
+        if mode == "relative":
+            reference_value = 0.0
+            if x_values is not None and len(x_values) > 0:
+                try:
+                    reference_value = float(x_values[0])
+                except (TypeError, ValueError):
+                    reference_value = 0.0
+            if hasattr(axis, "set_reference_value"):
+                axis.set_reference_value(reference_value)
+        elif hasattr(axis, "set_reference_value"):
+            axis.set_reference_value(0.0)
+        axis.set_mode(mode)
+    if mode == "relative":
+        window.trace_plot.setLabel("bottom", "Time (relative)")
+    else:
+        window.trace_plot.setLabel("bottom", "Time (local)" if clock_mode else "Time (s)")
+    return mode
+
+
 def _nearest_sorted_index(values: np.ndarray, target: float) -> int:
     if len(values) <= 1:
         return 0
@@ -131,6 +155,13 @@ def _series_point_count(series: object) -> int:
         return int(len(series))
     except Exception:
         return 0
+
+
+def _format_hhmmss(seconds: float) -> str:
+    total_seconds = max(int(round(float(seconds))), 0)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 def downsample_metric_series_for_view(
@@ -271,6 +302,11 @@ def downsample_sensorgram_history_for_view(
 
 
 def flush_deferred_ui_refreshes(window) -> None:
+    flush_deferred_display_refreshes(window)
+    flush_deferred_stats_refreshes(window)
+
+
+def flush_deferred_display_refreshes(window) -> None:
     did_work = False
     refresh_state = getattr(window, "_ui_refresh_state", None)
     if getattr(refresh_state, "live_estimate_dirty", False):
@@ -297,6 +333,23 @@ def flush_deferred_ui_refreshes(window) -> None:
         window._last_deferred_ui_summary_ms = (perf_counter() - started) * 1000.0
         refresh_state.summary_dirty = False
         did_work = True
+    if did_work:
+        window._log_throttled(
+            "ui_flush",
+            (
+                "UI flush | trace_dirty="
+                f"{int(bool(getattr(refresh_state, 'metric_plot_dirty', False)))} | "
+                f"stats_dirty={int(bool(getattr(refresh_state, 'stats_dirty', False)))} | "
+                f"display_rate={window.live_rate_spin.value():.2f} Hz"
+            ),
+            level=logging.DEBUG,
+            min_interval=1.0,
+        )
+
+
+def flush_deferred_stats_refreshes(window) -> None:
+    did_work = False
+    refresh_state = getattr(window, "_ui_refresh_state", None)
     if getattr(refresh_state, "stats_dirty", False):
         started = perf_counter()
         window._update_spectrum_stats(window._last_processed_plot, window._last_fit_plot)
@@ -553,10 +606,8 @@ def refresh_metric_plot(window, trace_label: str) -> None:
     active_series = window._active_trace_series()
     try:
         if content_mode == "heatmap":
-            window._visible_trace_mode = "clock" if clock_mode else "elapsed"
-            window.trace_time_axis.set_mode("clock" if clock_mode else "elapsed")
             window.trace_plot.setLabel("left", "Wavelength (nm)")
-            window.trace_plot.setLabel("bottom", "Time (local)" if clock_mode else "Time (s)")
+            _set_trace_time_axis_mode(window, None, clock_mode=clock_mode)
             if metric_plot_enabled and active_series:
                 render_metric_series(window, active_series, clock_mode=clock_mode)
             else:
@@ -570,10 +621,21 @@ def refresh_metric_plot(window, trace_label: str) -> None:
             _show_metric_plot_unavailable(window, clock_mode)
             return
         if active_series:
-            window._visible_trace_mode = "clock" if clock_mode else "elapsed"
-            window.trace_time_axis.set_mode("clock" if clock_mode else "elapsed")
             window.trace_plot.setLabel("left", trace_label)
-            window.trace_plot.setLabel("bottom", "Time (local)" if clock_mode else "Time (s)")
+            active_x_values = None
+            if isinstance(active_series, dict) and active_series:
+                first_series = next(iter(active_series.values()))
+                if hasattr(first_series, "to_arrays"):
+                    try:
+                        active_x_values = np.asarray(first_series.to_arrays()[0], dtype=np.float64)
+                    except Exception:
+                        active_x_values = None
+                elif isinstance(first_series, tuple) and len(first_series) == 2:
+                    try:
+                        active_x_values = np.asarray(first_series[0], dtype=np.float64)
+                    except Exception:
+                        active_x_values = None
+            _set_trace_time_axis_mode(window, active_x_values, clock_mode=clock_mode)
             render_metric_series(window, active_series, clock_mode=clock_mode)
             window.trace_heatmap_image.setVisible(False)
             if hasattr(window, "trace_heatmap_notice_item"):
@@ -589,8 +651,7 @@ def refresh_metric_plot(window, trace_label: str) -> None:
             window.trace_plot.setLabel("left", "Wavelength (nm)")
         else:
             window.trace_plot.setLabel("left", trace_label)
-        window.trace_time_axis.set_mode("clock" if clock_mode else "elapsed")
-        window.trace_plot.setLabel("bottom", "Time (local)" if clock_mode else "Time (s)")
+        _set_trace_time_axis_mode(window, None, clock_mode=clock_mode)
         for curve in window.trace_curves.values():
             curve.setData([], [])
             curve.setVisible(content_mode != "heatmap")
@@ -602,7 +663,7 @@ def refresh_metric_plot(window, trace_label: str) -> None:
             window.trace_legend.setVisible(content_mode != "heatmap")
         window._visible_trace_x = None
         window._visible_trace_y = None
-        window._visible_trace_mode = "clock" if clock_mode else "elapsed"
+        window._visible_trace_mode = "relative" if getattr(window, "_trace_time_axis_relative_labels_enabled", False) else ("clock" if clock_mode else "elapsed")
         request_metric_autoscale(window)
         window._log_throttled(
             "trace_refresh",
@@ -904,6 +965,7 @@ def render_sensorgram_heatmap(
             window.trace_plot.setYRange(bottom, top, padding=0.0)
         finally:
             window._trace_view_autoscaling = False
+    _set_trace_time_axis_mode(window, times, clock_mode=clock_mode)
     window.trace_heatmap_image.setVisible(True)
     if hasattr(window, "trace_heatmap_notice_item"):
         window.trace_heatmap_notice_item.setVisible(False)
@@ -916,7 +978,7 @@ def render_sensorgram_heatmap(
     row_max = np.max(safe_matrix, axis=1)
     row_max[~np.isfinite(row_max)] = np.nan
     window._visible_trace_y = row_max
-    window._visible_trace_mode = "clock" if clock_mode else "elapsed"
+    window._visible_trace_mode = "relative" if getattr(window, "_trace_time_axis_relative_labels_enabled", False) else ("clock" if clock_mode else "elapsed")
     elapsed_ms = (perf_counter() - started) * 1000.0
     window._last_sensorgram_heatmap_render_ms = elapsed_ms
     if elapsed_ms >= 2.0:
@@ -953,34 +1015,20 @@ def _show_metric_plot_unavailable(window, clock_mode: bool) -> None:
 def _show_trace_plot_unavailable(window, title: str, detail: str, *, clock_mode: bool) -> None:
     if hasattr(window, "trace_heatmap_image"):
         window.trace_heatmap_image.setVisible(False)
+    _set_trace_time_axis_mode(window, None, clock_mode=clock_mode)
     if hasattr(window, "trace_heatmap_notice_item"):
         notice = window.trace_heatmap_notice_item
-        if hasattr(notice, "setHtml"):
-            notice.setHtml(
-                "<div style='text-align:center;'>"
-                f"<span style='font-size:12pt; font-weight:600; color:#d8dee9;'>{title}</span><br>"
-                f"<span style='font-size:9pt; color:#9aa4b2;'>{detail}</span>"
-                "</div>"
-            )
-        elif hasattr(notice, "setText"):
+        if hasattr(notice, "setText"):
             notice.setText(f"{title}\n{detail}")
-        try:
-            plot_item = window.trace_plot.getPlotItem()
-            view_box = plot_item.vb
-            view_range = view_box.viewRange()
-            x_range = view_range[0]
-            y_range = view_range[1]
-            x_center = float((float(x_range[0]) + float(x_range[1])) / 2.0)
-            y_center = float((float(y_range[0]) + float(y_range[1])) / 2.0)
-            if np.isfinite(x_center) and np.isfinite(y_center):
-                notice.setPos(x_center, y_center)
-        except Exception:
-            pass
         notice.setVisible(True)
+        sync_overlay = getattr(window, "_sync_trace_heatmap_notice_overlay", None)
+        if callable(sync_overlay):
+            sync_overlay()
     for curve in window.trace_curves.values():
         curve.setVisible(False)
     if hasattr(window, "trace_legend"):
         window.trace_legend.setVisible(False)
+    window._visible_trace_mode = "relative" if getattr(window, "_trace_time_axis_relative_labels_enabled", False) else ("clock" if clock_mode else "elapsed")
 
 
 def update_spectrum_stats(window, processed: Spectrum | None, fit: Spectrum | None) -> None:
@@ -1037,20 +1085,14 @@ def update_metric_stats(window) -> None:
 
     if not visible_series:
         if not series:
-            window.trace_stats_label.setText(
-                f'<span style="color:{metric_color}; font-weight:700;">{metric_label}</span>: -'
-                " | min/max: - | span: - | dt -"
-            )
+            window.trace_stats_label.setText(f"{metric_label}: - | min/max: - | span: - | dt -")
             window.trace_noise_summary_label.setText("noise: -")
             window.trace_cursor_label.setText("cursor: -")
             return
         visible_series = [tuple(np.asarray(item, dtype=np.float64) for item in series_values) for series_values in series.values()]
 
     if not visible_series:
-        window.trace_stats_label.setText(
-            f'<span style="color:{metric_color}; font-weight:700;">{metric_label}</span>: -'
-            " | min/max: - | span: - | dt -"
-        )
+        window.trace_stats_label.setText(f"{metric_label}: - | min/max: - | span: - | dt -")
         window.trace_noise_summary_label.setText("noise: -")
         window.trace_cursor_label.setText("cursor: -")
         return
@@ -1080,6 +1122,7 @@ def update_metric_stats(window) -> None:
     y_min = float(np.min(y_values))
     y_max = float(np.max(y_values))
     latest_y = float(y_values[-1])
+    elapsed_from_start_s = max(float(x_values[-1]) - float(x_values[0]), 0.0)
     if clock_mode:
         try:
             latest_time_text = datetime.fromtimestamp(float(x_values[-1])).strftime("%H:%M:%S")
@@ -1099,12 +1142,11 @@ def update_metric_stats(window) -> None:
             metric_noise = f"{float(np.nanstd(metric_window)):.4f} nm"
         else:
             metric_noise = "-"
-        color = window.TRACE_METRIC_COLORS.get(metric_name, "#444444")
         label = window.TRACE_METRIC_LABELS.get(metric_name, metric_name)
-        noise_chunks.append(f"<span style='color:{color};'><b>{label}</b> {metric_noise}</span>")
+        noise_chunks.append(f"{label} {metric_noise}")
 
     window.trace_stats_label.setText(
-        f'<span style="color:{metric_color}; font-weight:700;">{metric_label}</span>: {latest_time_text}, {latest_y:.3f} nm'
+        f"{metric_label}: {latest_time_text} (+{_format_hhmmss(elapsed_from_start_s)}), {latest_y:.3f} nm"
         f" | min/max: {y_min:.3f} / {y_max:.3f} nm"
         f" | span: {y_max - y_min:.3f} nm"
         f" | dt {dt_text}"

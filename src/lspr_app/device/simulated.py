@@ -173,7 +173,14 @@ class SimulatedSpectrometer(Spectrometer):
 
     def _build_linear_baseline(self, x_relative: np.ndarray) -> np.ndarray:
         params = self._parameters
-        return float(params.baseline) + float(params.slope) * x_relative
+        if len(x_relative) == 0:
+            return np.empty(0, dtype=np.float64)
+        baseline = float(params.baseline)
+        peak_height = max(float(params.peak_height), 0.0)
+        signal_scale = max(baseline + peak_height, 1e-9)
+        x_span = max(float(x_relative[-1]) - float(x_relative[0]), 1e-9)
+        normalized_position = (x_relative - float(x_relative[0])) / x_span
+        return baseline + float(params.slope) * signal_scale * normalized_position
 
     def _build_sample_peak(self, wavelengths: np.ndarray) -> np.ndarray:
         params = self._parameters
@@ -194,3 +201,10 @@ class SimulatedSpectrometer(Spectrometer):
 
     def _build_sample_signal(self, wavelengths: np.ndarray) -> np.ndarray:
         return self._build_baseline_signal(wavelengths) + self._build_sample_peak(wavelengths)
+
+    def _build_baseline_signal(self, wavelengths: np.ndarray) -> np.ndarray:
+        wavelengths = np.asarray(wavelengths, dtype=np.float64)
+        if len(wavelengths) == 0:
+            return np.empty(0, dtype=np.float64)
+        x_relative = wavelengths - float(wavelengths[0])
+        return self._build_linear_baseline(x_relative)

@@ -300,7 +300,6 @@ class StartupSplash(QWidget):
             }
             """
         )
-
     def show_centered(self) -> None:
         screen = QGuiApplication.primaryScreen()
         if screen is not None:
@@ -442,7 +441,6 @@ def main() -> None:
     app.setWindowIcon(app_icon())
     splash = StartupSplash()
     splash.show_centered()
-
     loader_thread = QThread()
     loader = StartupLoader(os.environ.get(LAUNCH_PROFILE_ENV_VAR, DEFAULT_LAUNCH_PROFILE))
     loader.moveToThread(loader_thread)
@@ -482,8 +480,14 @@ def main() -> None:
         bootstrap_logger.info("Main window constructed.")
         app.main_window = window
         window._startup_show_requested_t0 = perf_counter()
-        window.show()
-        QTimer.singleShot(0, splash.close)
+        if bool(getattr(window, "_start_maximized", False)):
+            window._screen_fitted = True
+            window.showMaximized()
+        else:
+            window._fit_window_to_available_screen()
+            window._screen_fitted = True
+            window.show()
+        splash.close()
 
     def _handle_startup_failure(message: str) -> None:
         splash.close()

@@ -48,6 +48,7 @@ class LiveAcquisitionEvent:
     result: AcquisitionResult | None = None
     error: str | None = None
     source_epoch: int = 0
+    source_sample_index: int = 0
     produced_at_perf: float | None = None
 
 
@@ -343,6 +344,7 @@ def _live_acquisition_worker_main(
     set_processing_debug_mode_enabled(bool(debug_mode_enabled))
     current_settings = settings
     current_cycle_period_s = max(float(cycle_period_s), 0.0)
+    source_sample_index = 0
     logger = logging.getLogger("lspr_app.acquisition")
 
     try:
@@ -355,6 +357,7 @@ def _live_acquisition_worker_main(
                 LiveAcquisitionEvent(
                     error=str(exc),
                     source_epoch=source_epoch,
+                    source_sample_index=source_sample_index,
                     produced_at_perf=perf_counter(),
                 ),
             )
@@ -363,6 +366,7 @@ def _live_acquisition_worker_main(
                 LiveAcquisitionEvent(
                     error=str(exc),
                     source_epoch=source_epoch,
+                    source_sample_index=source_sample_index,
                     produced_at_perf=perf_counter(),
                 ),
             )
@@ -389,6 +393,7 @@ def _live_acquisition_worker_main(
                 spectrum = backend.acquire_spectrum(current_settings)
                 spectrum = spectrum.with_metadata(request_kind="sample")
                 finished = perf_counter()
+                source_sample_index += 1
                 elapsed_ms = (finished - started) * 1000.0
                 _queue_put_latest(
                     result_queue,
@@ -400,6 +405,7 @@ def _live_acquisition_worker_main(
                             source_epoch=source_epoch,
                         ),
                         source_epoch=source_epoch,
+                        source_sample_index=source_sample_index,
                         produced_at_perf=finished,
                     ),
                 )
@@ -413,6 +419,7 @@ def _live_acquisition_worker_main(
                             source_epoch=source_epoch,
                         ),
                         source_epoch=source_epoch,
+                        source_sample_index=source_sample_index,
                         produced_at_perf=finished,
                     ),
                 )
@@ -422,6 +429,7 @@ def _live_acquisition_worker_main(
                     LiveAcquisitionEvent(
                         error=str(exc),
                         source_epoch=source_epoch,
+                        source_sample_index=source_sample_index,
                         produced_at_perf=perf_counter(),
                     ),
                 )
@@ -430,6 +438,7 @@ def _live_acquisition_worker_main(
                     LiveAcquisitionEvent(
                         error=str(exc),
                         source_epoch=source_epoch,
+                        source_sample_index=source_sample_index,
                         produced_at_perf=perf_counter(),
                     ),
                 )

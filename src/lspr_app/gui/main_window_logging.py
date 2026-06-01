@@ -199,6 +199,7 @@ def build_pipeline_timing_breakdown_for(window) -> dict[str, float | None]:
     live_acquisition_flush_ms = _timing_value_ms(getattr(window, "_last_live_acquisition_flush_ms", None))
     live_processed_delay_ms = _timing_value_ms(getattr(window, "_last_live_processed_poll_delay_ms", None))
     live_processed_flush_ms = _timing_value_ms(getattr(window, "_last_live_processed_flush_ms", None))
+    display_refresh_delay_ms = _timing_value_ms(getattr(window, "_last_display_refresh_delay_ms", None))
     stats_refresh_delay_ms = _timing_value_ms(getattr(window, "_last_stats_refresh_delay_ms", None))
     summary_refresh_ms = _timing_value_ms(getattr(window, "_last_summary_refresh_ms", None))
     session_stats_refresh_ms = _timing_value_ms(getattr(window, "_last_session_stats_refresh_ms", None))
@@ -210,7 +211,8 @@ def build_pipeline_timing_breakdown_for(window) -> dict[str, float | None]:
     plot_render_ms = _timing_value_ms(getattr(window, "_last_plot_refresh_ms", None))
     sensorgram_render_ms = _timing_value_ms(getattr(window, "_last_sensorgram_render_ms", None))
     sensorgram_heatmap_render_ms = _timing_value_ms(getattr(window, "_last_sensorgram_heatmap_render_ms", None))
-    deferred_ui_ms = _timing_value_ms(getattr(window, "_last_deferred_ui_refresh_ms", None))
+    deferred_display_ms = _timing_value_ms(getattr(window, "_last_deferred_display_refresh_ms", None))
+    deferred_stats_ms = _timing_value_ms(getattr(window, "_last_deferred_stats_refresh_ms", None))
     known_total_ms = sum(
         value
         for value in (
@@ -219,6 +221,7 @@ def build_pipeline_timing_breakdown_for(window) -> dict[str, float | None]:
             live_acquisition_flush_ms,
             live_processed_delay_ms,
             live_processed_flush_ms,
+            display_refresh_delay_ms,
             stats_refresh_delay_ms,
             summary_refresh_ms,
             session_stats_refresh_ms,
@@ -230,7 +233,8 @@ def build_pipeline_timing_breakdown_for(window) -> dict[str, float | None]:
             plot_render_ms,
             sensorgram_render_ms,
             sensorgram_heatmap_render_ms,
-            deferred_ui_ms,
+            deferred_display_ms,
+            deferred_stats_ms,
         )
         if value is not None and value > 0
     )
@@ -244,6 +248,7 @@ def build_pipeline_timing_breakdown_for(window) -> dict[str, float | None]:
         "live_acquisition_flush_ms": live_acquisition_flush_ms,
         "live_processed_delay_ms": live_processed_delay_ms,
         "live_processed_flush_ms": live_processed_flush_ms,
+        "display_refresh_delay_ms": display_refresh_delay_ms,
         "stats_refresh_delay_ms": stats_refresh_delay_ms,
         "summary_refresh_ms": summary_refresh_ms,
         "session_stats_refresh_ms": session_stats_refresh_ms,
@@ -255,7 +260,8 @@ def build_pipeline_timing_breakdown_for(window) -> dict[str, float | None]:
         "plot_render_ms": plot_render_ms,
         "sensorgram_render_ms": sensorgram_render_ms,
         "sensorgram_heatmap_render_ms": sensorgram_heatmap_render_ms,
-        "deferred_ui_ms": deferred_ui_ms,
+        "deferred_display_ms": deferred_display_ms,
+        "deferred_stats_ms": deferred_stats_ms,
         "idle_ms": idle_ms,
     }
 

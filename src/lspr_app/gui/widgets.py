@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import pyqtgraph as pg
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
@@ -32,12 +32,35 @@ def configure_compact_splitter(splitter: QSplitter, *, handle_width: int | None 
 
 
 class FlexibleTimeAxis(pg.AxisItem):
+    doubleClicked = pyqtSignal()
+
     def __init__(self, orientation: str = "bottom") -> None:
         super().__init__(orientation=orientation)
         self._mode = "elapsed"
+        self._reference_value = 0.0
 
     def set_mode(self, mode: str) -> None:
-        self._mode = mode
+        normalized = mode if mode in {"elapsed", "clock", "relative"} else "elapsed"
+        if self._mode != normalized:
+            self._mode = normalized
+            self.picture = None
+            self.update()
+
+    def set_reference_value(self, value: float) -> None:
+        self._reference_value = float(value)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
+        self.doubleClicked.emit()
+        if event is not None and hasattr(event, "accept"):
+            event.accept()
+        super().mouseDoubleClickEvent(event)
+
+    def _format_relative_value(self, value: float) -> str:
+        elapsed_s = max(float(value) - float(self._reference_value), 0.0)
+        total_seconds = max(int(round(elapsed_s)), 0)
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def tickStrings(self, values, scale, spacing):  # type: ignore[override]
         if self._mode == "clock":
@@ -48,6 +71,8 @@ class FlexibleTimeAxis(pg.AxisItem):
                 except (OverflowError, OSError, ValueError):
                     labels.append("")
             return labels
+        if self._mode == "relative":
+            return [self._format_relative_value(float(value)) for value in values]
         return [f"{float(value):.0f}" if abs(float(value)) >= 10 else f"{float(value):.1f}" for value in values]
 
 
