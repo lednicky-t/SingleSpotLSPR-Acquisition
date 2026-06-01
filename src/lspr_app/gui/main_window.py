@@ -3610,7 +3610,7 @@ class MainWindow(QMainWindow):
 
     def _autoscale_trace_plot(self) -> None:
         self._trace_view_locked = False
-        autoscale_metric_plot_for(self)
+        autoscale_metric_plot_for(self, force=not bool(getattr(self, "_metric_autoscale_pending", False)))
 
     def _update_residual_view_geometry(self) -> None:
         update_residual_view_geometry(self)

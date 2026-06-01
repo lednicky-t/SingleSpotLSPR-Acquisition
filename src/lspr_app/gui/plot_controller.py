@@ -405,7 +405,13 @@ def apply_processing_range_to_spectrum_plot(window) -> None:
     window._spectrum_render_cache_key = None
 
 
-def autoscale_metric_plot(window) -> None:
+def autoscale_metric_plot(window, *, force: bool = True) -> None:
+    if not force:
+        last_autoscale_at = float(getattr(window, "_last_metric_autoscale_at", 0.0))
+        min_interval_s = float(getattr(window, "_metric_autoscale_min_interval_s", 0.25))
+        if last_autoscale_at > 0.0 and (perf_counter() - last_autoscale_at) < min_interval_s:
+            window._metric_autoscale_pending = False
+            return
     started = perf_counter()
     content_mode = getattr(window, "_sensorgram_content_mode", "metric")
     if content_mode == "heatmap":
@@ -414,6 +420,8 @@ def autoscale_metric_plot(window) -> None:
             render_sensorgram_heatmap(window, window._sensorgram_heatmap_history, clock_mode=not bool(window._measurement_active))
         finally:
             window._trace_view_autoscaling = False
+            window._last_metric_autoscale_at = perf_counter()
+            window._metric_autoscale_pending = False
         return
     visible_series: list[tuple[np.ndarray, np.ndarray]] = []
     trace_curves = getattr(window, "trace_curves", None)
@@ -429,16 +437,19 @@ def autoscale_metric_plot(window) -> None:
         if not series:
             window.trace_plot.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
             window.trace_plot.autoRange()
+            window._metric_autoscale_pending = False
             return
         visible_series = [tuple(np.asarray(item, dtype=np.float64) for item in series_values) for series_values in series.values()]
     if not visible_series:
         window.trace_plot.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
         window.trace_plot.autoRange()
+        window._metric_autoscale_pending = False
         return
     x = np.concatenate([item[0] for item in visible_series])
     y = np.concatenate([item[1] for item in visible_series])
     finite = np.isfinite(x) & np.isfinite(y)
     if not np.any(finite):
+        window._metric_autoscale_pending = False
         return
     x = x[finite]
     y = y[finite]
@@ -457,6 +468,7 @@ def autoscale_metric_plot(window) -> None:
         x_pad = max(x_span * 0.005, 0.25 if window.trace_time_axis._mode == "clock" else 1e-3)
     y_pad = max(y_span * 0.12, 1e-6)
     if getattr(window, "_trace_view_locked", False):
+        window._metric_autoscale_pending = False
         return
     window._trace_view_autoscaling = True
     try:
@@ -467,6 +479,8 @@ def autoscale_metric_plot(window) -> None:
         window.trace_plot.setYRange(float(np.min(y)) - y_pad, float(np.max(y)) + y_pad, padding=0.0)
     finally:
         window._trace_view_autoscaling = False
+        window._last_metric_autoscale_at = perf_counter()
+        window._metric_autoscale_pending = False
         if processing_debug_mode_enabled():
             elapsed_ms = (perf_counter() - started) * 1000.0
             if elapsed_ms >= 2.0:
@@ -523,6 +537,7 @@ def update_residual_axis_visibility(window, visible: bool | None = None) -> None
 def request_metric_autoscale(window) -> None:
     if bool(getattr(window, "_sensorgram_frozen", False)):
         return
+    window._metric_autoscale_pending = True
     window._trace_autoscale_timer.start()
 
 
@@ -595,7 +610,6 @@ def refresh_metric_plot(window, trace_label: str) -> None:
             level=logging.DEBUG,
             min_interval=1.5,
         )
-        request_metric_autoscale(window)
     finally:
         window._last_sensorgram_render_ms = (perf_counter() - started) * 1000.0
 

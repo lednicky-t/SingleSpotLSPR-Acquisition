@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from collections import OrderedDict
 from collections.abc import Callable
 
 import numpy as np
+
+
+@dataclass(slots=True)
+class MetricDisplayCache:
+    source_len: int = 0
+    stride: int = 1
+    x_display: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float64))
+    y_display: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float64))
 
 
 def extract_series_arrays(series: object) -> tuple[np.ndarray, np.ndarray]:
@@ -228,6 +237,33 @@ def _peak_preserving_downsample_indices(y: np.ndarray, target_bins: int) -> np.n
     return np.unique(np.asarray(keep, dtype=np.int64))
 
 
+def _minmax_preserving_downsample_indices(y: np.ndarray, target_bins: int) -> np.ndarray:
+    if target_bins <= 0 or len(y) == 0:
+        return np.empty(0, dtype=np.int64)
+    if len(y) <= target_bins * 2:
+        return np.arange(len(y), dtype=np.int64)
+
+    bins = max(int(target_bins), 1)
+    edges = np.linspace(0, len(y), num=bins + 1, dtype=np.int64)
+    keep: list[int] = [0, len(y) - 1]
+    for start, stop in zip(edges[:-1], edges[1:]):
+        if stop <= start:
+            continue
+        segment = y[start:stop]
+        finite = np.isfinite(segment)
+        if not np.any(finite):
+            continue
+        finite_segment = segment[finite]
+        finite_positions = np.flatnonzero(finite) + start
+        min_index = int(finite_positions[int(np.argmin(finite_segment))])
+        max_index = int(finite_positions[int(np.argmax(finite_segment))])
+        keep.append(min_index)
+        keep.append(max_index)
+    if not keep:
+        return np.arange(len(y), dtype=np.int64)
+    return np.unique(np.asarray(keep, dtype=np.int64))
+
+
 def quantize_view_target_points(points: int) -> int:
     points = max(int(points), 1)
     bucket = 1
@@ -323,10 +359,8 @@ def sample_absolute_metric_series_for_view(
     )
     if len(x) <= target_points:
         return x, y
-    stride = max(int(np.ceil(len(x) / float(target_points))), 1)
-    indices = np.arange(0, len(x), stride, dtype=np.int64)
-    if indices[-1] != len(x) - 1:
-        indices = np.append(indices, len(x) - 1)
+    target_bins = max(int(np.ceil(target_points / 2.0)), 1)
+    indices = _minmax_preserving_downsample_indices(y, target_bins)
     return x[indices], y[indices]
 
 
@@ -434,7 +468,7 @@ class PlotViewCache:
             np.empty((0, 0), dtype=np.float64),
         )
         self._heatmap_view_cache: OrderedDict[tuple[object, ...], tuple[np.ndarray, np.ndarray]] = OrderedDict()
-        self._absolute_metric_view_cache: OrderedDict[tuple[object, ...], dict[str, object]] = OrderedDict()
+        self._absolute_metric_view_cache: OrderedDict[tuple[object, ...], MetricDisplayCache] = OrderedDict()
         self._absolute_heatmap_view_cache: OrderedDict[tuple[object, ...], dict[str, object]] = OrderedDict()
 
     def clear(self) -> None:
@@ -578,65 +612,66 @@ class PlotViewCache:
         y = np.asarray(y, dtype=np.float64)
         if len(x) == 0 or len(y) == 0:
             result = (x, y)
-            self._absolute_metric_view_cache[cache_key] = {
-                "source_len": 0,
-                "stride": 1,
-                "result": result,
-            }
+            self._absolute_metric_view_cache[cache_key] = MetricDisplayCache(0, 1, result[0], result[1])
             return result
         if not enabled:
             result = (x, y)
-            self._absolute_metric_view_cache[cache_key] = {
-                "source_len": len(x),
-                "stride": 1,
-                "result": result,
-            }
+            self._absolute_metric_view_cache[cache_key] = MetricDisplayCache(len(x), 1, result[0], result[1])
             return result
 
         desired_stride = max(1, int(np.ceil(len(x) / float(max(target_points, 1)))))
         cached = self._absolute_metric_view_cache.get(cache_key)
-        if not isinstance(cached, dict) or int(cached.get("source_len", -1)) > len(x):
+        if not isinstance(cached, MetricDisplayCache) or cached.source_len > len(x):
             cached = None
-        if cached is None or int(cached.get("stride", 0)) != desired_stride:
-            indices = _stride_sample_indices(len(x), desired_stride)
+        if cached is None or cached.stride != desired_stride:
+            indices = _minmax_preserving_downsample_indices(y, max(target_points // 2, 1))
             result = (x[indices], y[indices])
-            self._absolute_metric_view_cache[cache_key] = {
-                "source_len": len(x),
-                "stride": desired_stride,
-                "result": result,
-            }
+            self._absolute_metric_view_cache[cache_key] = MetricDisplayCache(
+                source_len=len(x),
+                stride=desired_stride,
+                x_display=result[0],
+                y_display=result[1],
+            )
             self._absolute_metric_view_cache.move_to_end(cache_key)
             while len(self._absolute_metric_view_cache) > self._max_view_entries:
                 self._absolute_metric_view_cache.popitem(last=False)
             return result
 
-        sampled_x, sampled_y = cached["result"]  # type: ignore[index]
-        sampled_x = np.asarray(sampled_x, dtype=np.float64)
-        sampled_y = np.asarray(sampled_y, dtype=np.float64)
-        previous_len = int(cached.get("source_len", len(x)))
+        sampled_x = np.asarray(cached.x_display, dtype=np.float64)
+        sampled_y = np.asarray(cached.y_display, dtype=np.float64)
+        previous_len = int(cached.source_len)
         if previous_len == len(x):
             return sampled_x, sampled_y
         if previous_len < 0 or previous_len > len(x):
-            indices = _stride_sample_indices(len(x), desired_stride)
+            indices = _minmax_preserving_downsample_indices(y, max(target_points // 2, 1))
             result = (x[indices], y[indices])
-            self._absolute_metric_view_cache[cache_key] = {
-                "source_len": len(x),
-                "stride": desired_stride,
-                "result": result,
-            }
+            self._absolute_metric_view_cache[cache_key] = MetricDisplayCache(
+                source_len=len(x),
+                stride=desired_stride,
+                x_display=result[0],
+                y_display=result[1],
+            )
             return result
-        first_new_index = ((previous_len + desired_stride - 1) // desired_stride) * desired_stride
+        first_new_index = max((previous_len // desired_stride) * desired_stride, 0)
         if first_new_index < len(x):
-            new_indices = _stride_sample_indices(len(x) - first_new_index, desired_stride) + first_new_index
-            if len(new_indices) > 0:
-                sampled_x = np.concatenate((sampled_x, x[new_indices]))
-                sampled_y = np.concatenate((sampled_y, y[new_indices]))
+            if len(sampled_x) > 0:
+                prefix_mask = sampled_x < float(x[first_new_index])
+                sampled_x = sampled_x[prefix_mask]
+                sampled_y = sampled_y[prefix_mask]
+            tail_x = x[first_new_index:]
+            tail_y = y[first_new_index:]
+            if len(tail_x) > 0:
+                tail_indices = _minmax_preserving_downsample_indices(tail_y, max(target_points // 2, 1))
+                if len(tail_indices) > 0:
+                    sampled_x = np.concatenate((sampled_x, tail_x[tail_indices]))
+                    sampled_y = np.concatenate((sampled_y, tail_y[tail_indices]))
         result = (sampled_x, sampled_y)
-        self._absolute_metric_view_cache[cache_key] = {
-            "source_len": len(x),
-            "stride": desired_stride,
-            "result": result,
-        }
+        self._absolute_metric_view_cache[cache_key] = MetricDisplayCache(
+            source_len=len(x),
+            stride=desired_stride,
+            x_display=result[0],
+            y_display=result[1],
+        )
         self._absolute_metric_view_cache.move_to_end(cache_key)
         while len(self._absolute_metric_view_cache) > self._max_view_entries:
             self._absolute_metric_view_cache.popitem(last=False)
