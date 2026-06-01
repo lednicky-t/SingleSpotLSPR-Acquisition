@@ -30,12 +30,22 @@ def run_gui_callback_timed(window, label: str, callback: Callable[[], None], *, 
             "log_buffer": "_last_log_buffer_total_ms",
             "ui_heartbeat": "_last_ui_heartbeat_total_ms",
             "gui_housekeeping": "_last_gui_housekeeping_total_ms",
+            "gui_housekeeping_log_buffer": "_last_gui_housekeeping_log_buffer_ms",
+            "gui_housekeeping_ui_state": "_last_gui_housekeeping_ui_state_ms",
+            "gui_housekeeping_acquisition_state": "_last_gui_housekeeping_acquisition_state_ms",
+            "gui_housekeeping_session_stats_snapshot": "_last_gui_housekeeping_session_stats_snapshot_ms",
+            "gui_housekeeping_session_stats_refresh": "_last_gui_housekeeping_session_stats_refresh_ms",
         }.get(label, f"_last_{label}_total_ms")
         if hasattr(window, attr_name):
             setattr(window, attr_name, elapsed_ms)
         warning_threshold_ms = {
             "ui_heartbeat": 50.0,
             "gui_housekeeping": 100.0,
+            "gui_housekeeping_log_buffer": 100.0,
+            "gui_housekeeping_ui_state": 75.0,
+            "gui_housekeeping_acquisition_state": 75.0,
+            "gui_housekeeping_session_stats_snapshot": 75.0,
+            "gui_housekeeping_session_stats_refresh": 75.0,
             "deferred_ui_flush": 100.0,
             "plot_refresh": 75.0,
             "session_stats_refresh": 75.0,
@@ -72,12 +82,14 @@ def drain_gui_housekeeping_tasks(window) -> None:
     log_buffer = getattr(window, "_log_buffer", None)
     log_buffer_timer = getattr(window, "_log_buffer_timer", None)
     if log_buffer and _due(getattr(window, "_log_buffer_requested_at", None), float(log_buffer_timer.interval()) if log_buffer_timer is not None else 75.0):
-        window._flush_log_buffer()
+        window._run_gui_callback_timed("log_buffer", lambda: window._flush_log_buffer())
+        window._last_gui_housekeeping_log_buffer_ms = getattr(window, "_last_log_buffer_total_ms", None)
         return
 
     ui_state_timer = getattr(window, "_ui_state_timer", None)
     if _due(getattr(window, "_ui_state_requested_at", None), float(ui_state_timer.interval()) if ui_state_timer is not None else 250.0):
-        window._save_ui_state()
+        window._run_gui_callback_timed("ui_state_save", lambda: window._save_ui_state())
+        window._last_gui_housekeeping_ui_state_ms = getattr(window, "_last_ui_state_total_ms", None)
         return
 
     acquisition_state_timer = getattr(window, "_acquisition_state_timer", None)
@@ -85,21 +97,24 @@ def drain_gui_housekeeping_tasks(window) -> None:
         getattr(window, "_acquisition_state_requested_at", None),
         float(acquisition_state_timer.interval()) if acquisition_state_timer is not None else 250.0,
     ):
-        window._persist_acquisition_state()
+        window._run_gui_callback_timed("acquisition_state_save", lambda: window._persist_acquisition_state())
+        window._last_gui_housekeeping_acquisition_state_ms = getattr(window, "_last_acquisition_state_total_ms", None)
         return
 
     if bool(getattr(window, "_session_stats_recording_active", False)):
         session_timer = getattr(window, "_session_stats_recording_timer", None)
         interval_ms = float(session_timer.interval()) if session_timer is not None else 1000.0
         if _due(getattr(window, "_session_stats_recording_requested_at", None), interval_ms):
-            window._capture_session_stats_recording_snapshot()
+            window._run_gui_callback_timed("session_stats_snapshot", lambda: window._capture_session_stats_recording_snapshot())
+            window._last_gui_housekeeping_session_stats_snapshot_ms = getattr(window, "_last_session_stats_recording_total_ms", None)
             return
 
     if refresh_state is not None and bool(getattr(refresh_state, "session_stats_dirty", False)):
         if window._session_stats_refresh_requested_at is None:
             window._session_stats_refresh_requested_at = now
         elif _due(window._session_stats_refresh_requested_at, window._session_stats_refresh_delay_ms):
-            window._refresh_session_statistics(force=True)
+            window._run_gui_callback_timed("session_stats_refresh", lambda: window._refresh_session_statistics(force=True))
+            window._last_gui_housekeeping_session_stats_refresh_ms = getattr(window, "_last_session_stats_refresh_total_ms", None)
             refresh_state.session_stats_dirty = False
             window._session_stats_refresh_requested_at = None
             return

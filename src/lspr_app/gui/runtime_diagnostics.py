@@ -101,6 +101,11 @@ class SessionDiagnosticsSnapshot:
     deferred_ui_stats_text: str
     session_summary_total_text: str
     session_stats_total_text: str
+    housekeeping_log_buffer_text: str
+    housekeeping_ui_state_text: str
+    housekeeping_acquisition_state_text: str
+    housekeeping_session_stats_snapshot_text: str
+    housekeeping_session_stats_refresh_text: str
     scheduler_lag_text: str
     scheduler_duration_text: str
     scheduler_task_count_text: str
@@ -273,6 +278,11 @@ class SessionDiagnosticsSnapshot:
             deferred_ui_stats_text=_timing_plain_text(getattr(window, "_last_deferred_ui_stats_ms", None)),
             session_summary_total_text=_timing_plain_text(getattr(window, "_last_session_summary_refresh_total_ms", None)),
             session_stats_total_text=_timing_plain_text(getattr(window, "_last_session_stats_refresh_total_ms", None)),
+            housekeeping_log_buffer_text=_timing_plain_text(getattr(window, "_last_gui_housekeeping_log_buffer_ms", None)),
+            housekeeping_ui_state_text=_timing_plain_text(getattr(window, "_last_gui_housekeeping_ui_state_ms", None)),
+            housekeeping_acquisition_state_text=_timing_plain_text(getattr(window, "_last_gui_housekeeping_acquisition_state_ms", None)),
+            housekeeping_session_stats_snapshot_text=_timing_plain_text(getattr(window, "_last_gui_housekeeping_session_stats_snapshot_ms", None)),
+            housekeeping_session_stats_refresh_text=_timing_plain_text(getattr(window, "_last_gui_housekeeping_session_stats_refresh_ms", None)),
             scheduler_lag_text=scheduler_lag_text,
             scheduler_duration_text=scheduler_duration_text,
             scheduler_task_count_text=scheduler_task_count_text,
@@ -352,6 +362,13 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         f"  Scheduler pending tasks: {snapshot.scheduler_pending_text}",
         f"  Log buffer total: {snapshot.log_buffer_total_text}",
         f"  GUI housekeeping total: {snapshot.gui_housekeeping_total_text}",
+        "",
+        "GUI housekeeping breakdown",
+        f"  Log buffer: {snapshot.housekeeping_log_buffer_text}",
+        f"  UI state save: {snapshot.housekeeping_ui_state_text}",
+        f"  Acquisition state save: {snapshot.housekeeping_acquisition_state_text}",
+        f"  Session stats snapshot: {snapshot.housekeeping_session_stats_snapshot_text}",
+        f"  Session stats refresh: {snapshot.housekeeping_session_stats_refresh_text}",
         f"  Metric history points: {snapshot.trace_points_text}",
         f"  Metric display buffer points: {snapshot.trace_buffer_points_text}",
         f"  Heatmap rows: {snapshot.heatmap_rows_text}",

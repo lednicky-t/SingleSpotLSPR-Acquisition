@@ -639,6 +639,11 @@ class MainWindow(QMainWindow):
         self._last_acquisition_state_delay_ms: float | None = None
         self._last_acquisition_state_save_ms: float | None = None
         self._last_acquisition_state_total_ms: float | None = None
+        self._last_gui_housekeeping_log_buffer_ms: float | None = None
+        self._last_gui_housekeeping_ui_state_ms: float | None = None
+        self._last_gui_housekeeping_acquisition_state_ms: float | None = None
+        self._last_gui_housekeeping_session_stats_snapshot_ms: float | None = None
+        self._last_gui_housekeeping_session_stats_refresh_ms: float | None = None
         self._ui_state_timer = QTimer(self)
         self._ui_state_timer.setSingleShot(True)
         self._ui_state_timer.setInterval(250)
