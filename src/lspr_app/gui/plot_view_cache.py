@@ -532,11 +532,11 @@ class PlotViewCache:
             y,
             view_x_min=view_x_min,
             view_x_max=view_x_max,
-            view_width_px=float(target_points),
+            view_width_px=view_width_px,
             enabled=enabled,
             minimum_points=minimum_points,
-            oversample=0.0,
-            default_points=target_points,
+            oversample=oversample,
+            default_points=default_points,
         )
         self._metric_view_cache[cache_key] = result
         self._metric_view_cache.move_to_end(cache_key)
@@ -612,63 +612,31 @@ class PlotViewCache:
         y = np.asarray(y, dtype=np.float64)
         if len(x) == 0 or len(y) == 0:
             result = (x, y)
-            self._absolute_metric_view_cache[cache_key] = MetricDisplayCache(0, 1, result[0], result[1])
+            self._absolute_metric_view_cache[cache_key] = MetricDisplayCache(0, int(target_points), result[0], result[1])
             return result
         if not enabled:
             result = (x, y)
-            self._absolute_metric_view_cache[cache_key] = MetricDisplayCache(len(x), 1, result[0], result[1])
+            self._absolute_metric_view_cache[cache_key] = MetricDisplayCache(len(x), int(target_points), result[0], result[1])
             return result
 
-        desired_stride = max(1, int(np.ceil(len(x) / float(max(target_points, 1)))))
         cached = self._absolute_metric_view_cache.get(cache_key)
-        if not isinstance(cached, MetricDisplayCache) or cached.source_len > len(x):
-            cached = None
-        if cached is None or cached.stride != desired_stride:
-            indices = _minmax_preserving_downsample_indices(y, max(target_points // 2, 1))
-            result = (x[indices], y[indices])
-            self._absolute_metric_view_cache[cache_key] = MetricDisplayCache(
-                source_len=len(x),
-                stride=desired_stride,
-                x_display=result[0],
-                y_display=result[1],
-            )
+        if isinstance(cached, MetricDisplayCache) and cached.source_len == len(x) and cached.stride == int(target_points):
             self._absolute_metric_view_cache.move_to_end(cache_key)
-            while len(self._absolute_metric_view_cache) > self._max_view_entries:
-                self._absolute_metric_view_cache.popitem(last=False)
-            return result
-
-        sampled_x = np.asarray(cached.x_display, dtype=np.float64)
-        sampled_y = np.asarray(cached.y_display, dtype=np.float64)
-        previous_len = int(cached.source_len)
-        if previous_len == len(x):
-            return sampled_x, sampled_y
-        if previous_len < 0 or previous_len > len(x):
-            indices = _minmax_preserving_downsample_indices(y, max(target_points // 2, 1))
-            result = (x[indices], y[indices])
-            self._absolute_metric_view_cache[cache_key] = MetricDisplayCache(
-                source_len=len(x),
-                stride=desired_stride,
-                x_display=result[0],
-                y_display=result[1],
-            )
-            return result
-        first_new_index = max((previous_len // desired_stride) * desired_stride, 0)
-        if first_new_index < len(x):
-            if len(sampled_x) > 0:
-                prefix_mask = sampled_x < float(x[first_new_index])
-                sampled_x = sampled_x[prefix_mask]
-                sampled_y = sampled_y[prefix_mask]
-            tail_x = x[first_new_index:]
-            tail_y = y[first_new_index:]
-            if len(tail_x) > 0:
-                tail_indices = _minmax_preserving_downsample_indices(tail_y, max(target_points // 2, 1))
-                if len(tail_indices) > 0:
-                    sampled_x = np.concatenate((sampled_x, tail_x[tail_indices]))
-                    sampled_y = np.concatenate((sampled_y, tail_y[tail_indices]))
-        result = (sampled_x, sampled_y)
+            return np.asarray(cached.x_display, dtype=np.float64), np.asarray(cached.y_display, dtype=np.float64)
+        if cached is not None and not isinstance(cached, MetricDisplayCache):
+            cached = None
+        result = sample_absolute_metric_series_for_view(
+            x,
+            y,
+            view_width_px=view_width_px,
+            enabled=enabled,
+            minimum_points=minimum_points,
+            oversample=oversample,
+            default_points=default_points,
+        )
         self._absolute_metric_view_cache[cache_key] = MetricDisplayCache(
             source_len=len(x),
-            stride=desired_stride,
+            stride=int(target_points),
             x_display=result[0],
             y_display=result[1],
         )

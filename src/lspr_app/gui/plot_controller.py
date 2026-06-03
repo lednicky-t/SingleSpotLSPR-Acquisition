@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from html import escape
 from time import perf_counter
 
 from PyQt6.QtCore import QRectF
@@ -18,8 +19,8 @@ from lspr_app.gui.plot_view_cache import (
     derive_heatmap_levels_from_matrix,
     downsample_metric_series_for_view as _downsample_metric_series_for_view,
     expand_heatmap_levels,
-    sample_absolute_heatmap_rows_for_view,
     sample_absolute_metric_series_for_view,
+    sample_absolute_heatmap_rows_for_view,
     select_heatmap_rows_for_view,
 )
 
@@ -162,6 +163,10 @@ def _format_hhmmss(seconds: float) -> str:
     hours, remainder = divmod(total_seconds, 3600)
     minutes, secs = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _metric_label_span(label: str, color: str) -> str:
+    return f"<span style='color: {escape(color)}; font-weight: 600;'>{escape(label)}</span>"
 
 
 def downsample_metric_series_for_view(
@@ -720,74 +725,99 @@ def render_metric_series(
             view_x_max = latest_x
             view_x_min = latest_x - window_span
     active_series = {}
-    render_cache = getattr(window, "_metric_render_display_cache", None)
-    if not isinstance(render_cache, dict):
-        render_cache = {}
-        window._metric_render_display_cache = render_cache
+    render_state_cache = getattr(window, "_metric_render_state_cache", None)
+    if not isinstance(render_state_cache, dict):
+        render_state_cache = {}
+        window._metric_render_state_cache = render_state_cache
+    downsampling_enabled = bool(getattr(window, "_sensorgram_downsampling_enabled", True))
+    cache = getattr(window, "_plot_view_cache", None)
     for metric_name, curve in window.trace_curves.items():
         series = history.get(metric_name, [])
         if metric_name not in window._selected_trace_metrics() or series is None:
-            curve.setData([], [])
+            curve.setDownsampling(auto=False, ds=1)
+            render_state_key = (metric_name, "empty", downsampling_enabled)
+            if render_state_cache.get(metric_name) != render_state_key:
+                curve.setData([], [])
+                render_state_cache[metric_name] = render_state_key
             continue
         raw_points += _series_point_count(series)
         x, y = _series_to_arrays(series)
         if len(x) == 0 or len(y) == 0:
-            curve.setData([], [])
+            curve.setDownsampling(auto=False, ds=1)
+            render_state_key = (metric_name, "empty", downsampling_enabled)
+            if render_state_cache.get(metric_name) != render_state_key:
+                curve.setData([], [])
+                render_state_cache[metric_name] = render_state_key
             continue
-        cache = getattr(window, "_plot_view_cache", None)
         series_token = build_metric_series_token(window, metric_name)
+        curve.setDownsampling(auto=False, ds=1)
+        display_x = x
+        display_y = y
         if cache is not None:
             if view_mode == "absolute" and not trace_view_locked:
-                x, y = cache.absolute_metric_view(
+                display_x, display_y = cache.absolute_metric_view(
                     series_token,
                     x,
                     y,
                     view_width_px=view_width_px,
-                    enabled=bool(getattr(window, "_sensorgram_downsampling_enabled", True)),
+                    enabled=downsampling_enabled,
+                    minimum_points=128,
+                    oversample=1.0,
+                    default_points=2048,
                 )
             else:
-                x, y = cache.metric_view(
+                display_x, display_y = cache.metric_view(
                     series_token,
                     x,
                     y,
                     view_x_min=view_x_min,
                     view_x_max=view_x_max,
                     view_width_px=view_width_px,
-                    enabled=bool(getattr(window, "_sensorgram_downsampling_enabled", True)),
+                    enabled=downsampling_enabled,
+                    minimum_points=128,
+                    oversample=1.0,
+                    default_points=2048,
                 )
+        elif view_mode == "absolute" and not trace_view_locked:
+            display_x, display_y = sample_absolute_metric_series_for_view(
+                x,
+                y,
+                view_width_px=view_width_px,
+                enabled=downsampling_enabled,
+                minimum_points=128,
+                oversample=1.0,
+                default_points=2048,
+            )
         else:
-            if view_mode == "absolute" and not trace_view_locked:
-                x, y = sample_absolute_metric_series_for_view(
-                    x,
-                    y,
-                    view_width_px=view_width_px,
-                    enabled=bool(getattr(window, "_sensorgram_downsampling_enabled", True)),
-                )
-            else:
-                x, y = downsample_metric_series_for_view(
-                    x,
-                    y,
-                    view_x_min=view_x_min,
-                    view_x_max=view_x_max,
-                    view_width_px=view_width_px,
-                    enabled=bool(getattr(window, "_sensorgram_downsampling_enabled", True)),
-                )
-        cached_display = render_cache.get(metric_name)
-        if (
-            isinstance(cached_display, tuple)
-            and len(cached_display) == 2
-            and cached_display[0] is x
-            and cached_display[1] is y
-        ):
-            display_points += int(len(x))
-            active_series[metric_name] = (x, y)
+            display_x, display_y = downsample_metric_series_for_view(
+                x,
+                y,
+                view_x_min=view_x_min,
+                view_x_max=view_x_max,
+                view_width_px=view_width_px,
+                enabled=downsampling_enabled,
+                minimum_points=128,
+                oversample=1.0,
+                default_points=2048,
+            )
+        render_state_key = (
+            metric_name,
+            series_token,
+            downsampling_enabled,
+            view_mode,
+            bool(trace_view_locked),
+            int(len(display_x)),
+        )
+        if render_state_cache.get(metric_name) == render_state_key:
+            display_points += int(len(display_x))
+            active_series[metric_name] = (display_x, display_y)
             continue
         setdata_started = perf_counter()
-        curve.setData(x, y)
+        curve.setData(display_x, display_y)
         setdata_ms += (perf_counter() - setdata_started) * 1000.0
-        display_points += int(len(x))
-        render_cache[metric_name] = (x, y)
-        active_series[metric_name] = (x, y)
+        display_points += int(len(display_x))
+        render_state_cache[metric_name] = render_state_key
+        active_series[metric_name] = (display_x, display_y)
 
     primary_name = window._primary_trace_metric()
     if primary_name in active_series:
@@ -1085,14 +1115,14 @@ def update_metric_stats(window) -> None:
 
     if not visible_series:
         if not series:
-            window.trace_stats_label.setText(f"{metric_label}: - | min/max: - | span: - | dt -")
+            window.trace_stats_label.setText(f"{_metric_label_span(metric_label, metric_color)}: - | min/max: - | span: - | dt -")
             window.trace_noise_summary_label.setText("noise: -")
             window.trace_cursor_label.setText("cursor: -")
             return
         visible_series = [tuple(np.asarray(item, dtype=np.float64) for item in series_values) for series_values in series.values()]
 
     if not visible_series:
-        window.trace_stats_label.setText(f"{metric_label}: - | min/max: - | span: - | dt -")
+        window.trace_stats_label.setText(f"{_metric_label_span(metric_label, metric_color)}: - | min/max: - | span: - | dt -")
         window.trace_noise_summary_label.setText("noise: -")
         window.trace_cursor_label.setText("cursor: -")
         return
@@ -1114,7 +1144,7 @@ def update_metric_stats(window) -> None:
     clock_mode = not bool(window._measurement_active)
 
     if len(x_values) == 0 or len(y_values) == 0:
-        window.trace_stats_label.setText("latest: - | min/max: - | span: - | dt -")
+        window.trace_stats_label.setText(f"{_metric_label_span(metric_label, metric_color)}: - | min/max: - | span: - | dt -")
         window.trace_noise_summary_label.setText("noise: -")
         window.trace_cursor_label.setText("cursor: -")
         return
@@ -1136,17 +1166,19 @@ def update_metric_stats(window) -> None:
     window_s = window.trace_noise_window_spin.value()
     noise_chunks: list[str] = []
     for metric_name, (metric_x, metric_y) in series.items():
-        metric_mask = metric_x >= (float(metric_x[-1]) - window_s)
-        metric_window = metric_y[metric_mask]
+        tail_start = float(metric_x[-1]) - window_s
+        tail_index = int(np.searchsorted(metric_x, tail_start, side="left"))
+        metric_window = metric_y[tail_index:]
         if len(metric_window) >= 2:
             metric_noise = f"{float(np.nanstd(metric_window)):.4f} nm"
         else:
             metric_noise = "-"
         label = window.TRACE_METRIC_LABELS.get(metric_name, metric_name)
-        noise_chunks.append(f"{label} {metric_noise}")
+        color = window.TRACE_METRIC_COLORS.get(metric_name, "#444444")
+        noise_chunks.append(f"{_metric_label_span(label, color)} {escape(metric_noise)}")
 
     window.trace_stats_label.setText(
-        f"{metric_label}: {latest_time_text} (+{_format_hhmmss(elapsed_from_start_s)}), {latest_y:.3f} nm"
+        f"{_metric_label_span(metric_label, metric_color)}: {escape(latest_time_text)} (+{_format_hhmmss(elapsed_from_start_s)}), {latest_y:.3f} nm"
         f" | min/max: {y_min:.3f} / {y_max:.3f} nm"
         f" | span: {y_max - y_min:.3f} nm"
         f" | dt {dt_text}"

@@ -124,6 +124,8 @@ class SessionDiagnosticsSnapshot:
     dropped_frames_text: str
     trace_points_text: str
     trace_buffer_points_text: str
+    trace_raw_points_text: str
+    trace_display_points_text: str
     heatmap_rows_text: str
     live_result_queue_text: str
     live_result_queue_max_text: str
@@ -169,6 +171,55 @@ class SessionDiagnosticsSnapshot:
                 trace_buffer_points_text = str(max(len(buffer) for buffer in peak_history_buffers.values()))
             except ValueError:
                 trace_buffer_points_text = "0"
+        trace_raw_points_text = "-"
+        trace_display_points_text = "-"
+        active_series = getattr(window, "_active_trace_series", None)
+        if callable(active_series):
+            try:
+                series = active_series()
+            except Exception:
+                series = {}
+            if isinstance(series, dict) and series:
+                try:
+                    trace_raw_points_text = str(
+                        sum(len(np.asarray(values[0], dtype=np.float64)) for values in series.values())
+                    )
+                except Exception:
+                    trace_raw_points_text = "-"
+        trace_curves = getattr(window, "trace_curves", None)
+        visible_points = 0
+        if isinstance(trace_curves, dict):
+            for curve in trace_curves.values():
+                if hasattr(curve, "isVisible") and not bool(curve.isVisible()):
+                    continue
+                x_values = getattr(curve, "xData", None)
+                y_values = getattr(curve, "yData", None)
+                if x_values is None or y_values is None:
+                    data = getattr(curve, "data", None)
+                    if isinstance(data, tuple) and len(data) == 2:
+                        x_values, y_values = data
+                if x_values is None or y_values is None:
+                    get_data = getattr(curve, "getData", None)
+                    if callable(get_data):
+                        try:
+                            x_values, y_values = get_data()
+                        except Exception:
+                            x_values = y_values = None
+                if x_values is None or y_values is None:
+                    continue
+                try:
+                    visible_points += int(len(x_values))
+                except Exception:
+                    continue
+        if visible_points > 0:
+            trace_display_points_text = str(visible_points)
+        else:
+            visible_trace_x = getattr(window, "_visible_trace_x", None)
+            if visible_trace_x is not None:
+                try:
+                    trace_display_points_text = str(len(visible_trace_x))
+                except Exception:
+                    trace_display_points_text = "-"
         heatmap_rows_text = str(len(getattr(window, "_sensorgram_heatmap_history", []) or []))
         reference_ms = None
         spacing_ms = getattr(window, "_last_spacing_ms", None)
@@ -314,6 +365,8 @@ class SessionDiagnosticsSnapshot:
             ),
             trace_points_text=trace_points_text,
             trace_buffer_points_text=trace_buffer_points_text,
+            trace_raw_points_text=trace_raw_points_text,
+            trace_display_points_text=trace_display_points_text,
             heatmap_rows_text=heatmap_rows_text,
             live_result_queue_text=_queue_depth_text(window, "_live_result_queue"),
             live_result_queue_max_text=_queue_depth_max_text(getattr(window, "_live_result_queue_max_depth", None)),
@@ -380,6 +433,8 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         f"  Session stats refresh: {snapshot.housekeeping_session_stats_refresh_text}",
         f"  Metric history points: {snapshot.trace_points_text}",
         f"  Metric display buffer points: {snapshot.trace_buffer_points_text}",
+        f"  Metric raw points: {snapshot.trace_raw_points_text}",
+        f"  Metric display points: {snapshot.trace_display_points_text}",
         f"  Heatmap rows: {snapshot.heatmap_rows_text}",
         f"  Live result queue: {snapshot.live_result_queue_text} | max: {snapshot.live_result_queue_max_text}",
         f"  Live processed queue: {snapshot.live_processed_queue_text} | max: {snapshot.live_processed_queue_max_text}",

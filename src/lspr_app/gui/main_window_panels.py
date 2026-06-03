@@ -66,15 +66,17 @@ def build_simulation_page(window) -> QWidget:
     simulation_info_row.addWidget(
         make_info_button(
             "Synthetic spectrum controls used in Simulation mode. "
-            "These settings shape the generated display data and do not affect spectrometer hardware."
+            "These settings shape the generated display data, including the primary and secondary peaks, "
+            "and do not affect spectrometer hardware."
         )
     )
     simulation_info_row.addStretch(1)
     simulation_layout.addLayout(simulation_info_row, 0, 0, 1, 2)
 
+    _add_sim_section_header(simulation_layout, 1, "Primary peak")
     _add_sim_row(
         simulation_layout,
-        1,
+        2,
         "Peak center",
         window.sim_peak_center_slider,
         window.sim_peak_center_value,
@@ -82,7 +84,7 @@ def build_simulation_page(window) -> QWidget:
     )
     _add_sim_row(
         simulation_layout,
-        2,
+        3,
         "Peak width",
         window.sim_peak_width_slider,
         window.sim_peak_width_value,
@@ -90,15 +92,40 @@ def build_simulation_page(window) -> QWidget:
     )
     _add_sim_row(
         simulation_layout,
-        3,
+        4,
         "Peak height",
         window.sim_peak_height_slider,
         window.sim_peak_height_value,
         "Peak height in the synthetic display model.",
     )
+    _add_sim_section_header(simulation_layout, 5, "Secondary peak")
     _add_sim_row(
         simulation_layout,
-        4,
+        6,
+        "2nd center offset",
+        window.sim_secondary_peak_offset_slider,
+        window.sim_secondary_peak_offset_value,
+        "Center-to-center offset of the second peak relative to the first peak.",
+    )
+    _add_sim_row(
+        simulation_layout,
+        7,
+        "2nd relative height",
+        window.sim_secondary_peak_height_slider,
+        window.sim_secondary_peak_height_value,
+        "Second peak height as a percentage of the first peak height.",
+    )
+    _add_sim_row(
+        simulation_layout,
+        8,
+        "2nd relative width",
+        window.sim_secondary_peak_width_slider,
+        window.sim_secondary_peak_width_value,
+        "Second peak width as a percentage of the first peak width.",
+    )
+    _add_sim_row(
+        simulation_layout,
+        9,
         "Baseline",
         window.sim_baseline_slider,
         window.sim_baseline_value,
@@ -106,7 +133,7 @@ def build_simulation_page(window) -> QWidget:
     )
     _add_sim_row(
         simulation_layout,
-        5,
+        10,
         "Relative slope",
         window.sim_slope_slider,
         window.sim_slope_value,
@@ -114,7 +141,7 @@ def build_simulation_page(window) -> QWidget:
     )
     _add_sim_row(
         simulation_layout,
-        6,
+        11,
         "Noise",
         window.sim_noise_slider,
         window.sim_noise_value,
@@ -123,15 +150,15 @@ def build_simulation_page(window) -> QWidget:
 
     resolution_label = QLabel("Resolution")
     resolution_label.setToolTip("Wavelength spacing of the synthetic spectrum grid.")
-    simulation_layout.addWidget(resolution_label, 7, 0)
+    simulation_layout.addWidget(resolution_label, 12, 0)
     window.sim_resolution_spin.setToolTip("Wavelength spacing of the synthetic spectrum grid.")
-    simulation_layout.addWidget(window.sim_resolution_spin, 7, 1)
+    simulation_layout.addWidget(window.sim_resolution_spin, 12, 1)
     output_rate_label = QLabel("Output rate")
     output_rate_label.setToolTip(
         "Frame production rate of the simulation backend. This does not affect spectrometer hardware."
     )
-    simulation_layout.addWidget(output_rate_label, 8, 0)
-    simulation_layout.addWidget(window.sim_output_rate_spin, 8, 1)
+    simulation_layout.addWidget(output_rate_label, 13, 0)
+    simulation_layout.addWidget(window.sim_output_rate_spin, 13, 1)
     simulation_group.setLayout(simulation_layout)
 
     page_layout = QVBoxLayout()
@@ -345,3 +372,10 @@ def _add_sim_row(
     layout.addWidget(label_widget, row, 0)
     layout.addWidget(slider, row, 1)
     layout.addWidget(value_label, row, 2)
+
+
+def _add_sim_section_header(layout: QGridLayout, row: int, text: str) -> None:
+    header = QLabel(text)
+    header.setStyleSheet("font-weight: 700; margin-top: 4px; margin-bottom: 2px;")
+    header.setToolTip(text)
+    layout.addWidget(header, row, 0, 1, 3)

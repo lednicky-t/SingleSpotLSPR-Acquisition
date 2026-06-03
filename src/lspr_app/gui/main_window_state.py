@@ -255,6 +255,9 @@ def acquisition_state_payload(window) -> dict[str, object]:
             "peak_center_nm": float(simulation.peak_center_nm),
             "peak_width_nm": float(simulation.peak_width_nm),
             "peak_height": float(simulation.peak_height),
+            "secondary_peak_offset_nm": float(simulation.secondary_peak_offset_nm),
+            "secondary_peak_height_percent": float(simulation.secondary_peak_height_percent),
+            "secondary_peak_width_percent": float(simulation.secondary_peak_width_percent),
             "baseline": float(simulation.baseline),
             "slope": float(simulation.slope * 100.0),
             "noise": float(simulation.noise),
@@ -363,6 +366,15 @@ def apply_acquisition_state_to_widgets(window, state: dict[str, object]) -> None
             peak_height = simulation.get("peak_height")
             if isinstance(peak_height, (int, float)):
                 window.sim_peak_height_slider.setValue(int(round(float(peak_height))))
+            secondary_peak_offset_nm = simulation.get("secondary_peak_offset_nm")
+            if isinstance(secondary_peak_offset_nm, (int, float)):
+                window.sim_secondary_peak_offset_slider.setValue(int(round(float(secondary_peak_offset_nm))))
+            secondary_peak_height_percent = simulation.get("secondary_peak_height_percent")
+            if isinstance(secondary_peak_height_percent, (int, float)):
+                window.sim_secondary_peak_height_slider.setValue(int(round(float(secondary_peak_height_percent))))
+            secondary_peak_width_percent = simulation.get("secondary_peak_width_percent")
+            if isinstance(secondary_peak_width_percent, (int, float)):
+                window.sim_secondary_peak_width_slider.setValue(int(round(float(secondary_peak_width_percent))))
             baseline = simulation.get("baseline")
             if isinstance(baseline, (int, float)):
                 window.sim_baseline_slider.setValue(int(round(float(baseline))))

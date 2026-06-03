@@ -629,6 +629,7 @@ class MainWindow(QMainWindow):
         self._visible_trace_mode = "elapsed"
         self._trace_time_axis_relative_labels_enabled = False
         self._metric_render_display_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self._metric_render_state_cache: dict[str, tuple[object, ...]] = {}
         self._plots_frozen = False
         self._sensorgram_frozen = False
         self._measurement_compression_blink_visible = True
@@ -878,7 +879,7 @@ class MainWindow(QMainWindow):
         self.spectrum_cursor_label.setToolTip("Spectrum cursor readout under the mouse pointer.")
         self.trace_stats_label = QLabel("latest: - | min/max: - | span: - | dt -")
         self.trace_stats_label.setWordWrap(False)
-        self.trace_stats_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.trace_stats_label.setTextFormat(Qt.TextFormat.RichText)
         self.trace_stats_label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         self.trace_stats_label.setToolTip(
             "Metric stats: latest value, min/max, span, and average time step."
@@ -896,7 +897,7 @@ class MainWindow(QMainWindow):
         )
         self.trace_noise_summary_label = QLabel("noise: -")
         self.trace_noise_summary_label.setWordWrap(False)
-        self.trace_noise_summary_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.trace_noise_summary_label.setTextFormat(Qt.TextFormat.RichText)
         self.trace_noise_summary_label.setToolTip("Noise estimate for each trace metric over the selected window.")
         self.show_residual_button = self._make_frameless_icon_button(
             residual_icon(False),
@@ -1054,6 +1055,9 @@ class MainWindow(QMainWindow):
         self.sim_peak_center_slider = make_sim_slider(450, 850, 620)
         self.sim_peak_width_slider = make_sim_slider(10, 120, 35)
         self.sim_peak_height_slider = make_sim_slider(-5000, 5000, 1800)
+        self.sim_secondary_peak_offset_slider = make_sim_slider(-300, 300, 130)
+        self.sim_secondary_peak_height_slider = make_sim_slider(0, 400, 18)
+        self.sim_secondary_peak_width_slider = make_sim_slider(10, 400, 180)
         self.sim_baseline_slider = make_sim_slider(0, 4000, 900)
         self.sim_slope_slider = make_sim_slider(-100, 100, 12)
         self.sim_noise_slider = make_sim_slider(0, 250, 40)
@@ -1067,6 +1071,9 @@ class MainWindow(QMainWindow):
         self.sim_peak_center_value = QLabel()
         self.sim_peak_width_value = QLabel()
         self.sim_peak_height_value = QLabel()
+        self.sim_secondary_peak_offset_value = QLabel()
+        self.sim_secondary_peak_height_value = QLabel()
+        self.sim_secondary_peak_width_value = QLabel()
         self.sim_baseline_value = QLabel()
         self.sim_slope_value = QLabel()
         self.sim_noise_value = QLabel()
@@ -1195,6 +1202,7 @@ class MainWindow(QMainWindow):
         for curve in self.trace_curves.values():
             curve.setClipToView(True)
             curve.setDownsampling(auto=False, ds=1)
+            curve.setSkipFiniteCheck(True)
         self.trace_heatmap_image = pg.ImageItem(axisOrder="row-major")
         self.trace_heatmap_image.setVisible(False)
         self.trace_heatmap_image.setZValue(-10)
@@ -2570,6 +2578,9 @@ class MainWindow(QMainWindow):
             self.sim_peak_center_slider,
             self.sim_peak_width_slider,
             self.sim_peak_height_slider,
+            self.sim_secondary_peak_offset_slider,
+            self.sim_secondary_peak_height_slider,
+            self.sim_secondary_peak_width_slider,
             self.sim_baseline_slider,
             self.sim_slope_slider,
             self.sim_noise_slider,
@@ -2583,6 +2594,9 @@ class MainWindow(QMainWindow):
             self.sim_peak_center_slider,
             self.sim_peak_width_slider,
             self.sim_peak_height_slider,
+            self.sim_secondary_peak_offset_slider,
+            self.sim_secondary_peak_height_slider,
+            self.sim_secondary_peak_width_slider,
             self.sim_baseline_slider,
             self.sim_slope_slider,
             self.sim_noise_slider,
@@ -2594,6 +2608,9 @@ class MainWindow(QMainWindow):
         self.sim_peak_center_value.setText(f"{self.sim_peak_center_slider.value()} nm")
         self.sim_peak_width_value.setText(f"{self.sim_peak_width_slider.value()} nm")
         self.sim_peak_height_value.setText(str(self.sim_peak_height_slider.value()))
+        self.sim_secondary_peak_offset_value.setText(f"{self.sim_secondary_peak_offset_slider.value():+d} nm")
+        self.sim_secondary_peak_height_value.setText(f"{self.sim_secondary_peak_height_slider.value()}%")
+        self.sim_secondary_peak_width_value.setText(f"{self.sim_secondary_peak_width_slider.value()}%")
         self.sim_baseline_value.setText(str(self.sim_baseline_slider.value()))
         self.sim_slope_value.setText(f"{self.sim_slope_slider.value() / 100.0:.0%}")
         self.sim_noise_value.setText(str(self.sim_noise_slider.value()))
@@ -2688,6 +2705,9 @@ class MainWindow(QMainWindow):
                 peak_center_nm=float(self.sim_peak_center_slider.value()),
                 peak_width_nm=float(max(self.sim_peak_width_slider.value(), 1)),
                 peak_height=float(self.sim_peak_height_slider.value()),
+                secondary_peak_offset_nm=float(self.sim_secondary_peak_offset_slider.value()),
+                secondary_peak_height_percent=float(self.sim_secondary_peak_height_slider.value()),
+                secondary_peak_width_percent=float(max(self.sim_secondary_peak_width_slider.value(), 1)),
                 baseline=float(self.sim_baseline_slider.value()),
                 slope=float(self.sim_slope_slider.value()) / 100.0,
                 noise=float(self.sim_noise_slider.value()),
@@ -2837,7 +2857,20 @@ class MainWindow(QMainWindow):
 
     def _update_simulation_controls_enabled(self) -> None:
         enabled = self._source_mode == "simulation" and not self._measurement_active
-        self.sim_output_rate_spin.setEnabled(enabled)
+        for widget in (
+            self.sim_peak_center_slider,
+            self.sim_peak_width_slider,
+            self.sim_peak_height_slider,
+            self.sim_secondary_peak_offset_slider,
+            self.sim_secondary_peak_height_slider,
+            self.sim_secondary_peak_width_slider,
+            self.sim_baseline_slider,
+            self.sim_slope_slider,
+            self.sim_noise_slider,
+            self.sim_resolution_spin,
+            self.sim_output_rate_spin,
+        ):
+            widget.setEnabled(enabled)
 
     def _update_measurement_toggle_button(self) -> None:
         update_measurement_toggle_button(self)
@@ -4041,8 +4074,8 @@ class MainWindow(QMainWindow):
     def _sensorgram_downsampling_tooltip(self, enabled: bool | None = None) -> str:
         current = self._normalize_sensorgram_downsampling_enabled(enabled)
         if current:
-            return "Current display: Downsampling is enabled. Click to disable resolution-based reduction."
-        return "Current display: Downsampling is disabled. Click to enable resolution-based reduction."
+            return "Current display: pyqtgraph curve downsampling is enabled. Click to disable it."
+        return "Current display: pyqtgraph curve downsampling is disabled. Click to enable it."
 
     def _update_sensorgram_downsampling_button(self) -> None:
         if not hasattr(self, "sensorgram_downsampling_button"):

@@ -17,6 +17,9 @@ class SimulationParameters:
     peak_center_nm: float = 620.0
     peak_width_nm: float = 35.0
     peak_height: float = 1800.0
+    secondary_peak_offset_nm: float = 130.0
+    secondary_peak_height_percent: float = 18.0
+    secondary_peak_width_percent: float = 180.0
     baseline: float = 900.0
     slope: float = 0.12
     noise: float = 40.0
@@ -37,7 +40,7 @@ class SimulatedSpectrometer(Spectrometer):
         self._cached_x_relative: np.ndarray | None = None
         self._cached_linear_baseline: np.ndarray | None = None
         self._cached_peak_signal: np.ndarray | None = None
-        self._cached_shoulder_signal: np.ndarray | None = None
+        self._cached_secondary_peak_signal: np.ndarray | None = None
 
     def device_name(self) -> str:
         return "Simulated Spectrometer"
@@ -67,12 +70,12 @@ class SimulatedSpectrometer(Spectrometer):
         x_relative = self._cached_x_relative
         linear_baseline = self._cached_linear_baseline
         peak_signal = self._cached_peak_signal
-        shoulder_signal = self._cached_shoulder_signal
+        secondary_peak_signal = self._cached_secondary_peak_signal
         if (
             x_relative is None
             or linear_baseline is None
             or peak_signal is None
-            or shoulder_signal is None
+            or secondary_peak_signal is None
             or len(wavelengths) == 0
         ):
             self._refresh_waveform_cache()
@@ -80,15 +83,15 @@ class SimulatedSpectrometer(Spectrometer):
             x_relative = self._cached_x_relative
             linear_baseline = self._cached_linear_baseline
             peak_signal = self._cached_peak_signal
-            shoulder_signal = self._cached_shoulder_signal
+            secondary_peak_signal = self._cached_secondary_peak_signal
         assert x_relative is not None
         assert linear_baseline is not None
         assert peak_signal is not None
-        assert shoulder_signal is not None
+        assert secondary_peak_signal is not None
         phase_shift = self._sample_phase * 0.6
         drift = 0.5 * float(self._parameters.noise) * np.sin(x_relative / 140.0 + phase_shift)
         baseline_signal = linear_baseline + drift
-        sample_signal = baseline_signal + peak_signal + shoulder_signal
+        sample_signal = baseline_signal + peak_signal + secondary_peak_signal
         noise_scale = max(self._parameters.noise, 0.0)
         noise = np.random.normal(0.0, noise_scale, size=wavelengths.shape)
 
@@ -120,6 +123,9 @@ class SimulatedSpectrometer(Spectrometer):
                 "simulation_peak_center_nm": self._parameters.peak_center_nm,
                 "simulation_peak_width_nm": self._parameters.peak_width_nm,
                 "simulation_peak_height": self._parameters.peak_height,
+                "simulation_secondary_peak_offset_nm": self._parameters.secondary_peak_offset_nm,
+                "simulation_secondary_peak_height_percent": self._parameters.secondary_peak_height_percent,
+                "simulation_secondary_peak_width_percent": self._parameters.secondary_peak_width_percent,
             },
         )
 
@@ -160,7 +166,7 @@ class SimulatedSpectrometer(Spectrometer):
         self._cached_x_relative = wavelengths - cache_key[0]
         self._cached_linear_baseline = self._build_linear_baseline(self._cached_x_relative)
         self._cached_peak_signal = self._build_sample_peak(wavelengths)
-        self._cached_shoulder_signal = self._build_sample_shoulder(wavelengths)
+        self._cached_secondary_peak_signal = self._build_secondary_peak(wavelengths)
         return wavelengths
 
     def _invalidate_cache(self) -> None:
@@ -169,7 +175,7 @@ class SimulatedSpectrometer(Spectrometer):
         self._cached_x_relative = None
         self._cached_linear_baseline = None
         self._cached_peak_signal = None
-        self._cached_shoulder_signal = None
+        self._cached_secondary_peak_signal = None
 
     def _build_linear_baseline(self, x_relative: np.ndarray) -> np.ndarray:
         params = self._parameters
@@ -187,20 +193,27 @@ class SimulatedSpectrometer(Spectrometer):
         return float(params.peak_height) * np.exp(
             -0.5 * ((wavelengths - float(params.peak_center_nm)) / max(float(params.peak_width_nm), 1e-6)) ** 2
         )
-    
-    def _build_sample_shoulder(self, wavelengths: np.ndarray) -> np.ndarray:
+
+    def _build_secondary_peak(self, wavelengths: np.ndarray) -> np.ndarray:
         params = self._parameters
-        return 0.18 * float(params.peak_height) * np.exp(
+        secondary_peak_height = float(params.peak_height) * float(params.secondary_peak_height_percent) / 100.0
+        secondary_peak_width = max(float(params.peak_width_nm) * float(params.secondary_peak_width_percent) / 100.0, 1e-6)
+        secondary_peak_center = float(params.peak_center_nm) + float(params.secondary_peak_offset_nm)
+        return secondary_peak_height * np.exp(
             -0.5
             * (
-                (wavelengths - (float(params.peak_center_nm) + 130.0))
-                / max(float(params.peak_width_nm) * 1.8, 1e-6)
+                (wavelengths - secondary_peak_center)
+                / secondary_peak_width
             )
             ** 2
         )
 
     def _build_sample_signal(self, wavelengths: np.ndarray) -> np.ndarray:
-        return self._build_baseline_signal(wavelengths) + self._build_sample_peak(wavelengths)
+        return (
+            self._build_baseline_signal(wavelengths)
+            + self._build_sample_peak(wavelengths)
+            + self._build_secondary_peak(wavelengths)
+        )
 
     def _build_baseline_signal(self, wavelengths: np.ndarray) -> np.ndarray:
         wavelengths = np.asarray(wavelengths, dtype=np.float64)

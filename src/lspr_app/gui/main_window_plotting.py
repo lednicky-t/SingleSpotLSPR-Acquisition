@@ -444,6 +444,8 @@ def clear_trace_history_for(window) -> None:
         window._peak_history_buffers.clear()
     if hasattr(window, "_metric_render_display_cache"):
         window._metric_render_display_cache.clear()
+    if hasattr(window, "_metric_render_state_cache"):
+        window._metric_render_state_cache.clear()
     if hasattr(window, "_sensorgram_heatmap_history"):
         window._sensorgram_heatmap_history.clear()
     if hasattr(window, "_sensorgram_heatmap_history_revision"):
@@ -570,23 +572,8 @@ def refresh_telemetry_for(window) -> None:
         window.telemetry_label.setText("waiting for first spectrum")
         window._ui_refresh_state.telemetry_dirty = False
         return
-
-    live_result_queue = getattr(window, "_live_result_queue", None)
-    live_processed_queue = getattr(window, "_live_processed_queue", None)
-    queue_pressure = False
-    for queue_obj in (live_result_queue, live_processed_queue):
-        if queue_obj is None:
-            continue
-        try:
-            queue_pressure = queue_pressure or int(queue_obj.qsize()) > 0
-        except (AttributeError, NotImplementedError, OSError, TypeError, ValueError):
-            continue
-        if queue_pressure:
-            break
     if hasattr(window, "telemetry_label"):
-        window.telemetry_label.setStyleSheet(
-            "color: #f4b23d; font-weight: 700;" if queue_pressure else ""
-        )
+        window.telemetry_label.setStyleSheet("")
     window.telemetry_label.setText(build_pipeline_telemetry_text_for(window))
     window._ui_refresh_state.telemetry_dirty = False
 
