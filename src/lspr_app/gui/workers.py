@@ -80,6 +80,7 @@ class LiveAcquisitionControlMessage:
     cycle_period_s: float | None = None
     debug_mode_enabled: bool | None = None
     simulation_parameters: SimulationParameters | None = None
+    recording_enabled: bool | None = None
 
 
 @dataclass(slots=True)
@@ -330,6 +331,7 @@ def _create_live_backend(source_mode: str, simulation_parameters: SimulationPara
 def _live_acquisition_worker_main(
     result_queue: mp.Queue,
     processing_queue: mp.Queue,
+    recording_queue: mp.Queue,
     control_queue: mp.Queue,
     stop_event,
     source_mode: str,
@@ -338,6 +340,7 @@ def _live_acquisition_worker_main(
     cycle_period_s: float,
     simulation_parameters: SimulationParameters | None,
     debug_mode_enabled: bool,
+    recording_enabled: bool,
     log_queue: mp.Queue,
 ) -> None:
     _configure_child_logging(log_queue)
@@ -345,7 +348,9 @@ def _live_acquisition_worker_main(
     current_settings = settings
     current_cycle_period_s = max(float(cycle_period_s), 0.0)
     source_sample_index = 0
+    recording_enabled = bool(recording_enabled)
     logger = logging.getLogger("lspr_app.acquisition")
+    last_recording_backpressure_log_at = 0.0
 
     try:
         try:
@@ -387,6 +392,8 @@ def _live_acquisition_worker_main(
                         set_processing_debug_mode_enabled(bool(control_message.debug_mode_enabled))
                     if control_message.simulation_parameters is not None and hasattr(backend, "set_simulation_parameters"):
                         backend.set_simulation_parameters(control_message.simulation_parameters)
+                    if control_message.recording_enabled is not None:
+                        recording_enabled = bool(control_message.recording_enabled)
 
             started = perf_counter()
             try:
@@ -395,34 +402,33 @@ def _live_acquisition_worker_main(
                 finished = perf_counter()
                 source_sample_index += 1
                 elapsed_ms = (finished - started) * 1000.0
-                _queue_put_latest(
-                    result_queue,
-                    LiveAcquisitionEvent(
-                        result=AcquisitionResult(
-                            spectrum=spectrum,
-                            elapsed_ms=elapsed_ms,
-                            settings=current_settings,
-                            source_epoch=source_epoch,
-                        ),
+                event = LiveAcquisitionEvent(
+                    result=AcquisitionResult(
+                        spectrum=spectrum,
+                        elapsed_ms=elapsed_ms,
+                        settings=current_settings,
                         source_epoch=source_epoch,
-                        source_sample_index=source_sample_index,
-                        produced_at_perf=finished,
                     ),
+                    source_epoch=source_epoch,
+                    source_sample_index=source_sample_index,
+                    produced_at_perf=finished,
                 )
-                _queue_put_latest(
-                    processing_queue,
-                    LiveAcquisitionEvent(
-                        result=AcquisitionResult(
-                            spectrum=spectrum,
-                            elapsed_ms=elapsed_ms,
-                            settings=current_settings,
-                            source_epoch=source_epoch,
-                        ),
-                        source_epoch=source_epoch,
-                        source_sample_index=source_sample_index,
-                        produced_at_perf=finished,
-                    ),
-                )
+                if recording_enabled:
+                    while True:
+                        try:
+                            recording_queue.put(event, timeout=0.25)
+                            break
+                        except queue.Full:
+                            now = perf_counter()
+                            if now - last_recording_backpressure_log_at >= 1.0:
+                                logger.warning(
+                                    "Live recording queue backpressure | sample_index=%d | backlog=%d",
+                                    source_sample_index,
+                                    _queue_qsize_safe(recording_queue),
+                                )
+                                last_recording_backpressure_log_at = now
+                _queue_put_latest(result_queue, event)
+                _queue_put_latest(processing_queue, event)
             except Exception as exc:  # pragma: no cover - hardware/runtime path
                 _queue_put_latest(
                     result_queue,
@@ -518,6 +524,7 @@ class LiveAcquisitionWorker:
         request: AcquisitionRequest,
         result_queue: queue.Queue[LiveAcquisitionEvent],
         processing_queue: queue.Queue[LiveAcquisitionEvent],
+        recording_queue: mp.Queue,
         stop_event: threading.Event,
         *,
         source_mode: str,
@@ -529,6 +536,7 @@ class LiveAcquisitionWorker:
         self._request = request
         self._result_queue = result_queue
         self._processing_queue = processing_queue
+        self._recording_queue = recording_queue
         self._stop_event = stop_event
         self._settings = request.settings
         self._cycle_period_s = 0.0
@@ -543,6 +551,7 @@ class LiveAcquisitionWorker:
             args=(
                 self._result_queue,
                 self._processing_queue,
+                self._recording_queue,
                 self._control_queue,
                 self._stop_event,
                 self._source_mode,
@@ -551,6 +560,7 @@ class LiveAcquisitionWorker:
                 self._cycle_period_s,
                 self._simulation_parameters,
                 self._debug_mode_enabled,
+                bool(self._request.archive_enabled),
                 self._log_queue,
             ),
             daemon=True,
@@ -579,10 +589,11 @@ class LiveAcquisitionWorker:
         archive_enabled: bool,
         measurement_started_at: datetime | None,
     ) -> None:
-        # Parent-side archival now handles live sample persistence.
+        # The parent controls whether raw samples should be recorded losslessly.
         self._request.archive_writer = archive_writer
         self._request.archive_enabled = archive_enabled
         self._request.measurement_started_at = measurement_started_at
+        _queue_put_latest(self._control_queue, LiveAcquisitionControlMessage(recording_enabled=archive_enabled))
 
     @property
     def log_queue(self) -> mp.Queue:

@@ -8,6 +8,9 @@ Suggested layout:
 - `experiment-control/` for future experiment-control documentation
 - `measurement_file_format.md` for the native HDF5 measurement schema
 - `processing_math.md` for the metric definitions and fit/analysis rules
+- `runtime_pipeline_architecture.md` for the lossless acquisition, async file writing, and display-drop rules
+- `CODEX_ARCHITECTURE_RAILS_V7.md` for the controlling acquisition/storage versus UI/analysis architecture rules
+- `CODEX_IMPLEMENTATION_GUIDE_V8_LOSSLESS_ACQ_AND_LOSSY_UI.md` for the step-by-step lossless acquisition and lossy UI implementation guide
 
 Deferred design notes:
 

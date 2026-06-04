@@ -168,9 +168,9 @@ def _handle_measurement_file_compression_failed(window, message: str) -> None:
     window._update_window_mode_label()
 
 
-def _archive_live_sample_if_needed(window, spectrum: Spectrum) -> None:
-    if not window._measurement_active or window._measurement_writer is None:
-        return
+def _archive_live_sample_if_needed(window, spectrum: Spectrum) -> bool:
+    if window._measurement_writer is None:
+        return False
     values = np.asarray(spectrum.values, dtype=np.float64)
     wavelengths = np.asarray(spectrum.wavelengths_nm, dtype=np.float64)
     peak_nm = float("nan")
@@ -188,6 +188,56 @@ def _archive_live_sample_if_needed(window, spectrum: Spectrum) -> None:
         window._measurement_writer.append_batch([spectrum], [elapsed_s], [peak_nm])
     except Exception:
         logging.getLogger("lspr_app.storage").exception("Failed to enqueue measurement frame for storage.")
+        return False
+    return True
+
+
+def flush_live_recording_results(window) -> None:
+    started = perf_counter()
+    queue_obj = getattr(window, "_live_recording_queue", None)
+    if queue_obj is None:
+        return
+    drained_events: list[LiveAcquisitionEvent] = []
+    while True:
+        try:
+            event = queue_obj.get_nowait()
+        except queue.Empty:
+            break
+        drained_events.append(event)
+
+    live_recording_depth = _queue_size_safe(queue_obj)
+    if live_recording_depth is not None:
+        window._live_recording_queue_max_depth = max(
+            int(getattr(window, "_live_recording_queue_max_depth", 0)),
+            live_recording_depth,
+        )
+
+    if not drained_events:
+        window._last_live_recording_flush_ms = (perf_counter() - started) * 1000.0
+        return
+
+    window._last_live_recording_flush_ms = (perf_counter() - started) * 1000.0
+    valid_events = [
+        event
+        for event in drained_events
+        if event.error is None
+        and event.result is not None
+        and event.source_epoch == window._source_epoch
+    ]
+    measurement_started_at = getattr(window, "_measurement_started_at", None)
+    if measurement_started_at is not None:
+        valid_events = [
+            event
+            for event in valid_events
+            if event.result is not None and event.result.spectrum.acquired_at >= measurement_started_at
+        ]
+
+    window._raw_acquired_count = int(getattr(window, "_raw_acquired_count", 0)) + len(valid_events)
+    window._raw_recording_enqueued_count = int(getattr(window, "_raw_recording_enqueued_count", 0)) + len(valid_events)
+
+    for event in valid_events:
+        if _archive_live_sample_if_needed(window, event.result.spectrum):
+            window._raw_recording_written_count = int(getattr(window, "_raw_recording_written_count", 0)) + 1
 
 
 def _suspend_spectrometer_backend_for_live(window) -> None:
@@ -378,22 +428,23 @@ def flush_live_acquisition_results(window) -> None:
             window._last_live_result_poll_delay_ms = None
     window._live_result_requested_at = started
     _flush_live_processing_logs(window)
-    latest_event: LiveAcquisitionEvent | None = None
+    flush_live_recording_results(window)
+    drained_events: list[LiveAcquisitionEvent] = []
     dropped_events = 0
     while True:
         try:
             event = window._live_result_queue.get_nowait()
         except queue.Empty:
             break
-        if latest_event is not None:
+        if drained_events:
             dropped_events += 1
-        latest_event = event
+        drained_events.append(event)
 
     live_result_depth = _queue_size_safe(window._live_result_queue)
     if live_result_depth is not None:
         window._live_result_queue_max_depth = max(int(getattr(window, "_live_result_queue_max_depth", 0)), live_result_depth)
 
-    if latest_event is None:
+    if not drained_events:
         window._last_live_acquisition_flush_ms = (perf_counter() - started) * 1000.0
         if window._live_worker is not None and not window._live_worker.is_alive():
             window._live_worker = None
@@ -408,6 +459,14 @@ def flush_live_acquisition_results(window) -> None:
     drain_ms = (perf_counter() - started) * 1000.0
     window._last_live_acquisition_flush_ms = drain_ms
 
+    window._ui_preview_replaced_count = int(getattr(window, "_ui_preview_replaced_count", 0)) + dropped_events
+
+    latest_event: LiveAcquisitionEvent | None = None
+    for event in reversed(drained_events):
+        if event.error is None and event.result is not None:
+            latest_event = event
+            break
+
     if latest_event.error is not None:
         if latest_event.source_epoch != window._source_epoch:
             return
@@ -421,7 +480,6 @@ def flush_live_acquisition_results(window) -> None:
             return
         result = latest_event.result
         spectrum = result.spectrum
-        _archive_live_sample_if_needed(window, spectrum)
         now = latest_event.produced_at_perf if latest_event.produced_at_perf is not None else perf_counter()
         window._last_elapsed_ms = result.elapsed_ms
         _update_live_source_rate_from_event(window, latest_event, now)
@@ -465,6 +523,7 @@ def flush_live_acquisition_results(window) -> None:
         window._request_deferred_ui_refresh(telemetry=True, live_estimate=True)
         if window._live_active:
             _request_live_processed_poll_for(window, window._live_ui_refresh_delay_ms)
+        window._ui_preview_displayed_count = int(getattr(window, "_ui_preview_displayed_count", 0)) + 1
 
     if dropped_events > 0:
         window._live_display_dropped_frames += dropped_events
@@ -709,6 +768,18 @@ def start_live_acquisition(window) -> None:
     window._last_ui_heartbeat_total_ms = None
     window._live_plot_update_counter = 0
     window._live_display_dropped_frames = 0
+    window._raw_acquired_count = 0
+    window._raw_recording_enqueued_count = 0
+    window._raw_recording_written_count = 0
+    window._raw_recording_backpressure_count = 0
+    window._raw_recording_failed_count = 0
+    window._ui_preview_enqueued_count = 0
+    window._ui_preview_replaced_count = 0
+    window._ui_preview_displayed_count = 0
+    window._processing_enqueued_count = 0
+    window._processing_replaced_count = 0
+    window._processing_completed_count = 0
+    window._processing_displayed_count = 0
     window._live_display_started_at = perf_counter()
     window._live_trace_started_at = None
     window._last_live_processing_perf = None
@@ -721,9 +792,11 @@ def start_live_acquisition(window) -> None:
     window._live_result_queue = ctx.Queue(maxsize=4)
     window._live_processing_input_queue = ctx.Queue(maxsize=16)
     window._live_processed_queue = ctx.Queue(maxsize=4)
+    window._live_recording_queue = ctx.Queue(maxsize=2048)
     window._live_processing_log_queue = ctx.Queue(maxsize=32)
     window._live_result_queue_max_depth = 0
     window._live_processed_queue_max_depth = 0
+    window._live_recording_queue_max_depth = 0
     simulation_parameters = None
     if window._source_mode == "simulation":
         simulation_parameters = window._simulation_backend.simulation_parameters()
@@ -746,6 +819,7 @@ def start_live_acquisition(window) -> None:
         request,
         window._live_result_queue,
         window._live_processing_input_queue,
+        window._live_recording_queue,
         window._live_stop_event,
         source_mode=window._source_mode,
         simulation_parameters=simulation_parameters,
@@ -764,6 +838,9 @@ def start_live_acquisition(window) -> None:
         window._live_worker.update_cycle_period(1.0 / max(window.sim_output_rate_spin.value(), 1e-9))
     window._live_worker.start()
     window._live_processing_worker.start()
+    if hasattr(window, "_live_recording_timer"):
+        window._live_recording_timer.start()
+    flush_live_recording_results(window)
     _request_live_acquisition_poll_for(window, window._live_ui_refresh_delay_ms)
     _request_live_processed_poll_for(window, 0)
     live_result_depth = _queue_size_safe(window._live_result_queue)
@@ -778,6 +855,8 @@ def start_live_acquisition(window) -> None:
 def stop_live_acquisition(window, message: str = "Live acquisition stopped.") -> None:
     window._live_active = False
     window._live_stop_event.set()
+    if hasattr(window, "_live_recording_timer"):
+        window._live_recording_timer.stop()
     window._ui_task_scheduler.cancel("live_acquisition")
     window._ui_task_scheduler.cancel("live_processed")
     window._live_result_requested_at = None
@@ -871,6 +950,7 @@ def stop_live_acquisition(window, message: str = "Live acquisition stopped.") ->
         except Exception as exc:
             window._log_warning(f"Live acquisition worker shutdown failed: {exc}")
         window._live_worker = None
+    flush_live_recording_results(window)
     if window._live_processing_worker is not None:
         try:
             window._live_processing_worker.join(timeout=0.25)
@@ -879,6 +959,8 @@ def stop_live_acquisition(window, message: str = "Live acquisition stopped.") ->
         if not window._live_processing_worker.is_alive():
             window._live_processing_worker = None
     _flush_live_processing_logs(window)
+    flush_live_recording_results(window)
+    window._live_recording_queue = None
     _restore_spectrometer_backend_after_live(window)
 
 
@@ -1155,9 +1237,10 @@ def stop_measurement_run(window) -> None:
     # STOP is the only state that finalizes the recording file.
     started_at = window._measurement_started_at
     measurement_path = window._measurement_path
-    flush_measurement_frames(window, force=True)
     if window._live_worker is not None and window._live_worker.is_alive():
         window._live_worker.update_archive_context(None, False, None)
+    flush_live_recording_results(window)
+    flush_measurement_frames(window, force=True)
     if window._measurement_writer is not None:
         window._measurement_writer.close()
     window._measurement_writer = None

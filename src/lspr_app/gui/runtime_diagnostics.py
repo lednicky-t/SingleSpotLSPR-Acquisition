@@ -212,6 +212,12 @@ class SessionDiagnosticsSnapshot:
     frame_spacing_text: str
     source_rate_text: str
     dropped_frames_text: str
+    raw_acquired_text: str
+    raw_recording_enqueued_text: str
+    raw_recording_written_text: str
+    raw_recording_backpressure_text: str
+    ui_preview_replaced_text: str
+    ui_preview_displayed_text: str
     trace_points_text: str
     trace_buffer_points_text: str
     trace_raw_points_text: str
@@ -238,6 +244,8 @@ class SessionDiagnosticsSnapshot:
     live_result_queue_max_text: str
     live_processed_queue_text: str
     live_processed_queue_max_text: str
+    live_recording_queue_text: str
+    live_recording_queue_max_text: str
     pipeline_gap_lines: list[str]
     spectrum_redraw_lines: list[str]
     device_acquisition_lines: list[str]
@@ -289,6 +297,12 @@ class SessionDiagnosticsSnapshot:
         sensorgram_heatmap_arrays_text = "-"
         sensorgram_heatmap_image_text = "-"
         sensorgram_heatmap_axes_text = "-"
+        raw_acquired_text = str(max(int(getattr(window, "_raw_acquired_count", 0)), 0))
+        raw_recording_enqueued_text = str(max(int(getattr(window, "_raw_recording_enqueued_count", 0)), 0))
+        raw_recording_written_text = str(max(int(getattr(window, "_raw_recording_written_count", 0)), 0))
+        raw_recording_backpressure_text = str(max(int(getattr(window, "_raw_recording_backpressure_count", 0)), 0))
+        ui_preview_replaced_text = str(max(int(getattr(window, "_ui_preview_replaced_count", 0)), 0))
+        ui_preview_displayed_text = str(max(int(getattr(window, "_ui_preview_displayed_count", 0)), 0))
         active_series = getattr(window, "_active_trace_series", None)
         if callable(active_series):
             try:
@@ -510,6 +524,12 @@ class SessionDiagnosticsSnapshot:
                 if getattr(window, "_live_display_dropped_frames", None) is None
                 else str(max(int(getattr(window, "_live_display_dropped_frames")), 0))
             ),
+            raw_acquired_text=raw_acquired_text,
+            raw_recording_enqueued_text=raw_recording_enqueued_text,
+            raw_recording_written_text=raw_recording_written_text,
+            raw_recording_backpressure_text=raw_recording_backpressure_text,
+            ui_preview_replaced_text=ui_preview_replaced_text,
+            ui_preview_displayed_text=ui_preview_displayed_text,
             trace_points_text=trace_points_text,
             trace_buffer_points_text=trace_buffer_points_text,
             trace_raw_points_text=trace_raw_points_text,
@@ -536,6 +556,8 @@ class SessionDiagnosticsSnapshot:
             live_result_queue_max_text=_queue_depth_max_text(getattr(window, "_live_result_queue_max_depth", None)),
             live_processed_queue_text=_queue_depth_text(window, "_live_processed_queue"),
             live_processed_queue_max_text=_queue_depth_max_text(getattr(window, "_live_processed_queue_max_depth", None)),
+            live_recording_queue_text=_queue_depth_text(window, "_live_recording_queue"),
+            live_recording_queue_max_text=_queue_depth_max_text(getattr(window, "_live_recording_queue_max_depth", None)),
             pipeline_gap_lines=pipeline_gap_lines,
             spectrum_redraw_lines=spectrum_redraw_lines,
             device_acquisition_lines=device_acquisition_lines,
@@ -598,6 +620,11 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         f"  Acquisition state save: {snapshot.housekeeping_acquisition_state_text}",
         f"  Session stats snapshot: {snapshot.housekeeping_session_stats_snapshot_text}",
         f"  Session stats refresh: {snapshot.housekeeping_session_stats_refresh_text}",
+        f"  Raw acquired: {snapshot.raw_acquired_text}",
+        f"  Raw recording enqueued/written: {snapshot.raw_recording_enqueued_text}/{snapshot.raw_recording_written_text}",
+        f"  Raw recording backpressure: {snapshot.raw_recording_backpressure_text}",
+        f"  UI preview replaced: {snapshot.ui_preview_replaced_text}",
+        f"  UI preview displayed: {snapshot.ui_preview_displayed_text}",
         f"  Metric history points: {snapshot.trace_points_text}",
         f"  Metric display buffer points: {snapshot.trace_buffer_points_text}",
         f"  Metric raw points: {snapshot.trace_raw_points_text}",
@@ -621,6 +648,7 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         f"  Heatmap rows: {snapshot.heatmap_rows_text}",
         f"  Live result queue: {snapshot.live_result_queue_text} | max: {snapshot.live_result_queue_max_text}",
         f"  Live processed queue: {snapshot.live_processed_queue_text} | max: {snapshot.live_processed_queue_max_text}",
+        f"  Live recording queue: {snapshot.live_recording_queue_text} | max: {snapshot.live_recording_queue_max_text}",
         "",
         "Processing",
         f"  Time per spectrum: {snapshot.processing_text}",

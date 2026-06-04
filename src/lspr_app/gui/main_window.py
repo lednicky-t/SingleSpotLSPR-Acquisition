@@ -264,6 +264,7 @@ from lspr_app.gui.acquisition_controller import (
     append_processed_trace_history,
     flush_measurement_frames,
     flush_live_acquisition_results,
+    flush_live_recording_results,
     flush_live_processed_results,
     handle_acquisition_error,
     handle_acquisition_success,
@@ -512,6 +513,11 @@ class MainWindow(QMainWindow):
         self._live_processing_input_queue: queue.Queue[LiveAcquisitionEvent] = queue.Queue(maxsize=16)
         self._live_processed_queue: queue.Queue[LiveProcessedEvent] = queue.Queue(maxsize=4)
         self._live_processing_log_queue: queue.Queue[tuple[int, str, str]] = queue.Queue(maxsize=32)
+        self._live_recording_queue = None
+        self._live_recording_timer = QTimer(self)
+        self._live_recording_timer.setSingleShot(False)
+        self._live_recording_timer.setInterval(25)
+        self._live_recording_timer.timeout.connect(self._flush_live_recording_results)
         self._measurement_active = False
         self._measurement_paused = False
         self._measurement_writer: AsyncHDF5MeasurementWriter | None = None
@@ -2884,6 +2890,9 @@ class MainWindow(QMainWindow):
 
     def _flush_live_acquisition_results(self) -> None:
         flush_live_acquisition_results(self)
+
+    def _flush_live_recording_results(self) -> None:
+        flush_live_recording_results(self)
 
     def _flush_live_processed_results(self) -> None:
         flush_live_processed_results(self)
