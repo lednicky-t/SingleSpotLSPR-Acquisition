@@ -15,6 +15,7 @@ from lspr_app.gui.icon_helpers import math_function_tab_icon, prism_tab_icon, tr
 from lspr_app.gui.plot_controller import (
     apply_processing_range_to_spectrum_plot as _apply_processing_range_to_spectrum_plot,
     flush_deferred_display_refreshes as _flush_deferred_display_refreshes,
+    flush_deferred_metric_refreshes as _flush_deferred_metric_refreshes,
     flush_deferred_stats_refreshes as _flush_deferred_stats_refreshes,
     flush_deferred_ui_refreshes as _flush_deferred_ui_refreshes,
     flush_plot_refreshes as _flush_plot_refreshes,
@@ -296,6 +297,47 @@ def flush_deferred_display_refreshes_for(window) -> None:
                     f"GUI deferred display refresh: {elapsed_ms:.2f} ms | "
                     f"summary={int(summary_dirty)} telemetry={int(telemetry_dirty)} "
                     f"live_estimate={int(live_estimate_dirty)} trace={int(metric_dirty)}"
+                ),
+                level=logging.INFO,
+                min_interval=0.5,
+            )
+
+
+def flush_deferred_metric_refreshes_for(window) -> None:
+    started = perf_counter()
+    requested_at = getattr(window, "_metric_refresh_requested_at", None)
+    if requested_at is not None:
+        try:
+            window._last_metric_refresh_delay_ms = max((started - float(requested_at)) * 1000.0, 0.0)
+        except (TypeError, ValueError):
+            window._last_metric_refresh_delay_ms = None
+    refresh_state = getattr(window, "_ui_refresh_state", None)
+    metric_dirty = bool(getattr(refresh_state, "metric_plot_dirty", False))
+    pending_label = getattr(refresh_state, "pending_metric_label", None) if refresh_state is not None else None
+    if getattr(window, "_metric_flush_in_progress", False):
+        window._last_deferred_metric_refresh_ms = (perf_counter() - started) * 1000.0
+        window._log_throttled(
+            "gui_deferred_metric_refresh_reentry",
+            "GUI deferred metric refresh skipped because a previous flush is still in progress",
+            level=logging.WARNING,
+            min_interval=5.0,
+        )
+        return
+    if metric_dirty and not bool(getattr(window, "_sensorgram_frozen", False)):
+        window._metric_flush_in_progress = True
+        try:
+            _flush_deferred_metric_refreshes(window)
+        finally:
+            window._metric_flush_in_progress = False
+    elapsed_ms = (perf_counter() - started) * 1000.0
+    window._last_deferred_metric_refresh_ms = elapsed_ms
+    if processing_debug_mode_enabled():
+        if elapsed_ms >= 2.0:
+            window._log_throttled(
+                "gui_deferred_metric_refresh",
+                (
+                    f"GUI deferred metric refresh: {elapsed_ms:.2f} ms | "
+                    f"dirty={int(metric_dirty)} label={pending_label or '-'}"
                 ),
                 level=logging.INFO,
                 min_interval=0.5,

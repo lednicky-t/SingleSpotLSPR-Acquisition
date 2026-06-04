@@ -7,6 +7,7 @@ from time import perf_counter
 from lspr_app.gui.main_window_logging import refresh_session_statistics_for, refresh_session_summary_for
 from lspr_app.gui.main_window_plotting import (
     flush_deferred_display_refreshes_for,
+    flush_deferred_metric_refreshes_for,
     flush_deferred_stats_refreshes_for,
     flush_plot_refreshes_for,
 )
@@ -31,6 +32,7 @@ def run_gui_callback_timed(window, label: str, callback: Callable[[], None], *, 
             "session_stats_refresh": "_last_session_stats_refresh_total_ms",
             "deferred_ui_flush": "_last_deferred_ui_refresh_total_ms",
             "deferred_display_flush": "_last_deferred_display_refresh_ms",
+            "deferred_metric_flush": "_last_deferred_metric_refresh_ms",
             "deferred_stats_flush": "_last_deferred_stats_refresh_ms",
             "plot_refresh": "_last_plot_refresh_total_ms",
             "log_buffer": "_last_log_buffer_total_ms",
@@ -135,7 +137,13 @@ def request_live_acquisition_poll(window, delay_ms: float | None = None) -> None
     if not window._ui_task_scheduler.is_pending("live_acquisition"):
         window._live_result_requested_at = perf_counter()
         window._live_result_requested_delay_ms = delay
-    window._ui_task_scheduler.request("live_acquisition", delay, window._flush_live_acquisition_results, priority=-20)
+    window._ui_task_scheduler.request(
+        "live_acquisition",
+        delay,
+        window._flush_live_acquisition_results,
+        priority=-20,
+        coalesce="latest",
+    )
 
 
 def request_live_processed_poll(window, delay_ms: float | None = None) -> None:
@@ -143,7 +151,13 @@ def request_live_processed_poll(window, delay_ms: float | None = None) -> None:
     if not window._ui_task_scheduler.is_pending("live_processed"):
         window._live_processed_requested_at = perf_counter()
         window._live_processed_requested_delay_ms = delay
-    window._ui_task_scheduler.request("live_processed", delay, window._flush_live_processed_results, priority=-19)
+    window._ui_task_scheduler.request(
+        "live_processed",
+        delay,
+        window._flush_live_processed_results,
+        priority=-19,
+        coalesce="latest",
+    )
 
 
 def request_deferred_ui_refresh(
@@ -173,11 +187,12 @@ def request_deferred_ui_refresh(
             window._session_stats_refresh_requested_at = perf_counter()
     if trace_label is not None:
         window._ui_refresh_state.pending_metric_label = trace_label
-    display_dirty = trace_plot or summary or telemetry or live_estimate or trace_label is not None
+    display_dirty = summary or telemetry or live_estimate
+    metric_dirty = trace_plot or trace_label is not None
     stats_dirty = bool(stats)
     if display_dirty:
         display_delay_ms = window._live_ui_refresh_delay_ms if window._live_active else window._stats_refresh_delay_ms
-        if window._live_active and (trace_plot or live_estimate or telemetry):
+        if window._live_active and (live_estimate or telemetry):
             display_delay_ms = max(display_delay_ms, 220)
         if not window._ui_task_scheduler.is_pending("deferred_display_flush"):
             window._display_refresh_requested_at = perf_counter()
@@ -186,6 +201,20 @@ def request_deferred_ui_refresh(
             display_delay_ms,
             window._flush_deferred_display_refreshes,
             priority=0,
+            coalesce="latest",
+        )
+    if metric_dirty:
+        metric_delay_ms = window._live_ui_refresh_delay_ms if window._live_active else window._stats_refresh_delay_ms
+        if window._live_active:
+            metric_delay_ms = max(metric_delay_ms, 220)
+        if not window._ui_task_scheduler.is_pending("deferred_metric_flush"):
+            window._metric_refresh_requested_at = perf_counter()
+        window._ui_task_scheduler.request(
+            "deferred_metric_flush",
+            metric_delay_ms,
+            window._flush_deferred_metric_refreshes,
+            priority=0,
+            coalesce="latest",
         )
     if stats_dirty:
         stats_delay_ms = window._stats_refresh_delay_ms
@@ -196,6 +225,7 @@ def request_deferred_ui_refresh(
             stats_delay_ms,
             window._flush_deferred_stats_refreshes,
             priority=0,
+            coalesce="latest",
         )
 
 
@@ -203,7 +233,13 @@ def request_plot_refresh(window, delay_ms: float | None = None) -> None:
     delay = float(delay_ms if delay_ms is not None else 33.0)
     if not window._ui_task_scheduler.is_pending("plot_refresh"):
         window._plot_refresh_requested_at = perf_counter()
-    window._ui_task_scheduler.request("plot_refresh", delay, window._flush_plot_refreshes, priority=1)
+    window._ui_task_scheduler.request(
+        "plot_refresh",
+        delay,
+        window._flush_plot_refreshes,
+        priority=1,
+        coalesce="latest",
+    )
 
 
 def refresh_session_summary(window, force: bool = False) -> None:
@@ -226,6 +262,10 @@ def flush_deferred_ui_refreshes(window) -> None:
 
 def flush_deferred_display_refreshes(window) -> None:
     window._run_gui_callback_timed("deferred_display_flush", lambda: flush_deferred_display_refreshes_for(window))
+
+
+def flush_deferred_metric_refreshes(window) -> None:
+    window._run_gui_callback_timed("deferred_metric_flush", lambda: flush_deferred_metric_refreshes_for(window))
 
 
 def flush_deferred_stats_refreshes(window) -> None:

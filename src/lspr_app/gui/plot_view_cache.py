@@ -10,9 +10,168 @@ import numpy as np
 @dataclass(slots=True)
 class MetricDisplayCache:
     source_len: int = 0
+    target_points: int = 0
     stride: int = 1
+    raw_block_size: int = 128
+    combine_factor: int = 4
     x_display: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float64))
     y_display: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float64))
+    levels: list[list["_EnvelopeBlock"]] = field(default_factory=list)
+    display_revision: int = 0
+    display_output_revision: int = 0
+    last_display_signature: tuple[object, ...] | None = None
+    rebuild_count: int = 0
+    incremental_count: int = 0
+    hit_count: int = 0
+    last_mode: str = "empty"
+
+
+@dataclass(slots=True)
+class _EnvelopeBlock:
+    first_x: float
+    last_x: float
+    y_min: float
+    y_max: float
+    x_at_y_min: float
+    x_at_y_max: float
+    count: int
+
+
+def _make_envelope_block(x: np.ndarray, y: np.ndarray) -> _EnvelopeBlock | None:
+    if len(x) == 0 or len(y) == 0:
+        return None
+    finite = np.isfinite(x) & np.isfinite(y)
+    if not np.any(finite):
+        return None
+    xf = np.asarray(x[finite], dtype=np.float64)
+    yf = np.asarray(y[finite], dtype=np.float64)
+    if len(xf) == 0:
+        return None
+    min_i = int(np.argmin(yf))
+    max_i = int(np.argmax(yf))
+    return _EnvelopeBlock(
+        first_x=float(xf[0]),
+        last_x=float(xf[-1]),
+        y_min=float(yf[min_i]),
+        y_max=float(yf[max_i]),
+        x_at_y_min=float(xf[min_i]),
+        x_at_y_max=float(xf[max_i]),
+        count=int(len(xf)),
+    )
+
+
+def _combine_envelope_blocks(blocks: list[_EnvelopeBlock]) -> _EnvelopeBlock | None:
+    if not blocks:
+        return None
+    first_x = float(blocks[0].first_x)
+    last_x = float(blocks[-1].last_x)
+    count = int(sum(block.count for block in blocks))
+    min_block = min(blocks, key=lambda block: block.y_min)
+    max_block = max(blocks, key=lambda block: block.y_max)
+    return _EnvelopeBlock(
+        first_x=first_x,
+        last_x=last_x,
+        y_min=float(min_block.y_min),
+        y_max=float(max_block.y_max),
+        x_at_y_min=float(min_block.x_at_y_min),
+        x_at_y_max=float(max_block.x_at_y_max),
+        count=count,
+    )
+
+
+def _blocks_to_display_arrays(blocks: list[_EnvelopeBlock]) -> tuple[np.ndarray, np.ndarray]:
+    if not blocks:
+        empty = np.empty(0, dtype=np.float64)
+        return empty, empty
+    xs: list[float] = []
+    ys: list[float] = []
+    for block in blocks:
+        if block.x_at_y_min <= block.x_at_y_max:
+            xs.extend([block.x_at_y_min, block.x_at_y_max])
+            ys.extend([block.y_min, block.y_max])
+        else:
+            xs.extend([block.x_at_y_max, block.x_at_y_min])
+            ys.extend([block.y_max, block.y_min])
+    return np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64)
+
+
+def _build_envelope_levels(x: np.ndarray, y: np.ndarray, *, raw_block_size: int, combine_factor: int) -> list[list[_EnvelopeBlock]]:
+    blocks: list[_EnvelopeBlock] = []
+    block_size = max(int(raw_block_size), 1)
+    for start in range(0, len(x), block_size):
+        stop = min(start + block_size, len(x))
+        block = _make_envelope_block(x[start:stop], y[start:stop])
+        if block is not None:
+            blocks.append(block)
+    levels: list[list[_EnvelopeBlock]] = [blocks]
+    factor = max(int(combine_factor), 2)
+    while len(levels[-1]) > factor:
+        previous = levels[-1]
+        next_level: list[_EnvelopeBlock] = []
+        for start in range(0, len(previous), factor):
+            combined = _combine_envelope_blocks(previous[start : start + factor])
+            if combined is not None:
+                next_level.append(combined)
+        if not next_level:
+            break
+        levels.append(next_level)
+    return levels
+
+
+def _append_envelope_levels(
+    levels: list[list[_EnvelopeBlock]],
+    x_new: np.ndarray,
+    y_new: np.ndarray,
+    *,
+    raw_block_size: int,
+    combine_factor: int,
+) -> list[list[_EnvelopeBlock]]:
+    if not levels:
+        levels = [[]]
+    block_size = max(int(raw_block_size), 1)
+    for start in range(0, len(x_new), block_size):
+        stop = min(start + block_size, len(x_new))
+        block = _make_envelope_block(x_new[start:stop], y_new[start:stop])
+        if block is not None:
+            levels[0].append(block)
+    factor = max(int(combine_factor), 2)
+    current = levels[0]
+    rebuilt_levels: list[list[_EnvelopeBlock]] = [current]
+    while len(rebuilt_levels[-1]) > factor:
+        previous = rebuilt_levels[-1]
+        next_level: list[_EnvelopeBlock] = []
+        for start in range(0, len(previous), factor):
+            combined = _combine_envelope_blocks(previous[start : start + factor])
+            if combined is not None:
+                next_level.append(combined)
+        if not next_level:
+            break
+        rebuilt_levels.append(next_level)
+    return rebuilt_levels
+
+
+def _select_envelope_blocks(levels: list[list[_EnvelopeBlock]], target_points: int) -> list[_EnvelopeBlock]:
+    if not levels:
+        return []
+    target_bins = max(int(np.ceil(float(max(target_points, 1)) / 2.0)), 1)
+    chosen = levels[0]
+    for level in levels:
+        chosen = level
+        if len(level) <= target_bins:
+            break
+    return chosen
+
+
+def _display_signature(x: np.ndarray, y: np.ndarray) -> tuple[object, ...]:
+    if len(x) == 0 or len(y) == 0:
+        return (0,)
+    return (
+        int(len(x)),
+        float(x[0]),
+        float(x[-1]),
+        float(np.nanmin(y)) if len(y) else float("nan"),
+        float(np.nanmax(y)) if len(y) else float("nan"),
+    )
 
 
 def extract_series_arrays(series: object) -> tuple[np.ndarray, np.ndarray]:
@@ -280,12 +439,15 @@ def _target_points_from_width(
     oversample: float,
     default_points: int,
 ) -> int:
+    max_points = max(int(default_points), 1)
+    min_points = max(1, min(int(minimum_points), max_points))
     if not enabled:
-        return quantize_view_target_points(default_points)
+        return quantize_view_target_points(max_points)
     if view_width_px is None or view_width_px <= 0:
-        target_points = default_points
+        target_points = max_points
     else:
-        target_points = max(minimum_points, int(view_width_px * oversample))
+        target_points = max(min_points, int(float(view_width_px) * float(oversample)))
+        target_points = min(target_points, max_points)
     return quantize_view_target_points(target_points)
 
 
@@ -496,6 +658,55 @@ class PlotViewCache:
         self._active_trace_series_result = result
         return result
 
+    def _rebuild_metric_envelope_cache(
+        self,
+        cache: MetricDisplayCache,
+        x: np.ndarray,
+        y: np.ndarray,
+        *,
+        target_points: int,
+    ) -> None:
+        cache.source_len = 0
+        cache.target_points = int(target_points)
+        cache.levels = _build_envelope_levels(
+            np.asarray(x, dtype=np.float64),
+            np.asarray(y, dtype=np.float64),
+            raw_block_size=cache.raw_block_size,
+            combine_factor=cache.combine_factor,
+        )
+        cache.source_len = int(len(x))
+        cache.display_revision += 1
+        cache.rebuild_count += 1
+        cache.last_mode = "full_rebuild"
+
+    def _append_metric_envelope_cache(
+        self,
+        cache: MetricDisplayCache,
+        x_new: np.ndarray,
+        y_new: np.ndarray,
+    ) -> None:
+        if len(x_new) == 0 or len(y_new) == 0:
+            return
+        cache.levels = _append_envelope_levels(
+            cache.levels,
+            np.asarray(x_new, dtype=np.float64),
+            np.asarray(y_new, dtype=np.float64),
+            raw_block_size=cache.raw_block_size,
+            combine_factor=cache.combine_factor,
+        )
+        cache.source_len += int(len(x_new))
+        cache.display_revision += 1
+        cache.incremental_count += 1
+        cache.last_mode = "incremental"
+
+    def _select_metric_envelope_blocks(
+        self,
+        cache: MetricDisplayCache,
+        *,
+        target_points: int,
+    ) -> list[_EnvelopeBlock]:
+        return _select_envelope_blocks(cache.levels, target_points)
+
     def metric_view(
         self,
         token: tuple[object, ...],
@@ -611,39 +822,101 @@ class PlotViewCache:
         x = np.asarray(x, dtype=np.float64)
         y = np.asarray(y, dtype=np.float64)
         if len(x) == 0 or len(y) == 0:
-            result = (x, y)
-            self._absolute_metric_view_cache[cache_key] = MetricDisplayCache(0, int(target_points), result[0], result[1])
+            result = (x[:0], y[:0])
+            cache = self._absolute_metric_view_cache.get(cache_key)
+            if not isinstance(cache, MetricDisplayCache):
+                cache = MetricDisplayCache()
+            cache.source_len = 0
+            cache.target_points = int(target_points)
+            cache.x_display = result[0]
+            cache.y_display = result[1]
+            cache.levels = []
+            cache.last_mode = "empty"
+            cache.display_output_revision += 1
+            cache.last_display_signature = _display_signature(cache.x_display, cache.y_display)
+            self._absolute_metric_view_cache[cache_key] = cache
             return result
         if not enabled:
-            result = (x, y)
-            self._absolute_metric_view_cache[cache_key] = MetricDisplayCache(len(x), int(target_points), result[0], result[1])
-            return result
+            cache = self._absolute_metric_view_cache.get(cache_key)
+            if not isinstance(cache, MetricDisplayCache):
+                cache = MetricDisplayCache()
+            cache.source_len = len(x)
+            cache.target_points = int(target_points)
+            cache.x_display = x
+            cache.y_display = y
+            cache.levels = []
+            cache.last_mode = "disabled"
+            cache.display_output_revision += 1
+            cache.last_display_signature = _display_signature(cache.x_display, cache.y_display)
+            self._absolute_metric_view_cache[cache_key] = cache
+            return x, y
 
         cached = self._absolute_metric_view_cache.get(cache_key)
-        if isinstance(cached, MetricDisplayCache) and cached.source_len == len(x) and cached.stride == int(target_points):
+        if not isinstance(cached, MetricDisplayCache):
+            cached = MetricDisplayCache(target_points=int(target_points))
+            self._absolute_metric_view_cache[cache_key] = cached
+        if cached.source_len == len(x) and cached.target_points == int(target_points):
+            cached.hit_count += 1
+            cached.last_mode = "hit"
             self._absolute_metric_view_cache.move_to_end(cache_key)
-            return np.asarray(cached.x_display, dtype=np.float64), np.asarray(cached.y_display, dtype=np.float64)
-        if cached is not None and not isinstance(cached, MetricDisplayCache):
-            cached = None
-        result = sample_absolute_metric_series_for_view(
-            x,
-            y,
-            view_width_px=view_width_px,
-            enabled=enabled,
-            minimum_points=minimum_points,
-            oversample=oversample,
-            default_points=default_points,
-        )
-        self._absolute_metric_view_cache[cache_key] = MetricDisplayCache(
-            source_len=len(x),
-            stride=int(target_points),
-            x_display=result[0],
-            y_display=result[1],
-        )
+            return cached.x_display, cached.y_display
+        if cached.source_len > len(x) or cached.source_len < 0 or not cached.levels:
+            self._rebuild_metric_envelope_cache(cached, x, y, target_points=target_points)
+        else:
+            old_len = int(cached.source_len)
+            self._append_metric_envelope_cache(cached, x[old_len:], y[old_len:])
+            cached.target_points = int(target_points)
+        blocks = self._select_metric_envelope_blocks(cached, target_points=int(target_points))
+        raw_len = min(len(x), len(y))
+        force_envelope_at = max(256, int(int(target_points) * 0.75))
+        if raw_len <= force_envelope_at:
+            display_x, display_y = x, y
+        else:
+            display_x, display_y = _blocks_to_display_arrays(blocks)
+        signature = _display_signature(display_x, display_y)
+        if signature != cached.last_display_signature:
+            cached.display_output_revision += 1
+            cached.last_display_signature = signature
+        cached.x_display = display_x
+        cached.y_display = display_y
+        cached.target_points = int(target_points)
         self._absolute_metric_view_cache.move_to_end(cache_key)
         while len(self._absolute_metric_view_cache) > self._max_view_entries:
             self._absolute_metric_view_cache.popitem(last=False)
-        return result
+        return display_x, display_y
+
+    def absolute_metric_display_state(self, token: tuple[object, ...]) -> tuple[object, ...] | None:
+        for cache_key, cached in reversed(list(self._absolute_metric_view_cache.items())):
+            if not isinstance(cached, MetricDisplayCache):
+                continue
+            if len(cache_key) < 3:
+                continue
+            if cache_key[0] != token[0] or cache_key[1] != token[1] or cache_key[2] != token[2]:
+                continue
+            return (
+                cache_key,
+                int(cached.display_output_revision),
+                int(len(cached.x_display)),
+                float(cached.x_display[0]) if len(cached.x_display) else None,
+                float(cached.x_display[-1]) if len(cached.x_display) else None,
+            )
+        return None
+
+    def metric_cache_debug_snapshot(self) -> dict[str, object]:
+        modes: dict[str, object] = {}
+        for key, cached in self._absolute_metric_view_cache.items():
+            if isinstance(cached, MetricDisplayCache):
+                modes[str(key)] = {
+                    "source_len": int(cached.source_len),
+                    "target_points": int(cached.target_points),
+                    "display_len": int(len(cached.x_display)),
+                    "last_mode": str(cached.last_mode),
+                    "hits": int(cached.hit_count),
+                    "incremental": int(cached.incremental_count),
+                    "rebuilds": int(cached.rebuild_count),
+                    "levels": [len(level) for level in cached.levels],
+                }
+        return modes
 
     def absolute_heatmap_view(
         self,

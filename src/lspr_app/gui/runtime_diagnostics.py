@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -20,6 +21,63 @@ def _timing_plain_text(value: float | int | None) -> str:
     if not np.isfinite(numeric):
         return "-"
     return f"{numeric:.1f} ms"
+
+
+def _metric_absolute_cache_modes_text(window: Any) -> str:
+    cache = getattr(window, "_plot_view_cache", None)
+    if cache is None:
+        return "-"
+    snapshot = getattr(cache, "metric_cache_debug_snapshot", None)
+    if not callable(snapshot):
+        return "-"
+    try:
+        cache_info = snapshot()
+    except Exception:
+        return "-"
+    if not isinstance(cache_info, dict) or not cache_info:
+        return "-"
+    total_hit = 0
+    total_incremental = 0
+    total_rebuild = 0
+    for entry in cache_info.values():
+        if not isinstance(entry, dict):
+            continue
+        total_hit += int(entry.get("hits", 0) or 0)
+        total_incremental += int(entry.get("incremental", 0) or 0)
+        total_rebuild += int(entry.get("rebuilds", 0) or 0)
+    return f"hit={total_hit} incremental={total_incremental} rebuild={total_rebuild}"
+
+
+def _scheduler_visual_coalescing_text(window: Any) -> str:
+    scheduler = getattr(window, "_ui_task_scheduler", None)
+    if scheduler is None:
+        return "-"
+    mode = getattr(scheduler, "visual_coalescing_mode_text", None)
+    return str(mode) if mode is not None else "-"
+
+
+def _paint_summary_text(window: Any, prefix: str) -> str:
+    count = int(getattr(window, f"_{prefix}_paint_count", 0) or 0)
+    total_ms = float(getattr(window, f"_{prefix}_paint_total_ms", 0.0) or 0.0)
+    max_ms = float(getattr(window, f"_{prefix}_paint_max_ms", 0.0) or 0.0)
+    avg_ms = total_ms / count if count > 0 else 0.0
+    return f"count={count} total={total_ms:.1f} ms max={max_ms:.1f} ms avg={avg_ms:.2f} ms"
+
+
+def _recent_paint_summary_text(window: Any, prefix: str, seconds: float = 10.0) -> str:
+    events = getattr(window, "_plot_paint_events", None)
+    if not events:
+        return "-"
+    now = perf_counter()
+    try:
+        values = [elapsed for ts, name, elapsed in events if name == prefix and (now - float(ts)) <= float(seconds)]
+    except Exception:
+        return "-"
+    if not values:
+        return "count=0"
+    total_ms = float(sum(values))
+    count = len(values)
+    return f"count={count} total={total_ms:.1f} ms max={max(values):.1f} ms avg={total_ms / count:.2f} ms"
 
 
 def _queue_depth_text(window: Any, attr_name: str) -> str:
@@ -70,6 +128,37 @@ def _timing_line(label: str, value: float | int | None) -> str:
     return f"  {label}: {_timing_plain_text(value)}"
 
 
+def _scheduler_task_breakdown_lines(window: Any, *, limit: int = 5) -> list[str]:
+    scheduler = getattr(window, "_ui_task_scheduler", None)
+    if scheduler is None or not hasattr(scheduler, "task_dispatch_stats"):
+        return ["  No scheduler task samples."]
+    try:
+        task_stats = scheduler.task_dispatch_stats()
+    except Exception:
+        return ["  No scheduler task samples."]
+    if not task_stats:
+        return ["  No scheduler task samples."]
+    items = sorted(
+        task_stats.items(),
+        key=lambda item: (
+            -float(item[1].last_lag_ms or 0.0),
+            -float(item[1].max_duration_ms or 0.0),
+            item[0],
+        ),
+    )
+    lines: list[str] = []
+    for task_name, stats in items[: max(int(limit), 1)]:
+        lines.append(
+            "  "
+            f"{task_name}: count={stats.count} "
+            f"last_lag={_timing_plain_text(stats.last_lag_ms)} "
+            f"last_dur={_timing_plain_text(stats.last_duration_ms)} "
+            f"max_lag={_timing_plain_text(stats.max_lag_ms)} "
+            f"max_dur={_timing_plain_text(stats.max_duration_ms)}"
+        )
+    return lines
+
+
 @dataclass(frozen=True, slots=True)
 class SessionDiagnosticsSnapshot:
     diagnostics: DiagnosticsConfig
@@ -112,6 +201,7 @@ class SessionDiagnosticsSnapshot:
     scheduler_duration_text: str
     scheduler_task_count_text: str
     scheduler_pending_text: str
+    scheduler_task_breakdown_lines: list[str]
     log_buffer_total_text: str
     gui_housekeeping_total_text: str
     processing_text: str
@@ -126,6 +216,23 @@ class SessionDiagnosticsSnapshot:
     trace_buffer_points_text: str
     trace_raw_points_text: str
     trace_display_points_text: str
+    trace_throttle_text: str
+    metric_render_series_text: str
+    metric_render_view_text: str
+    metric_render_setdata_text: str
+    metric_plot_disabled_fast_path_text: str
+    metric_setdata_calls_text: str
+    metric_setdata_skips_text: str
+    metric_absolute_cache_modes_text: str
+    scheduler_visual_coalescing_text: str
+    metric_autoscale_text: str
+    spectrum_plot_paint_summary_text: str
+    trace_plot_paint_summary_text: str
+    spectrum_plot_paint_recent_text: str
+    trace_plot_paint_recent_text: str
+    sensorgram_heatmap_arrays_text: str
+    sensorgram_heatmap_image_text: str
+    sensorgram_heatmap_axes_text: str
     heatmap_rows_text: str
     live_result_queue_text: str
     live_result_queue_max_text: str
@@ -157,6 +264,7 @@ class SessionDiagnosticsSnapshot:
         scheduler_duration_text = _timing_plain_text(getattr(scheduler, "_last_dispatch_duration_ms", None))
         scheduler_task_count_text = "-" if scheduler is None else str(int(getattr(scheduler, "_last_dispatch_task_count", 0)))
         scheduler_pending_text = "-" if scheduler is None else str(int(getattr(scheduler, "pending_count", lambda: 0)()))
+        scheduler_task_breakdown_lines = _scheduler_task_breakdown_lines(window)
         trace_points_text = "-"
         peak_history = getattr(window, "_peak_history", None)
         if peak_history:
@@ -173,6 +281,14 @@ class SessionDiagnosticsSnapshot:
                 trace_buffer_points_text = "0"
         trace_raw_points_text = "-"
         trace_display_points_text = "-"
+        trace_throttle_text = "-"
+        metric_render_series_text = "-"
+        metric_render_view_text = "-"
+        metric_render_setdata_text = "-"
+        metric_autoscale_text = "-"
+        sensorgram_heatmap_arrays_text = "-"
+        sensorgram_heatmap_image_text = "-"
+        sensorgram_heatmap_axes_text = "-"
         active_series = getattr(window, "_active_trace_series", None)
         if callable(active_series):
             try:
@@ -220,6 +336,36 @@ class SessionDiagnosticsSnapshot:
                     trace_display_points_text = str(len(visible_trace_x))
                 except Exception:
                     trace_display_points_text = "-"
+        last_metric_refresh_at = getattr(window, "_last_metric_plot_refresh_at", None)
+        if last_metric_refresh_at is not None:
+            try:
+                elapsed_ms = max((perf_counter() - float(last_metric_refresh_at)) * 1000.0, 0.0)
+            except (TypeError, ValueError):
+                elapsed_ms = None
+            if elapsed_ms is not None:
+                min_interval_ms = float(getattr(window, "_metric_plot_refresh_min_interval_ms", 250.0))
+                if bool(getattr(window, "_live_active", False)):
+                    min_interval_ms = max(min_interval_ms, 500.0)
+                remaining_ms = max(min_interval_ms - elapsed_ms, 0.0)
+                trace_throttle_text = f"{remaining_ms:.1f} ms"
+        metric_render_series_text = _timing_plain_text(
+            getattr(window, "_last_metric_render_series_export_ms", getattr(window, "_last_metric_render_series_extract_ms", None))
+        )
+        metric_render_view_text = _timing_plain_text(getattr(window, "_last_metric_render_view_prep_ms", None))
+        metric_render_setdata_text = _timing_plain_text(getattr(window, "_last_metric_render_setdata_ms", None))
+        metric_plot_disabled_fast_path_text = "yes" if bool(getattr(window, "_last_metric_plot_disabled_fast_path", False)) else "no"
+        metric_setdata_calls_text = _queue_depth_max_text(getattr(window, "_last_metric_render_setdata_calls", None))
+        metric_setdata_skips_text = _queue_depth_max_text(getattr(window, "_last_metric_render_setdata_skips", None))
+        metric_absolute_cache_modes_text = _metric_absolute_cache_modes_text(window)
+        scheduler_visual_coalescing_text = _scheduler_visual_coalescing_text(window)
+        metric_autoscale_text = _timing_plain_text(getattr(window, "_last_metric_autoscale_ms", None))
+        spectrum_plot_paint_summary_text = _paint_summary_text(window, "spectrum_plot")
+        trace_plot_paint_summary_text = _paint_summary_text(window, "trace_plot")
+        spectrum_plot_paint_recent_text = _recent_paint_summary_text(window, "spectrum_plot")
+        trace_plot_paint_recent_text = _recent_paint_summary_text(window, "trace_plot")
+        sensorgram_heatmap_arrays_text = _timing_plain_text(getattr(window, "_last_sensorgram_heatmap_arrays_ms", None))
+        sensorgram_heatmap_image_text = _timing_plain_text(getattr(window, "_last_sensorgram_heatmap_image_ms", None))
+        sensorgram_heatmap_axes_text = _timing_plain_text(getattr(window, "_last_sensorgram_heatmap_axes_ms", None))
         heatmap_rows_text = str(len(getattr(window, "_sensorgram_heatmap_history", []) or []))
         reference_ms = None
         spacing_ms = getattr(window, "_last_spacing_ms", None)
@@ -345,6 +491,7 @@ class SessionDiagnosticsSnapshot:
             scheduler_duration_text=scheduler_duration_text,
             scheduler_task_count_text=scheduler_task_count_text,
             scheduler_pending_text=scheduler_pending_text,
+            scheduler_task_breakdown_lines=scheduler_task_breakdown_lines,
             log_buffer_total_text=_timing_plain_text(getattr(window, "_last_log_buffer_total_ms", None)),
             gui_housekeeping_total_text=_timing_plain_text(getattr(window, "_last_gui_housekeeping_total_ms", None)),
             processing_text=_timing_plain_text(getattr(window, "_last_processing_ms", None)),
@@ -367,6 +514,23 @@ class SessionDiagnosticsSnapshot:
             trace_buffer_points_text=trace_buffer_points_text,
             trace_raw_points_text=trace_raw_points_text,
             trace_display_points_text=trace_display_points_text,
+            trace_throttle_text=trace_throttle_text,
+            metric_render_series_text=metric_render_series_text,
+            metric_render_view_text=metric_render_view_text,
+            metric_render_setdata_text=metric_render_setdata_text,
+            metric_plot_disabled_fast_path_text=metric_plot_disabled_fast_path_text,
+            metric_setdata_calls_text=metric_setdata_calls_text,
+            metric_setdata_skips_text=metric_setdata_skips_text,
+            metric_absolute_cache_modes_text=metric_absolute_cache_modes_text,
+            scheduler_visual_coalescing_text=scheduler_visual_coalescing_text,
+            metric_autoscale_text=metric_autoscale_text,
+            spectrum_plot_paint_summary_text=spectrum_plot_paint_summary_text,
+            trace_plot_paint_summary_text=trace_plot_paint_summary_text,
+            spectrum_plot_paint_recent_text=spectrum_plot_paint_recent_text,
+            trace_plot_paint_recent_text=trace_plot_paint_recent_text,
+            sensorgram_heatmap_arrays_text=sensorgram_heatmap_arrays_text,
+            sensorgram_heatmap_image_text=sensorgram_heatmap_image_text,
+            sensorgram_heatmap_axes_text=sensorgram_heatmap_axes_text,
             heatmap_rows_text=heatmap_rows_text,
             live_result_queue_text=_queue_depth_text(window, "_live_result_queue"),
             live_result_queue_max_text=_queue_depth_max_text(getattr(window, "_live_result_queue_max_depth", None)),
@@ -425,6 +589,9 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         f"  Log buffer total: {snapshot.log_buffer_total_text}",
         f"  GUI housekeeping total: {snapshot.gui_housekeeping_total_text}",
         "",
+        "Scheduler task breakdown",
+        *snapshot.scheduler_task_breakdown_lines,
+        "",
         "GUI housekeeping breakdown",
         f"  Log buffer: {snapshot.housekeeping_log_buffer_text}",
         f"  UI state save: {snapshot.housekeeping_ui_state_text}",
@@ -435,6 +602,22 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         f"  Metric display buffer points: {snapshot.trace_buffer_points_text}",
         f"  Metric raw points: {snapshot.trace_raw_points_text}",
         f"  Metric display points: {snapshot.trace_display_points_text}",
+        f"  Metric plot throttle remaining: {snapshot.trace_throttle_text}",
+        f"  Metric render series export: {snapshot.metric_render_series_text}",
+        f"  Metric render view prep: {snapshot.metric_render_view_text}",
+        f"  Metric render setData: {snapshot.metric_render_setdata_text}",
+        f"  Metric plot disabled fast path: {snapshot.metric_plot_disabled_fast_path_text}",
+        f"  Metric setData calls/skips: {snapshot.metric_setdata_calls_text}/{snapshot.metric_setdata_skips_text}",
+        f"  Metric absolute cache modes: {snapshot.metric_absolute_cache_modes_text}",
+        f"  Scheduler visual coalescing: {snapshot.scheduler_visual_coalescing_text}",
+        f"  Metric autoscale: {snapshot.metric_autoscale_text}",
+        f"  Spectrum paint: {snapshot.spectrum_plot_paint_summary_text}",
+        f"  Trace paint: {snapshot.trace_plot_paint_summary_text}",
+        f"  Spectrum paint recent 10s: {snapshot.spectrum_plot_paint_recent_text}",
+        f"  Trace paint recent 10s: {snapshot.trace_plot_paint_recent_text}",
+        f"  Sensorgram heatmap arrays: {snapshot.sensorgram_heatmap_arrays_text}",
+        f"  Sensorgram heatmap image: {snapshot.sensorgram_heatmap_image_text}",
+        f"  Sensorgram heatmap axes: {snapshot.sensorgram_heatmap_axes_text}",
         f"  Heatmap rows: {snapshot.heatmap_rows_text}",
         f"  Live result queue: {snapshot.live_result_queue_text} | max: {snapshot.live_result_queue_max_text}",
         f"  Live processed queue: {snapshot.live_processed_queue_text} | max: {snapshot.live_processed_queue_max_text}",

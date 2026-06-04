@@ -17,6 +17,15 @@ class _ScheduledTask:
     sequence: int
 
 
+@dataclass(slots=True)
+class _TaskDispatchStats:
+    count: int = 0
+    last_lag_ms: float | None = None
+    last_duration_ms: float | None = None
+    max_lag_ms: float | None = None
+    max_duration_ms: float | None = None
+
+
 class GuiTaskScheduler(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -31,8 +40,18 @@ class GuiTaskScheduler(QObject):
         self._max_dispatch_lag_ms: float | None = None
         self._max_dispatch_duration_ms: float | None = None
         self._dispatch_count = 0
+        self._task_dispatch_stats: dict[str, _TaskDispatchStats] = {}
+        self.visual_coalescing_mode_text = "latest"
 
-    def request(self, name: str, delay_ms: float, callback: Callable[[], None], *, priority: int = 0) -> None:
+    def request(
+        self,
+        name: str,
+        delay_ms: float,
+        callback: Callable[[], None],
+        *,
+        priority: int = 0,
+        coalesce: str = "earliest",
+    ) -> None:
         now = perf_counter()
         due_at = now + max(float(delay_ms), 0.0) / 1000.0
         task = self._tasks.get(str(name))
@@ -46,7 +65,14 @@ class GuiTaskScheduler(QObject):
             )
             self._sequence += 1
         else:
-            task.due_at = min(task.due_at, due_at)
+            if coalesce == "latest":
+                task.due_at = due_at
+            elif coalesce == "earliest":
+                task.due_at = min(task.due_at, due_at)
+            elif coalesce == "replace":
+                task.due_at = due_at
+            else:
+                raise ValueError(f"Unknown coalesce mode: {coalesce!r}")
             task.callback = callback
             task.priority = int(priority)
         self._tasks[task.name] = task
@@ -65,6 +91,9 @@ class GuiTaskScheduler(QObject):
 
     def pending_count(self) -> int:
         return len(self._tasks)
+
+    def task_dispatch_stats(self) -> dict[str, _TaskDispatchStats]:
+        return dict(self._task_dispatch_stats)
 
     def _arm_timer(self) -> None:
         if not self._tasks:
@@ -87,11 +116,25 @@ class GuiTaskScheduler(QObject):
         self._last_dispatch_task_count = len(due_tasks)
         self._max_dispatch_lag_ms = lag_ms if self._max_dispatch_lag_ms is None else max(self._max_dispatch_lag_ms, lag_ms)
         for task in sorted(due_tasks, key=lambda item: (item.priority, item.due_at, item.sequence)):
+            task_lag_ms = max((dispatch_started - task.due_at) * 1000.0, 0.0)
+            task_started = perf_counter()
             self._tasks.pop(task.name, None)
             try:
                 task.callback()
             except Exception:
                 logging.getLogger("lspr_app.scheduler").exception("GUI scheduler task failed: %s", task.name)
+            task_duration_ms = max((perf_counter() - task_started) * 1000.0, 0.0)
+            task_stats = self._task_dispatch_stats.get(task.name)
+            if task_stats is None:
+                task_stats = _TaskDispatchStats()
+                self._task_dispatch_stats[task.name] = task_stats
+            task_stats.count += 1
+            task_stats.last_lag_ms = task_lag_ms
+            task_stats.last_duration_ms = task_duration_ms
+            task_stats.max_lag_ms = task_lag_ms if task_stats.max_lag_ms is None else max(task_stats.max_lag_ms, task_lag_ms)
+            task_stats.max_duration_ms = (
+                task_duration_ms if task_stats.max_duration_ms is None else max(task_stats.max_duration_ms, task_duration_ms)
+            )
         duration_ms = (perf_counter() - dispatch_started) * 1000.0
         self._last_dispatch_duration_ms = duration_ms
         self._max_dispatch_duration_ms = (

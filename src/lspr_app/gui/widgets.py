@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import logging
+from time import perf_counter
 import pyqtgraph as pg
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
@@ -63,6 +65,7 @@ class FlexibleTimeAxis(pg.AxisItem):
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def tickStrings(self, values, scale, spacing):  # type: ignore[override]
+        started = perf_counter()
         if self._mode == "clock":
             labels = []
             for value in values:
@@ -70,10 +73,20 @@ class FlexibleTimeAxis(pg.AxisItem):
                     labels.append(datetime.fromtimestamp(float(value)).strftime("%H:%M:%S"))
                 except (OverflowError, OSError, ValueError):
                     labels.append("")
-            return labels
-        if self._mode == "relative":
-            return [self._format_relative_value(float(value)) for value in values]
-        return [f"{float(value):.0f}" if abs(float(value)) >= 10 else f"{float(value):.1f}" for value in values]
+            result = labels
+        elif self._mode == "relative":
+            result = [self._format_relative_value(float(value)) for value in values]
+        else:
+            result = [f"{float(value):.0f}" if abs(float(value)) >= 10 else f"{float(value):.1f}" for value in values]
+        elapsed_ms = (perf_counter() - started) * 1000.0
+        if elapsed_ms > 5.0:
+            logging.getLogger("lspr_app.plot").info(
+                "FlexibleTimeAxis.tickStrings slow: %.2f ms | ticks=%d | mode=%s",
+                elapsed_ms,
+                len(values),
+                self._mode,
+            )
+        return result
 
 
 class ScientificAxis(pg.AxisItem):

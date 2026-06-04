@@ -165,8 +165,51 @@ def _format_hhmmss(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def _metric_plot_refresh_min_interval_ms(window) -> float:
+    interval_ms = float(getattr(window, "_metric_plot_refresh_min_interval_ms", 250.0))
+    if bool(getattr(window, "_live_active", False)):
+        interval_ms = max(interval_ms, 500.0)
+    last_trace_ms = getattr(window, "_last_deferred_ui_trace_plot_ms", None)
+    if last_trace_ms is not None:
+        try:
+            last_trace_ms = float(last_trace_ms)
+        except (TypeError, ValueError):
+            last_trace_ms = None
+    if last_trace_ms is not None and np.isfinite(last_trace_ms) and last_trace_ms >= 25.0:
+        interval_ms = max(interval_ms, min(1000.0, last_trace_ms * 4.0))
+    return interval_ms
+
+
+def _metric_display_target_points(window) -> int:
+    if bool(getattr(window, "_live_active", False)):
+        return max(int(getattr(window, "_metric_live_display_points", 384)), 1)
+    return max(int(getattr(window, "_metric_idle_display_points", 512)), 1)
+
+
 def _metric_label_span(label: str, color: str) -> str:
     return f"<span style='color: {escape(color)}; font-weight: 600;'>{escape(label)}</span>"
+
+
+def _set_plot_label_if_changed(plot, axis: str, text: str, window=None, cache_attr: str | None = None) -> None:
+    if window is not None and cache_attr is not None:
+        current = getattr(window, cache_attr, None)
+        if current == text:
+            return
+        setattr(window, cache_attr, text)
+    plot.setLabel(axis, text)
+
+
+def _set_visible_if_changed(widget, visible: bool) -> None:
+    try:
+        current_visible = bool(widget.isVisible()) if hasattr(widget, "isVisible") else None
+        if current_visible is not None and current_visible == bool(visible):
+            return
+        widget.setVisible(bool(visible))
+    except Exception:
+        try:
+            widget.setVisible(bool(visible))
+        except Exception:
+            pass
 
 
 def downsample_metric_series_for_view(
@@ -326,18 +369,58 @@ def flush_deferred_display_refreshes(window) -> None:
         window._last_deferred_ui_telemetry_ms = (perf_counter() - started) * 1000.0
         refresh_state.telemetry_dirty = False
         did_work = True
-    if getattr(refresh_state, "metric_plot_dirty", False) and not bool(getattr(window, "_sensorgram_frozen", False)):
-        started = perf_counter()
-        window._refresh_trace_plot(refresh_state.pending_metric_label or "Peak position (nm)")
-        window._last_deferred_ui_trace_plot_ms = (perf_counter() - started) * 1000.0
-        refresh_state.metric_plot_dirty = False
-        did_work = True
     if getattr(refresh_state, "summary_dirty", False):
         started = perf_counter()
         window._refresh_session_summary()
         window._last_deferred_ui_summary_ms = (perf_counter() - started) * 1000.0
         refresh_state.summary_dirty = False
         did_work = True
+    if did_work:
+        window._log_throttled(
+            "ui_flush",
+            (
+                "UI flush | trace_dirty="
+                f"{int(bool(getattr(refresh_state, 'metric_plot_dirty', False)))} | "
+                f"stats_dirty={int(bool(getattr(refresh_state, 'stats_dirty', False)))} | "
+                f"display_rate={window.live_rate_spin.value():.2f} Hz"
+            ),
+            level=logging.DEBUG,
+                min_interval=1.0,
+            )
+
+
+def flush_deferred_metric_refreshes(window) -> None:
+    did_work = False
+    refresh_state = getattr(window, "_ui_refresh_state", None)
+    if getattr(refresh_state, "metric_plot_dirty", False) and not bool(getattr(window, "_sensorgram_frozen", False)):
+        last_metric_refresh_at = getattr(window, "_last_metric_plot_refresh_at", None)
+        throttle_ms = _metric_plot_refresh_min_interval_ms(window)
+        if last_metric_refresh_at is not None:
+            try:
+                elapsed_since_metric_ms = max((perf_counter() - float(last_metric_refresh_at)) * 1000.0, 0.0)
+            except (TypeError, ValueError):
+                elapsed_since_metric_ms = None
+        else:
+            elapsed_since_metric_ms = None
+        if elapsed_since_metric_ms is not None and elapsed_since_metric_ms < throttle_ms:
+            remaining_ms = max(throttle_ms - elapsed_since_metric_ms, 1.0)
+            if not window._ui_task_scheduler.is_pending("deferred_metric_flush"):
+                window._ui_task_scheduler.request(
+                    "deferred_metric_flush",
+                    remaining_ms,
+                    window._flush_deferred_metric_refreshes,
+                    priority=0,
+                    coalesce="latest",
+                )
+            window._last_metric_plot_refresh_throttled_ms = remaining_ms
+        else:
+            started = perf_counter()
+            window._refresh_trace_plot(refresh_state.pending_metric_label or "Peak position (nm)")
+            elapsed_ms = (perf_counter() - started) * 1000.0
+            window._last_deferred_ui_trace_plot_ms = elapsed_ms
+            window._last_metric_plot_refresh_at = perf_counter()
+            refresh_state.metric_plot_dirty = False
+            did_work = True
     if did_work:
         window._log_throttled(
             "ui_flush",
@@ -464,13 +547,14 @@ def apply_processing_range_to_spectrum_plot(window) -> None:
 
 
 def autoscale_metric_plot(window, *, force: bool = True) -> None:
+    started = perf_counter()
     if not force:
         last_autoscale_at = float(getattr(window, "_last_metric_autoscale_at", 0.0))
-        min_interval_s = float(getattr(window, "_metric_autoscale_min_interval_s", 0.25))
+        min_interval_s = float(getattr(window, "_metric_autoscale_min_interval_s", 1.0))
         if last_autoscale_at > 0.0 and (perf_counter() - last_autoscale_at) < min_interval_s:
             window._metric_autoscale_pending = False
+            window._last_metric_autoscale_ms = (perf_counter() - started) * 1000.0
             return
-    started = perf_counter()
     content_mode = getattr(window, "_sensorgram_content_mode", "metric")
     if content_mode == "heatmap":
         window._trace_view_autoscaling = True
@@ -480,6 +564,7 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
             window._trace_view_autoscaling = False
             window._last_metric_autoscale_at = perf_counter()
             window._metric_autoscale_pending = False
+            window._last_metric_autoscale_ms = (perf_counter() - started) * 1000.0
         return
     visible_series: list[tuple[np.ndarray, np.ndarray]] = []
     trace_curves = getattr(window, "trace_curves", None)
@@ -528,17 +613,42 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
     if getattr(window, "_trace_view_locked", False):
         window._metric_autoscale_pending = False
         return
+    new_range = (
+        float(x_min),
+        float(x_max + x_pad),
+        float(np.min(y) - y_pad),
+        float(np.max(y) + y_pad),
+    )
+    if not force:
+        last_range = getattr(window, "_last_metric_autoscale_range", None)
+        should_apply = True
+        if isinstance(last_range, tuple) and len(last_range) == 4:
+            try:
+                old_x0, old_x1, old_y0, old_y1 = (float(v) for v in last_range)
+                new_x0, new_x1, new_y0, new_y1 = new_range
+                old_x_span = max(abs(old_x1 - old_x0), 1e-9)
+                old_y_span = max(abs(old_y1 - old_y0), 1e-9)
+                x_delta = max(abs(new_x0 - old_x0), abs(new_x1 - old_x1)) / old_x_span
+                y_delta = max(abs(new_y0 - old_y0), abs(new_y1 - old_y1)) / old_y_span
+                x_threshold = float(getattr(window, "_metric_autoscale_x_change_fraction", 0.01))
+                y_threshold = float(getattr(window, "_metric_autoscale_y_change_fraction", 0.02))
+                should_apply = x_delta >= x_threshold or y_delta >= y_threshold
+            except Exception:
+                should_apply = True
+        if not should_apply:
+            window._metric_autoscale_pending = False
+            window._last_metric_autoscale_ms = (perf_counter() - started) * 1000.0
+            return
     window._trace_view_autoscaling = True
     try:
-        if view_mode == "rolling":
-            window.trace_plot.setXRange(x_min, x_max + x_pad, padding=0.0)
-        else:
-            window.trace_plot.setXRange(x_min, x_max + x_pad, padding=0.0)
-        window.trace_plot.setYRange(float(np.min(y)) - y_pad, float(np.max(y)) + y_pad, padding=0.0)
+        window.trace_plot.setXRange(new_range[0], new_range[1], padding=0.0)
+        window.trace_plot.setYRange(new_range[2], new_range[3], padding=0.0)
+        window._last_metric_autoscale_range = new_range
     finally:
         window._trace_view_autoscaling = False
         window._last_metric_autoscale_at = perf_counter()
         window._metric_autoscale_pending = False
+        window._last_metric_autoscale_ms = (perf_counter() - started) * 1000.0
         if processing_debug_mode_enabled():
             elapsed_ms = (perf_counter() - started) * 1000.0
             if elapsed_ms >= 2.0:
@@ -596,7 +706,12 @@ def request_metric_autoscale(window) -> None:
     if bool(getattr(window, "_sensorgram_frozen", False)):
         return
     window._metric_autoscale_pending = True
-    window._trace_autoscale_timer.start()
+    timer = getattr(window, "_trace_autoscale_timer", None)
+    if timer is None:
+        return
+    if timer.isActive():
+        return
+    timer.start()
 
 
 def refresh_metric_plot(window, trace_label: str) -> None:
@@ -606,27 +721,29 @@ def refresh_metric_plot(window, trace_label: str) -> None:
     clock_mode = not bool(window._measurement_active)
     content_mode = getattr(window, "_sensorgram_content_mode", "metric")
     metric_plot_enabled = bool(getattr(window, "_metric_plot_enabled", True))
+    window._last_metric_plot_disabled_fast_path = False
     if content_mode != "heatmap":
         window._last_sensorgram_heatmap_render_ms = None
-    active_series = window._active_trace_series()
     try:
+        if not metric_plot_enabled:
+            _show_metric_plot_unavailable(window, clock_mode)
+            window._last_metric_plot_disabled_fast_path = True
+            return
+        active_series = window._active_trace_series()
         if content_mode == "heatmap":
-            window.trace_plot.setLabel("left", "Wavelength (nm)")
+            _set_plot_label_if_changed(window.trace_plot, "left", "Wavelength (nm)", window, "_trace_left_label_text")
             _set_trace_time_axis_mode(window, None, clock_mode=clock_mode)
-            if metric_plot_enabled and active_series:
+            if active_series:
                 render_metric_series(window, active_series, clock_mode=clock_mode)
             else:
                 for curve in window.trace_curves.values():
                     curve.setData([], [])
-                    curve.setVisible(False)
+                    _set_visible_if_changed(curve, False)
             render_sensorgram_heatmap(window, window._sensorgram_heatmap_history, clock_mode=clock_mode)
             request_metric_autoscale(window)
             return
-        if not metric_plot_enabled:
-            _show_metric_plot_unavailable(window, clock_mode)
-            return
         if active_series:
-            window.trace_plot.setLabel("left", trace_label)
+            _set_plot_label_if_changed(window.trace_plot, "left", trace_label, window, "_trace_left_label_text")
             active_x_values = None
             if isinstance(active_series, dict) and active_series:
                 first_series = next(iter(active_series.values()))
@@ -642,30 +759,30 @@ def refresh_metric_plot(window, trace_label: str) -> None:
                         active_x_values = None
             _set_trace_time_axis_mode(window, active_x_values, clock_mode=clock_mode)
             render_metric_series(window, active_series, clock_mode=clock_mode)
-            window.trace_heatmap_image.setVisible(False)
+            _set_visible_if_changed(window.trace_heatmap_image, False)
             if hasattr(window, "trace_heatmap_notice_item"):
-                window.trace_heatmap_notice_item.setVisible(False)
+                _set_visible_if_changed(window.trace_heatmap_notice_item, False)
             if hasattr(window, "trace_legend"):
-                window.trace_legend.setVisible(True)
+                _set_visible_if_changed(window.trace_legend, True)
             for curve in window.trace_curves.values():
-                curve.setVisible(True)
+                _set_visible_if_changed(curve, True)
             request_metric_autoscale(window)
             return
 
         if content_mode == "heatmap":
-            window.trace_plot.setLabel("left", "Wavelength (nm)")
+            _set_plot_label_if_changed(window.trace_plot, "left", "Wavelength (nm)", window, "_trace_left_label_text")
         else:
-            window.trace_plot.setLabel("left", trace_label)
+            _set_plot_label_if_changed(window.trace_plot, "left", trace_label, window, "_trace_left_label_text")
         _set_trace_time_axis_mode(window, None, clock_mode=clock_mode)
         for curve in window.trace_curves.values():
             curve.setData([], [])
-            curve.setVisible(content_mode != "heatmap")
+            _set_visible_if_changed(curve, content_mode != "heatmap")
         if hasattr(window, "trace_heatmap_image"):
-            window.trace_heatmap_image.setVisible(False)
+            _set_visible_if_changed(window.trace_heatmap_image, False)
         if hasattr(window, "trace_heatmap_notice_item"):
-            window.trace_heatmap_notice_item.setVisible(False)
+            _set_visible_if_changed(window.trace_heatmap_notice_item, False)
         if hasattr(window, "trace_legend"):
-            window.trace_legend.setVisible(content_mode != "heatmap")
+            _set_visible_if_changed(window.trace_legend, content_mode != "heatmap")
         window._visible_trace_x = None
         window._visible_trace_y = None
         window._visible_trace_mode = "relative" if getattr(window, "_trace_time_axis_relative_labels_enabled", False) else ("clock" if clock_mode else "elapsed")
@@ -686,7 +803,11 @@ def render_metric_series(
     clock_mode: bool,
 ) -> None:
     started = perf_counter()
+    series_export_ms = 0.0
+    view_prep_ms = 0.0
     setdata_ms = 0.0
+    setdata_calls = 0
+    setdata_skips = 0
     display_points = 0
     raw_points = 0
 
@@ -741,7 +862,9 @@ def render_metric_series(
                 render_state_cache[metric_name] = render_state_key
             continue
         raw_points += _series_point_count(series)
+        series_started = perf_counter()
         x, y = _series_to_arrays(series)
+        series_export_ms += (perf_counter() - series_started) * 1000.0
         if len(x) == 0 or len(y) == 0:
             curve.setDownsampling(auto=False, ds=1)
             render_state_key = (metric_name, "empty", downsampling_enabled)
@@ -753,6 +876,7 @@ def render_metric_series(
         curve.setDownsampling(auto=False, ds=1)
         display_x = x
         display_y = y
+        view_started = perf_counter()
         if cache is not None:
             if view_mode == "absolute" and not trace_view_locked:
                 display_x, display_y = cache.absolute_metric_view(
@@ -763,7 +887,7 @@ def render_metric_series(
                     enabled=downsampling_enabled,
                     minimum_points=128,
                     oversample=1.0,
-                    default_points=2048,
+                    default_points=_metric_display_target_points(window),
                 )
             else:
                 display_x, display_y = cache.metric_view(
@@ -776,7 +900,7 @@ def render_metric_series(
                     enabled=downsampling_enabled,
                     minimum_points=128,
                     oversample=1.0,
-                    default_points=2048,
+                    default_points=_metric_display_target_points(window),
                 )
         elif view_mode == "absolute" and not trace_view_locked:
             display_x, display_y = sample_absolute_metric_series_for_view(
@@ -786,7 +910,7 @@ def render_metric_series(
                 enabled=downsampling_enabled,
                 minimum_points=128,
                 oversample=1.0,
-                default_points=2048,
+                default_points=_metric_display_target_points(window),
             )
         else:
             display_x, display_y = downsample_metric_series_for_view(
@@ -798,23 +922,28 @@ def render_metric_series(
                 enabled=downsampling_enabled,
                 minimum_points=128,
                 oversample=1.0,
-                default_points=2048,
+                default_points=_metric_display_target_points(window),
             )
+        view_prep_ms += (perf_counter() - view_started) * 1000.0
+        display_state = None
+        if cache is not None and view_mode == "absolute" and not trace_view_locked:
+            display_state = cache.absolute_metric_display_state(series_token)
         render_state_key = (
             metric_name,
-            series_token,
             downsampling_enabled,
             view_mode,
             bool(trace_view_locked),
-            int(len(display_x)),
+            display_state if display_state is not None else (id(display_x), id(display_y), int(len(display_x))),
         )
         if render_state_cache.get(metric_name) == render_state_key:
             display_points += int(len(display_x))
+            setdata_skips += 1
             active_series[metric_name] = (display_x, display_y)
             continue
         setdata_started = perf_counter()
         curve.setData(display_x, display_y)
         setdata_ms += (perf_counter() - setdata_started) * 1000.0
+        setdata_calls += 1
         display_points += int(len(display_x))
         render_state_cache[metric_name] = render_state_key
         active_series[metric_name] = (display_x, display_y)
@@ -831,14 +960,31 @@ def render_metric_series(
         window._visible_trace_x = None
         window._visible_trace_y = None
 
+    if cache is not None and hasattr(cache, "metric_cache_debug_snapshot"):
+        try:
+            window._last_metric_view_cache_modes = cache.metric_cache_debug_snapshot()
+        except Exception:
+            window._last_metric_view_cache_modes = {}
+    else:
+        window._last_metric_view_cache_modes = {}
+
+    elapsed_ms = (perf_counter() - started) * 1000.0
+    window._last_metric_render_series_export_ms = series_export_ms
+    window._last_metric_render_series_extract_ms = series_export_ms
+    window._last_metric_render_view_prep_ms = view_prep_ms
+    window._last_metric_render_setdata_ms = setdata_ms
+    window._last_metric_render_setdata_calls = setdata_calls
+    window._last_metric_render_setdata_skips = setdata_skips
+    window._last_metric_render_raw_points = raw_points
+    window._last_metric_render_display_points = display_points
     if processing_debug_mode_enabled():
-        elapsed_ms = (perf_counter() - started) * 1000.0
         if elapsed_ms >= 2.0:
             window._log_throttled(
                 "metric_render",
                 (
                     "Metric render: "
-                    f"{elapsed_ms:.2f} ms | setData={setdata_ms:.2f} ms | "
+                    f"{elapsed_ms:.2f} ms | series={series_export_ms:.2f} ms | "
+                    f"view={view_prep_ms:.2f} ms | setData={setdata_ms:.2f} ms | "
                     f"raw_n={raw_points} | display_n={display_points}"
                 ),
                 level=logging.INFO,
@@ -851,19 +997,22 @@ def render_sensorgram_heatmap(
     history: list[tuple[float, np.ndarray]],
     clock_mode: bool,
 ) -> None:
+    window._last_sensorgram_heatmap_arrays_ms = None
+    window._last_sensorgram_heatmap_image_ms = None
+    window._last_sensorgram_heatmap_axes_ms = None
     if not hasattr(window, "trace_heatmap_image"):
         return
     if not bool(getattr(window, "_sensorgram_heatmap_enabled", True)):
         _show_sensorgram_heatmap_unavailable(window, clock_mode)
         return
     if not history or getattr(window, "_sensorgram_heatmap_wavelengths", None) is None:
-        window.trace_heatmap_image.setVisible(False)
+        _set_visible_if_changed(window.trace_heatmap_image, False)
         if hasattr(window, "trace_heatmap_notice_item"):
-            window.trace_heatmap_notice_item.setVisible(False)
+            _set_visible_if_changed(window.trace_heatmap_notice_item, False)
         for curve in window.trace_curves.values():
-            curve.setVisible(False)
+            _set_visible_if_changed(curve, False)
         if hasattr(window, "trace_legend"):
-            window.trace_legend.setVisible(False)
+            _set_visible_if_changed(window.trace_legend, False)
         return
 
     started = perf_counter()
@@ -891,6 +1040,7 @@ def render_sensorgram_heatmap(
         view_height_px = None
     cache = getattr(window, "_plot_view_cache", None)
     heatmap_token = build_heatmap_history_token(window)
+    arrays_started = perf_counter()
     if cache is not None:
         times, matrix = cache.heatmap_arrays_from_history(heatmap_token, history, build_heatmap_arrays)
         if view_mode == "absolute" and not trace_view_locked:
@@ -933,30 +1083,32 @@ def render_sensorgram_heatmap(
                 view_height_px=view_height_px,
                 enabled=bool(getattr(window, "_sensorgram_downsampling_enabled", True)),
             )
+    window._last_sensorgram_heatmap_arrays_ms = (perf_counter() - arrays_started) * 1000.0
     if view_mode == "rolling" and len(times) > 0:
         times = times - float(times[0])
     wavelengths = np.asarray(window._sensorgram_heatmap_wavelengths, dtype=np.float64)
     if len(times) == 0 or len(wavelengths) == 0:
-        window.trace_heatmap_image.setVisible(False)
+        _set_visible_if_changed(window.trace_heatmap_image, False)
         if hasattr(window, "trace_heatmap_notice_item"):
-            window.trace_heatmap_notice_item.setVisible(False)
+            _set_visible_if_changed(window.trace_heatmap_notice_item, False)
         return
 
     expected_length = len(wavelengths)
     if matrix.shape[1] != expected_length:
-        window.trace_heatmap_image.setVisible(False)
+        _set_visible_if_changed(window.trace_heatmap_image, False)
         if hasattr(window, "trace_heatmap_notice_item"):
-            window.trace_heatmap_notice_item.setVisible(False)
+            _set_visible_if_changed(window.trace_heatmap_notice_item, False)
         return
 
     finite = np.isfinite(matrix)
     if not np.any(finite):
-        window.trace_heatmap_image.setVisible(False)
+        _set_visible_if_changed(window.trace_heatmap_image, False)
         if hasattr(window, "trace_heatmap_notice_item"):
-            window.trace_heatmap_notice_item.setVisible(False)
+            _set_visible_if_changed(window.trace_heatmap_notice_item, False)
         return
 
     image_data = matrix.T
+    image_started = perf_counter()
     levels = getattr(window, "_sensorgram_heatmap_levels", None)
     if levels is None:
         levels = derive_heatmap_levels_from_matrix(matrix)
@@ -980,6 +1132,8 @@ def render_sensorgram_heatmap(
     if top <= bottom:
         top = bottom + 1e-6
     window.trace_heatmap_image.setRect(QRectF(left, bottom, right - left, top - bottom))
+    window._last_sensorgram_heatmap_image_ms = (perf_counter() - image_started) * 1000.0
+    axes_started = perf_counter()
     if requested_view_x_min is not None and requested_view_x_max is not None and requested_view_x_max > requested_view_x_min:
         view_span = requested_view_x_max - requested_view_x_min
     else:
@@ -996,19 +1150,20 @@ def render_sensorgram_heatmap(
         finally:
             window._trace_view_autoscaling = False
     _set_trace_time_axis_mode(window, times, clock_mode=clock_mode)
-    window.trace_heatmap_image.setVisible(True)
+    _set_visible_if_changed(window.trace_heatmap_image, True)
     if hasattr(window, "trace_heatmap_notice_item"):
-        window.trace_heatmap_notice_item.setVisible(False)
+        _set_visible_if_changed(window.trace_heatmap_notice_item, False)
     for curve in window.trace_curves.values():
-        curve.setVisible(False)
+        _set_visible_if_changed(curve, False)
     if hasattr(window, "trace_legend"):
-        window.trace_legend.setVisible(False)
+        _set_visible_if_changed(window.trace_legend, False)
     window._visible_trace_x = times
     safe_matrix = np.where(np.isfinite(matrix), matrix, -np.inf)
     row_max = np.max(safe_matrix, axis=1)
     row_max[~np.isfinite(row_max)] = np.nan
     window._visible_trace_y = row_max
     window._visible_trace_mode = "relative" if getattr(window, "_trace_time_axis_relative_labels_enabled", False) else ("clock" if clock_mode else "elapsed")
+    window._last_sensorgram_heatmap_axes_ms = (perf_counter() - axes_started) * 1000.0
     elapsed_ms = (perf_counter() - started) * 1000.0
     window._last_sensorgram_heatmap_render_ms = elapsed_ms
     if elapsed_ms >= 2.0:
@@ -1044,7 +1199,7 @@ def _show_metric_plot_unavailable(window, clock_mode: bool) -> None:
 
 def _show_trace_plot_unavailable(window, title: str, detail: str, *, clock_mode: bool) -> None:
     if hasattr(window, "trace_heatmap_image"):
-        window.trace_heatmap_image.setVisible(False)
+        _set_visible_if_changed(window.trace_heatmap_image, False)
     _set_trace_time_axis_mode(window, None, clock_mode=clock_mode)
     if hasattr(window, "trace_heatmap_notice_item"):
         notice = window.trace_heatmap_notice_item
@@ -1055,9 +1210,9 @@ def _show_trace_plot_unavailable(window, title: str, detail: str, *, clock_mode:
         if callable(sync_overlay):
             sync_overlay()
     for curve in window.trace_curves.values():
-        curve.setVisible(False)
+        _set_visible_if_changed(curve, False)
     if hasattr(window, "trace_legend"):
-        window.trace_legend.setVisible(False)
+        _set_visible_if_changed(window.trace_legend, False)
     window._visible_trace_mode = "relative" if getattr(window, "_trace_time_axis_relative_labels_enabled", False) else ("clock" if clock_mode else "elapsed")
 
 

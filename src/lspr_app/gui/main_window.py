@@ -5,6 +5,7 @@ import math
 import os
 import queue
 import threading
+from collections import deque
 from html import escape
 from datetime import datetime, timezone
 from pathlib import Path
@@ -122,6 +123,7 @@ from lspr_app.gui.main_window_runtime import (
     build_runtime_drift_lines as build_runtime_drift_lines_for_runtime,
     drain_gui_housekeeping_tasks as drain_gui_housekeeping_tasks_for,
     flush_deferred_display_refreshes as flush_deferred_display_refreshes_for_runtime,
+    flush_deferred_metric_refreshes as flush_deferred_metric_refreshes_for_runtime,
     flush_deferred_ui_refreshes as flush_deferred_ui_refreshes_for_runtime,
     flush_deferred_stats_refreshes as flush_deferred_stats_refreshes_for_runtime,
     flush_plot_refreshes as flush_plot_refreshes_for_runtime,
@@ -383,6 +385,35 @@ class LogTerminalTextEdit(QTextEdit):
         super().wheelEvent(event)
 
 
+class TimedPlotWidget(pg.PlotWidget):
+    def __init__(self, *args, paint_owner=None, paint_prefix: str = "", **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._paint_owner = paint_owner
+        self._paint_prefix = str(paint_prefix)
+
+    def paintEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
+        started = perf_counter()
+        super().paintEvent(event)
+        elapsed_ms = (perf_counter() - started) * 1000.0
+        owner = getattr(self, "_paint_owner", None)
+        prefix = getattr(self, "_paint_prefix", "")
+        if owner is None or not prefix:
+            return
+        count_name = f"_{prefix}_paint_count"
+        total_name = f"_{prefix}_paint_total_ms"
+        max_name = f"_{prefix}_paint_max_ms"
+        try:
+            setattr(owner, count_name, int(getattr(owner, count_name, 0)) + 1)
+            setattr(owner, total_name, float(getattr(owner, total_name, 0.0) or 0.0) + elapsed_ms)
+            current_max = float(getattr(owner, max_name, 0.0) or 0.0)
+            setattr(owner, max_name, max(current_max, elapsed_ms))
+            events = getattr(owner, "_plot_paint_events", None)
+            if events is not None:
+                events.append((perf_counter(), prefix, float(elapsed_ms)))
+        except Exception:
+            return
+
+
 class MainWindow(QMainWindow):
     hardware_init_progress = pyqtSignal(int, str)
     hardware_init_finished = pyqtSignal()
@@ -455,7 +486,7 @@ class MainWindow(QMainWindow):
         self._ui_task_scheduler = GuiTaskScheduler(self)
         self._trace_autoscale_timer = QTimer(self)
         self._trace_autoscale_timer.setSingleShot(True)
-        self._trace_autoscale_timer.setInterval(120)
+        self._trace_autoscale_timer.setInterval(500)
         self._trace_autoscale_timer.timeout.connect(self._autoscale_trace_plot)
         self._display_refresh_requested_at: float | None = None
         self._last_display_refresh_delay_ms: float | None = None
@@ -529,6 +560,26 @@ class MainWindow(QMainWindow):
         self._last_spectrum_residual_update_ms: float | None = None
         self._last_sensorgram_render_ms: float | None = None
         self._last_sensorgram_heatmap_render_ms: float | None = None
+        self._last_sensorgram_heatmap_arrays_ms: float | None = None
+        self._last_sensorgram_heatmap_image_ms: float | None = None
+        self._last_sensorgram_heatmap_axes_ms: float | None = None
+        self._last_metric_autoscale_ms: float | None = None
+        self._metric_autoscale_min_interval_s = 1.0
+        self._metric_autoscale_x_change_fraction = 0.01
+        self._metric_autoscale_y_change_fraction = 0.02
+        self._last_metric_autoscale_range: tuple[float, float, float, float] | None = None
+        self._last_metric_plot_disabled_fast_path = False
+        self._last_metric_render_series_export_ms: float | None = None
+        self._last_metric_render_setdata_calls: int | None = None
+        self._last_metric_render_setdata_skips: int | None = None
+        self._last_metric_view_cache_modes: dict[str, object] = {}
+        self._trace_plot_paint_count = 0
+        self._trace_plot_paint_total_ms: float | None = None
+        self._trace_plot_paint_max_ms: float | None = None
+        self._spectrum_plot_paint_count = 0
+        self._spectrum_plot_paint_total_ms: float | None = None
+        self._spectrum_plot_paint_max_ms: float | None = None
+        self._plot_paint_events = deque(maxlen=2000)
         self._last_deferred_ui_refresh_ms: float | None = None
         self._last_deferred_ui_refresh_total_ms: float | None = None
         self._last_deferred_display_refresh_ms: float | None = None
@@ -591,6 +642,8 @@ class MainWindow(QMainWindow):
         self._metric_live_buffer_max_points = 7200
         self._metric_history_max_points = self._metric_live_buffer_max_points
         self._trace_history_max_points = self._metric_history_max_points
+        self._metric_live_display_points = 384
+        self._metric_idle_display_points = 512
         self._recording_blink_visible = True
         self._processing_debug_mode_enabled = bool(load_app_setting("processing_debug_mode", False))
         set_processing_debug_mode_enabled(self._processing_debug_mode_enabled)
@@ -726,7 +779,8 @@ class MainWindow(QMainWindow):
         self.resize(1380, 920)
         _startup_mark("window flags and icon set")
 
-        pg.setConfigOptions(antialias=True)
+        # Live plots should favor responsiveness over cosmetic smoothing.
+        pg.setConfigOptions(antialias=False)
         self._apply_modern_style()
         _startup_mark("application style applied")
 
@@ -1102,7 +1156,7 @@ class MainWindow(QMainWindow):
         self.trace_time_axis = FlexibleTimeAxis("bottom")
         self.trace_time_axis.doubleClicked.connect(self._toggle_trace_time_axis_relative_labels)
         _startup_mark("building spectrum and metric plots")
-        self.spectrum_plot = pg.PlotWidget(axisItems={"left": ScientificAxis("left")}, background="w")
+        self.spectrum_plot = TimedPlotWidget(axisItems={"left": ScientificAxis("left")}, background="w", paint_owner=self, paint_prefix="spectrum_plot")
         if hasattr(self.spectrum_plot, "setMenuEnabled"):
             self.spectrum_plot.setMenuEnabled(False)
         self.spectrum_plot.showGrid(x=True, y=True, alpha=0.18)
@@ -1183,10 +1237,13 @@ class MainWindow(QMainWindow):
             rateLimit=180,
             slot=self._handle_spectrum_mouse_moved,
         )
+        self.spectrum_plot.viewport().installEventFilter(self)
 
-        self.trace_plot = pg.PlotWidget(
+        self.trace_plot = TimedPlotWidget(
             axisItems={"bottom": self.trace_time_axis, "left": ScientificAxis("left")},
             background="w",
+            paint_owner=self,
+            paint_prefix="trace_plot",
         )
         if hasattr(self.trace_plot, "setMenuEnabled"):
             self.trace_plot.setMenuEnabled(False)
@@ -3365,6 +3422,9 @@ class MainWindow(QMainWindow):
             if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
                 self._choose_recording_project_destination()
                 return True
+        spectrum_viewport = getattr(getattr(self, "spectrum_plot", None), "viewport", None)
+        if spectrum_viewport is not None and obj is spectrum_viewport():
+            event_type = event.type()
         trace_viewport = getattr(getattr(self, "trace_plot", None), "viewport", None)
         if trace_viewport is not None and obj is trace_viewport():
             event_type = event.type()
@@ -3674,6 +3734,9 @@ class MainWindow(QMainWindow):
 
     def _flush_deferred_display_refreshes(self) -> None:
         flush_deferred_display_refreshes_for_runtime(self)
+
+    def _flush_deferred_metric_refreshes(self) -> None:
+        flush_deferred_metric_refreshes_for_runtime(self)
 
     def _flush_deferred_stats_refreshes(self) -> None:
         flush_deferred_stats_refreshes_for_runtime(self)

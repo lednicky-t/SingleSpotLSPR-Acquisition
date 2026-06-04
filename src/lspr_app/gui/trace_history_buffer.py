@@ -55,10 +55,20 @@ class AppendOnlyMetricHistoryBuffer:
         self._values = np.empty(self.capacity, dtype=np.float64)
         self._size = 0
         self._revision = 0
+        self._cached_len = 0
+        self._cached_capacity = self.capacity
+        self._cached_times = np.empty(0, dtype=np.float64)
+        self._cached_values = np.empty(0, dtype=np.float64)
+        self._last_export_mode = "empty"
 
     def clear(self) -> None:
         self._revision += 1
         self._size = 0
+        self._cached_len = 0
+        self._cached_capacity = self.capacity
+        self._cached_times = np.empty(0, dtype=np.float64)
+        self._cached_values = np.empty(0, dtype=np.float64)
+        self._last_export_mode = "empty"
 
     def append(self, time_s: float, value: float) -> None:
         self._revision += 1
@@ -72,6 +82,7 @@ class AppendOnlyMetricHistoryBuffer:
             self._times = new_times
             self._values = new_values
             self.capacity = new_capacity
+            self._cached_capacity = -1
         self._times[self._size] = float(time_s)
         self._values[self._size] = float(value)
         self._size += 1
@@ -83,10 +94,30 @@ class AppendOnlyMetricHistoryBuffer:
     def revision(self) -> int:
         return self._revision
 
+    @property
+    def last_export_mode(self) -> str:
+        return self._last_export_mode
+
     def to_arrays(self) -> tuple[np.ndarray, np.ndarray]:
         if self._size <= 0:
+            self._cached_len = 0
+            self._cached_capacity = self.capacity
+            self._cached_times = np.empty(0, dtype=np.float64)
+            self._cached_values = np.empty(0, dtype=np.float64)
+            self._last_export_mode = "empty"
             return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
-        return self._times[: self._size], self._values[: self._size]
+        if self._cached_len == self._size and self._cached_capacity == self.capacity:
+            self._last_export_mode = "hit"
+            return self._cached_times, self._cached_values
+        if self._cached_len == 0 or self._cached_capacity != self.capacity or self._cached_len > self._size:
+            self._last_export_mode = "full_rebuild"
+        else:
+            self._last_export_mode = "incremental"
+        self._cached_times = self._times[: self._size]
+        self._cached_values = self._values[: self._size]
+        self._cached_len = self._size
+        self._cached_capacity = self.capacity
+        return self._cached_times, self._cached_values
 
 
 TraceHistoryBuffer = MetricHistoryBuffer
