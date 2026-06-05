@@ -53,6 +53,24 @@ _GUI_KEYWORDS = (
 )
 
 
+def _is_performance_diagnostic(source: object, text: object) -> bool:
+    source_s = str(source or "").lower()
+    text_s = str(text or "").lower()
+    if "diagnostic" in source_s or "performance" in source_s:
+        return True
+    if "gui callback" in text_s:
+        return True
+    if "scheduler dispatch" in text_s:
+        return True
+    if "paint" in text_s and "ms" in text_s:
+        return True
+    if "took" in text_s and "ms" in text_s:
+        return True
+    if "frame skipped" in text_s:
+        return True
+    return False
+
+
 def _plain_text(value: object) -> str:
     text = unescape(_HTML_TAG_RE.sub("", str(value)))
     return " ".join(text.split()).strip()
@@ -197,8 +215,7 @@ def build_pipeline_timing_breakdown_for(window) -> dict[str, float | None]:
     acquisition_ms = _timing_value_ms(getattr(window, "_last_elapsed_ms", None))
     live_result_delay_ms = _timing_value_ms(getattr(window, "_last_live_result_poll_delay_ms", None))
     live_acquisition_flush_ms = _timing_value_ms(getattr(window, "_last_live_acquisition_flush_ms", None))
-    live_processed_delay_ms = _timing_value_ms(getattr(window, "_last_live_processed_poll_delay_ms", None))
-    live_processed_flush_ms = _timing_value_ms(getattr(window, "_last_live_processed_flush_ms", None))
+    live_visual_flush_ms = _timing_value_ms(getattr(window, "_last_live_processed_flush_ms", None))
     display_refresh_delay_ms = _timing_value_ms(getattr(window, "_last_display_refresh_delay_ms", None))
     stats_refresh_delay_ms = _timing_value_ms(getattr(window, "_last_stats_refresh_delay_ms", None))
     summary_refresh_ms = _timing_value_ms(getattr(window, "_last_summary_refresh_ms", None))
@@ -219,8 +236,7 @@ def build_pipeline_timing_breakdown_for(window) -> dict[str, float | None]:
             acquisition_ms,
             live_result_delay_ms,
             live_acquisition_flush_ms,
-            live_processed_delay_ms,
-            live_processed_flush_ms,
+            live_visual_flush_ms,
             display_refresh_delay_ms,
             stats_refresh_delay_ms,
             summary_refresh_ms,
@@ -246,8 +262,7 @@ def build_pipeline_timing_breakdown_for(window) -> dict[str, float | None]:
         "acquisition_ms": acquisition_ms,
         "live_result_delay_ms": live_result_delay_ms,
         "live_acquisition_flush_ms": live_acquisition_flush_ms,
-        "live_processed_delay_ms": live_processed_delay_ms,
-        "live_processed_flush_ms": live_processed_flush_ms,
+        "live_visual_flush_ms": live_visual_flush_ms,
         "display_refresh_delay_ms": display_refresh_delay_ms,
         "stats_refresh_delay_ms": stats_refresh_delay_ms,
         "summary_refresh_ms": summary_refresh_ms,
@@ -283,6 +298,16 @@ def clear_log_terminal(window) -> None:
     buffer = getattr(window, "_log_buffer", None)
     if buffer is not None:
         buffer.clear()
+    for attr_name in (
+        "_log_received_events",
+        "_log_buffer_enqueue_events",
+        "_log_perf_suppressed_events",
+        "_log_throttle_suppressed_events",
+        "_log_append_events",
+    ):
+        events = getattr(window, attr_name, None)
+        if events is not None:
+            events.clear()
     window._log_buffer_requested_at = None
     buffer_timer = getattr(window, "_log_buffer_timer", None)
     if buffer_timer is not None:
@@ -413,7 +438,7 @@ def flush_log_buffer(window) -> None:
         except (TypeError, ValueError):
             window._last_log_buffer_delay_ms = None
     flush_budget_ms = 12.0
-    max_records_per_flush = 25
+    max_records_per_flush = 20
     if not getattr(window, "_log_buffering_enabled", True):
         buffer = getattr(window, "_log_buffer", None)
         if buffer:
@@ -491,6 +516,14 @@ def append_log_record(window, levelno: int, source: str, text: str) -> None:
         return
     if int(levelno) not in window._log_emit_levels:
         return
+    received_events = getattr(window, "_log_received_events", None)
+    if received_events is not None:
+        received_events.append((perf_counter(), int(levelno), str(source), line))
+    if _is_performance_diagnostic(source, line) and int(levelno) < logging.ERROR:
+        suppressed_events = getattr(window, "_log_perf_suppressed_events", None)
+        if suppressed_events is not None:
+            suppressed_events.append((perf_counter(), int(levelno), str(source), line))
+        return
     if int(levelno) >= logging.WARNING:
         append_log_record_now(window, levelno, source, line)
         return
@@ -501,6 +534,9 @@ def append_log_record(window, levelno: int, source: str, text: str) -> None:
     buffer_timer = getattr(window, "_log_buffer_timer", None)
     if buffer is not None and buffer_timer is not None:
         buffer.append((int(levelno), str(source), line))
+        buffer_events = getattr(window, "_log_buffer_enqueue_events", None)
+        if buffer_events is not None:
+            buffer_events.append((perf_counter(), int(levelno), str(source), line))
         if window._log_buffer_requested_at is None:
             window._log_buffer_requested_at = perf_counter()
         return
@@ -547,6 +583,12 @@ def insert_log_record(window, cursor: QTextCursor, levelno: int, source: str, te
 def append_log_record_now(window, levelno: int, source: str, text: str) -> None:
     if not hasattr(window, "log_terminal"):
         return
+    if _is_performance_diagnostic(source, text) and int(levelno) < logging.ERROR:
+        suppressed_events = getattr(window, "_log_perf_suppressed_events", None)
+        if suppressed_events is not None:
+            suppressed_events.append((perf_counter(), int(levelno), str(source), str(text)))
+        return
+    started = perf_counter()
     _append_log_history(window, levelno, source, text)
     cursor = window.log_terminal.textCursor()
     cursor.movePosition(QTextCursor.MoveOperation.End)
@@ -556,6 +598,11 @@ def append_log_record_now(window, levelno: int, source: str, text: str) -> None:
     finally:
         cursor.endEditBlock()
         window.log_terminal.setTextCursor(cursor)
+        elapsed_ms = (perf_counter() - started) * 1000.0
+        window._last_log_append_now_ms = elapsed_ms
+        events = getattr(window, "_log_append_events", None)
+        if events is not None:
+            events.append((perf_counter(), int(levelno), float(elapsed_ms)))
 
 
 def log_event(window, levelno: int, message: str, source: str = "main") -> None:
@@ -595,8 +642,11 @@ def log_throttled(window, key: str, message: str, *, level: int = logging.DEBUG,
     state = window._log_throttle_state
     previous = state.get(str(key))
     if previous is not None:
-        previous_at, previous_line = previous
-        if previous_line == line and (now - previous_at) < float(min_interval):
+        previous_at, _previous_line = previous
+        if (now - previous_at) < float(min_interval):
+            suppressed_events = getattr(window, "_log_throttle_suppressed_events", None)
+            if suppressed_events is not None:
+                suppressed_events.append((now, str(key), line))
             return
     state[str(key)] = (now, line)
     log_event(window, level, line)

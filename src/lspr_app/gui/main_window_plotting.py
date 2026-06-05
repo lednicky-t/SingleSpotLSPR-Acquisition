@@ -289,6 +289,8 @@ def flush_deferred_display_refreshes_for(window) -> None:
     _flush_deferred_display_refreshes(window)
     elapsed_ms = (perf_counter() - started) * 1000.0
     window._last_deferred_display_refresh_ms = elapsed_ms
+    if bool(getattr(window, "_live_active", False)):
+        window._live_mode_deferred_display_flush_count = int(getattr(window, "_live_mode_deferred_display_flush_count", 0)) + 1
     if processing_debug_mode_enabled():
         if elapsed_ms >= 2.0:
             window._log_throttled(
@@ -331,6 +333,8 @@ def flush_deferred_metric_refreshes_for(window) -> None:
             window._metric_flush_in_progress = False
     elapsed_ms = (perf_counter() - started) * 1000.0
     window._last_deferred_metric_refresh_ms = elapsed_ms
+    if bool(getattr(window, "_live_active", False)):
+        window._live_mode_deferred_metric_flush_count = int(getattr(window, "_live_mode_deferred_metric_flush_count", 0)) + 1
     if processing_debug_mode_enabled():
         if elapsed_ms >= 2.0:
             window._log_throttled(
@@ -357,6 +361,8 @@ def flush_deferred_stats_refreshes_for(window) -> None:
     _flush_deferred_stats_refreshes(window)
     elapsed_ms = (perf_counter() - started) * 1000.0
     window._last_deferred_stats_refresh_ms = elapsed_ms
+    if bool(getattr(window, "_live_active", False)):
+        window._live_mode_deferred_stats_flush_count = int(getattr(window, "_live_mode_deferred_stats_flush_count", 0)) + 1
     if processing_debug_mode_enabled():
         if elapsed_ms >= 2.0:
             window._log_throttled(
@@ -674,7 +680,7 @@ def headroom_value_text_for(headroom_ratio: float | None) -> str:
 
 
 def handle_live_setting_change_for(window) -> None:
-    window._request_deferred_ui_refresh(live_estimate=True)
+    window._ui_refresh_state.live_estimate_dirty = True
     if window._live_active:
         window._display_window_ms = 1000.0 / max(window.live_rate_spin.value(), 1e-9)
         window._live_ui_refresh_delay_ms = max(int(round(window._display_window_ms)), 16)
@@ -684,8 +690,15 @@ def handle_live_setting_change_for(window) -> None:
             window._live_worker.update_settings(window._current_settings())
         if window._live_processing_worker is not None:
             window._live_processing_worker.update_settings(window._current_processing_settings())
-        window._request_deferred_ui_refresh(trace_plot=True, live_estimate=True)
-        window._request_plot_refresh()
+        # Re-arm the live polling cadence so the new refresh rate takes effect immediately.
+        if hasattr(window, "_ui_task_scheduler"):
+            window._ui_task_scheduler.cancel("live_visual_refresh")
+            window._ui_task_scheduler.cancel("live_acquisition")
+            window._ui_task_scheduler.cancel("live_processed")
+        window._ui_refresh_state.metric_plot_dirty = True
+        window._ui_refresh_state.telemetry_dirty = True
+        window._ui_refresh_state.pending_metric_label = "Peak position (nm)"
+        window._request_live_visual_refresh(0)
         window._request_trace_autoscale()
         window.status_label.setText("Live display window reset after settings change.")
         window._log_debug("Live display reset after settings change.")

@@ -167,16 +167,28 @@ def _format_hhmmss(seconds: float) -> str:
 
 def _metric_plot_refresh_min_interval_ms(window) -> float:
     interval_ms = float(getattr(window, "_metric_plot_refresh_min_interval_ms", 250.0))
-    if bool(getattr(window, "_live_active", False)):
-        interval_ms = max(interval_ms, 500.0)
     last_trace_ms = getattr(window, "_last_deferred_ui_trace_plot_ms", None)
     if last_trace_ms is not None:
         try:
             last_trace_ms = float(last_trace_ms)
         except (TypeError, ValueError):
             last_trace_ms = None
-    if last_trace_ms is not None and np.isfinite(last_trace_ms) and last_trace_ms >= 25.0:
-        interval_ms = max(interval_ms, min(1000.0, last_trace_ms * 4.0))
+    recent_trace_paint_ms = getattr(window, "_trace_plot_paint_recent_avg_ms", None)
+    if recent_trace_paint_ms is not None:
+        try:
+            recent_trace_paint_ms = float(recent_trace_paint_ms)
+        except (TypeError, ValueError):
+            recent_trace_paint_ms = None
+    pressure_ms = max(
+        [
+            value
+            for value in (last_trace_ms, recent_trace_paint_ms)
+            if value is not None and np.isfinite(value)
+        ],
+        default=0.0,
+    )
+    if pressure_ms >= 40.0:
+        interval_ms = max(interval_ms, min(1000.0, pressure_ms * 4.0))
     return interval_ms
 
 
@@ -194,6 +206,12 @@ def _set_plot_label_if_changed(plot, axis: str, text: str, window=None, cache_at
     if window is not None and cache_attr is not None:
         current = getattr(window, cache_attr, None)
         if current == text:
+            owner = getattr(plot, "_diagnostics_owner", None)
+            prefix = getattr(plot, "_diagnostics_prefix", "")
+            if owner is not None and prefix:
+                events = getattr(owner, "_plot_operation_events", None)
+                if events is not None:
+                    events.append((perf_counter(), prefix, "setLabel_skipped"))
             return
         setattr(window, cache_attr, text)
     plot.setLabel(axis, text)
@@ -203,7 +221,19 @@ def _set_visible_if_changed(widget, visible: bool) -> None:
     try:
         current_visible = bool(widget.isVisible()) if hasattr(widget, "isVisible") else None
         if current_visible is not None and current_visible == bool(visible):
+            owner = getattr(widget, "_diagnostics_owner", None)
+            prefix = getattr(widget, "_diagnostics_prefix", "")
+            if owner is not None and prefix:
+                events = getattr(owner, "_plot_operation_events", None)
+                if events is not None:
+                    events.append((perf_counter(), prefix, "setVisible_skipped"))
             return
+        owner = getattr(widget, "_diagnostics_owner", None)
+        prefix = getattr(widget, "_diagnostics_prefix", "")
+        if owner is not None and prefix:
+            events = getattr(owner, "_plot_operation_events", None)
+            if events is not None:
+                events.append((perf_counter(), prefix, "setVisible"))
         widget.setVisible(bool(visible))
     except Exception:
         try:
@@ -481,11 +511,10 @@ def flush_plot_refreshes(window) -> None:
             refresh_timestamps = []
             window._plot_refresh_timestamps = refresh_timestamps
         refresh_timestamps.append(finished)
-        window._plot_refresh_timestamps = [
-            timestamp
-            for timestamp in refresh_timestamps
-            if (finished - float(timestamp)) <= float(getattr(window, "_plot_refresh_rate_window_s", 5.0))
-        ]
+        window_frames = max(2, int(getattr(window, "_plot_refresh_rate_window_frames", 5)))
+        if len(refresh_timestamps) > window_frames:
+            refresh_timestamps = refresh_timestamps[-window_frames:]
+        window._plot_refresh_timestamps = refresh_timestamps
         if len(window._plot_refresh_timestamps) >= 2:
             first_timestamp = float(window._plot_refresh_timestamps[0])
             last_timestamp = float(window._plot_refresh_timestamps[-1])
@@ -498,8 +527,8 @@ def flush_plot_refreshes(window) -> None:
             window._actual_plot_refresh_rate_hz = None
         if processing_debug_mode_enabled():
             gap_text = "-" if window._last_plot_refresh_gap_ms is None else f"{window._last_plot_refresh_gap_ms:.2f} ms"
-            window._plot_refresh_rate_window_s = float(getattr(window, "_plot_refresh_rate_window_s", 5.0))
-            refresh_window_text = f"{window._plot_refresh_rate_window_s:.1f} s"
+            window_frames = max(2, int(getattr(window, "_plot_refresh_rate_window_frames", 5)))
+            refresh_window_text = f"{window_frames} frames"
             actual_text = "-" if window._actual_plot_refresh_rate_hz is None else f"{window._actual_plot_refresh_rate_hz:.2f} Hz"
             window._log_throttled(
                 "gui_plot_refresh",
@@ -529,8 +558,29 @@ def autoscale_spectrum_plot(window) -> None:
     x_finite = x[finite]
     y_span = float(np.max(y) - np.min(y))
     y_pad = max(y_span * 0.08, 1e-6)
-    window.spectrum_plot.setXRange(float(np.min(x_finite)), float(np.max(x_finite)), padding=0.0)
-    window.spectrum_plot.setYRange(float(np.min(y)) - y_pad, float(np.max(y)) + y_pad, padding=0.0)
+    new_range = (
+        float(np.min(x_finite)),
+        float(np.max(x_finite)),
+        float(np.min(y) - y_pad),
+        float(np.max(y) + y_pad),
+    )
+    last_range = getattr(window, "_last_spectrum_autoscale_range", None)
+    if isinstance(last_range, tuple) and len(last_range) == 4:
+        try:
+            old_x0, old_x1, old_y0, old_y1 = (float(v) for v in last_range)
+            new_x0, new_x1, new_y0, new_y1 = new_range
+            old_x_span = max(abs(old_x1 - old_x0), 1e-9)
+            old_y_span = max(abs(old_y1 - old_y0), 1e-9)
+            x_delta = max(abs(new_x0 - old_x0), abs(new_x1 - old_x1)) / old_x_span
+            y_delta = max(abs(new_y0 - old_y0), abs(new_y1 - old_y1)) / old_y_span
+            if x_delta < 0.01 and y_delta < 0.02:
+                window._autoscale_residual_axis()
+                return
+        except Exception:
+            pass
+    window.spectrum_plot.setXRange(new_range[0], new_range[1], padding=0.0)
+    window.spectrum_plot.setYRange(new_range[2], new_range[3], padding=0.0)
+    window._last_spectrum_autoscale_range = new_range
     window._autoscale_residual_axis()
 
 
@@ -619,26 +669,25 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
         float(np.min(y) - y_pad),
         float(np.max(y) + y_pad),
     )
-    if not force:
-        last_range = getattr(window, "_last_metric_autoscale_range", None)
-        should_apply = True
-        if isinstance(last_range, tuple) and len(last_range) == 4:
-            try:
-                old_x0, old_x1, old_y0, old_y1 = (float(v) for v in last_range)
-                new_x0, new_x1, new_y0, new_y1 = new_range
-                old_x_span = max(abs(old_x1 - old_x0), 1e-9)
-                old_y_span = max(abs(old_y1 - old_y0), 1e-9)
-                x_delta = max(abs(new_x0 - old_x0), abs(new_x1 - old_x1)) / old_x_span
-                y_delta = max(abs(new_y0 - old_y0), abs(new_y1 - old_y1)) / old_y_span
-                x_threshold = float(getattr(window, "_metric_autoscale_x_change_fraction", 0.01))
-                y_threshold = float(getattr(window, "_metric_autoscale_y_change_fraction", 0.02))
-                should_apply = x_delta >= x_threshold or y_delta >= y_threshold
-            except Exception:
-                should_apply = True
-        if not should_apply:
-            window._metric_autoscale_pending = False
-            window._last_metric_autoscale_ms = (perf_counter() - started) * 1000.0
-            return
+    last_range = getattr(window, "_last_metric_autoscale_range", None)
+    should_apply = True
+    if isinstance(last_range, tuple) and len(last_range) == 4:
+        try:
+            old_x0, old_x1, old_y0, old_y1 = (float(v) for v in last_range)
+            new_x0, new_x1, new_y0, new_y1 = new_range
+            old_x_span = max(abs(old_x1 - old_x0), 1e-9)
+            old_y_span = max(abs(old_y1 - old_y0), 1e-9)
+            x_delta = max(abs(new_x0 - old_x0), abs(new_x1 - old_x1)) / old_x_span
+            y_delta = max(abs(new_y0 - old_y0), abs(new_y1 - old_y1)) / old_y_span
+            x_threshold = float(getattr(window, "_metric_autoscale_x_change_fraction", 0.01))
+            y_threshold = float(getattr(window, "_metric_autoscale_y_change_fraction", 0.02))
+            should_apply = x_delta >= x_threshold or y_delta >= y_threshold
+        except Exception:
+            should_apply = True
+    if not should_apply:
+        window._metric_autoscale_pending = False
+        window._last_metric_autoscale_ms = (perf_counter() - started) * 1000.0
+        return
     window._trace_view_autoscaling = True
     try:
         window.trace_plot.setXRange(new_range[0], new_range[1], padding=0.0)
@@ -733,17 +782,18 @@ def refresh_metric_plot(window, trace_label: str) -> None:
         if content_mode == "heatmap":
             _set_plot_label_if_changed(window.trace_plot, "left", "Wavelength (nm)", window, "_trace_left_label_text")
             _set_trace_time_axis_mode(window, None, clock_mode=clock_mode)
-            if active_series:
-                render_metric_series(window, active_series, clock_mode=clock_mode)
-            else:
-                for curve in window.trace_curves.values():
+            for curve in window.trace_curves.values():
+                if hasattr(curve, "setData"):
                     curve.setData([], [])
-                    _set_visible_if_changed(curve, False)
+                _set_visible_if_changed(curve, False)
+            if hasattr(window, "trace_legend"):
+                _set_visible_if_changed(window.trace_legend, False)
             render_sensorgram_heatmap(window, window._sensorgram_heatmap_history, clock_mode=clock_mode)
             request_metric_autoscale(window)
             return
         if active_series:
             _set_plot_label_if_changed(window.trace_plot, "left", trace_label, window, "_trace_left_label_text")
+            previous_visible_mode = getattr(window, "_visible_trace_mode", None)
             active_x_values = None
             if isinstance(active_series, dict) and active_series:
                 first_series = next(iter(active_series.values()))
@@ -757,8 +807,9 @@ def refresh_metric_plot(window, trace_label: str) -> None:
                         active_x_values = np.asarray(first_series[0], dtype=np.float64)
                     except Exception:
                         active_x_values = None
-            _set_trace_time_axis_mode(window, active_x_values, clock_mode=clock_mode)
-            render_metric_series(window, active_series, clock_mode=clock_mode)
+            visible_mode = _set_trace_time_axis_mode(window, active_x_values, clock_mode=clock_mode)
+            metric_changed = render_metric_series(window, active_series, clock_mode=clock_mode)
+            window._visible_trace_mode = visible_mode
             _set_visible_if_changed(window.trace_heatmap_image, False)
             if hasattr(window, "trace_heatmap_notice_item"):
                 _set_visible_if_changed(window.trace_heatmap_notice_item, False)
@@ -766,7 +817,8 @@ def refresh_metric_plot(window, trace_label: str) -> None:
                 _set_visible_if_changed(window.trace_legend, True)
             for curve in window.trace_curves.values():
                 _set_visible_if_changed(curve, True)
-            request_metric_autoscale(window)
+            if metric_changed or previous_visible_mode != visible_mode:
+                request_metric_autoscale(window)
             return
 
         if content_mode == "heatmap":
@@ -801,7 +853,7 @@ def render_metric_series(
     window,
     history: dict[str, tuple[np.ndarray, np.ndarray] | list[tuple[object, float]]],
     clock_mode: bool,
-) -> None:
+) -> bool:
     started = perf_counter()
     series_export_ms = 0.0
     view_prep_ms = 0.0
@@ -851,11 +903,12 @@ def render_metric_series(
         render_state_cache = {}
         window._metric_render_state_cache = render_state_cache
     downsampling_enabled = bool(getattr(window, "_sensorgram_downsampling_enabled", True))
+    curve_downsampling_factor = 1
     cache = getattr(window, "_plot_view_cache", None)
     for metric_name, curve in window.trace_curves.items():
         series = history.get(metric_name, [])
         if metric_name not in window._selected_trace_metrics() or series is None:
-            curve.setDownsampling(auto=False, ds=1)
+            curve.setDownsampling(auto=False, ds=curve_downsampling_factor)
             render_state_key = (metric_name, "empty", downsampling_enabled)
             if render_state_cache.get(metric_name) != render_state_key:
                 curve.setData([], [])
@@ -866,14 +919,14 @@ def render_metric_series(
         x, y = _series_to_arrays(series)
         series_export_ms += (perf_counter() - series_started) * 1000.0
         if len(x) == 0 or len(y) == 0:
-            curve.setDownsampling(auto=False, ds=1)
+            curve.setDownsampling(auto=False, ds=curve_downsampling_factor)
             render_state_key = (metric_name, "empty", downsampling_enabled)
             if render_state_cache.get(metric_name) != render_state_key:
                 curve.setData([], [])
                 render_state_cache[metric_name] = render_state_key
             continue
         series_token = build_metric_series_token(window, metric_name)
-        curve.setDownsampling(auto=False, ds=1)
+        curve.setDownsampling(auto=False, ds=curve_downsampling_factor)
         display_x = x
         display_y = y
         view_started = perf_counter()
@@ -977,6 +1030,7 @@ def render_metric_series(
     window._last_metric_render_setdata_skips = setdata_skips
     window._last_metric_render_raw_points = raw_points
     window._last_metric_render_display_points = display_points
+    changed = setdata_calls > 0
     if processing_debug_mode_enabled():
         if elapsed_ms >= 2.0:
             window._log_throttled(
@@ -990,6 +1044,7 @@ def render_metric_series(
                 level=logging.INFO,
                 min_interval=0.5,
             )
+    return changed
 
 
 def render_sensorgram_heatmap(

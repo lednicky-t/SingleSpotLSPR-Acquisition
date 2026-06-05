@@ -2,6 +2,31 @@
 
 This document defines the core runtime rules for acquisition, processing, plotting, and file writing in `sLSPR acq`.
 
+## Simplification Rule
+
+Prefer simple, explicit runtime architecture over layered helper machinery.
+
+Do not solve performance or coordination problems by adding more schedulers, deferred tasks, queues, throttles, wrappers, or diagnostics unless there is a measured need and no simpler alternative.
+
+Keep raw acquisition/recording, processing, and GUI plotting as separate layers with clear ownership:
+
+- acquisition and recording must be continuous and lossless
+- processing and plotting may be freshness-based and may skip stale frames
+
+Use queues only at real thread/process/disk/device boundaries, and use a single clear GUI refresh cadence where possible.
+
+Avoid chaining callbacks such as `queue -> scheduler -> deferred flush -> throttle -> log -> GUI update`.
+
+Before adding a helper or abstraction, explain what concrete boundary or repeated logic it simplifies, and verify it does not create hidden control flow, duplicate state, or event-loop work.
+
+Prefer deleting or bypassing unnecessary orchestration over adding new coordination code.
+
+## Hard Rule
+
+When fixing bugs, first simplify the data path.
+
+Do not wrap a bad flow in more helpers. A correct fix should make the live pipeline easier to explain, not harder.
+
 ## Hard Rules
 
 - Raw acquisition and raw storage are lossless.

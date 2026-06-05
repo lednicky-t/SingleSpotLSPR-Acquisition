@@ -594,10 +594,13 @@ def downsample_metric_series_for_view(
     if not enabled:
         return x, y
 
-    if view_width_px is None or view_width_px <= 0:
-        target_points = default_points
-    else:
-        target_points = max(minimum_points, int(view_width_px * oversample))
+    target_points = _target_points_from_width(
+        view_width_px,
+        enabled=enabled,
+        minimum_points=minimum_points,
+        oversample=oversample,
+        default_points=default_points,
+    )
 
     if len(x) <= target_points:
         return x, y

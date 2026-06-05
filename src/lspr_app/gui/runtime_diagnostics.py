@@ -65,12 +65,121 @@ def _paint_summary_text(window: Any, prefix: str) -> str:
 
 
 def _recent_paint_summary_text(window: Any, prefix: str, seconds: float = 10.0) -> str:
+    recent_count = getattr(window, f"_{prefix}_paint_recent_count", None)
+    recent_total_ms = getattr(window, f"_{prefix}_paint_recent_total_ms", None)
+    recent_max_ms = getattr(window, f"_{prefix}_paint_recent_max_ms", None)
+    recent_avg_ms = getattr(window, f"_{prefix}_paint_recent_avg_ms", None)
+    if all(value is not None for value in (recent_count, recent_total_ms, recent_max_ms, recent_avg_ms)):
+        try:
+            count = max(int(recent_count), 0)
+            total_ms = float(recent_total_ms)
+            max_ms = float(recent_max_ms)
+            avg_ms = float(recent_avg_ms)
+            return f"count={count} total={total_ms:.1f} ms max={max_ms:.1f} ms avg={avg_ms:.2f} ms"
+        except (TypeError, ValueError):
+            pass
     events = getattr(window, "_plot_paint_events", None)
     if not events:
         return "-"
     now = perf_counter()
     try:
         values = [elapsed for ts, name, elapsed in events if name == prefix and (now - float(ts)) <= float(seconds)]
+    except Exception:
+        return "-"
+    if not values:
+        return "count=0"
+    total_ms = float(sum(values))
+    count = len(values)
+    return f"count={count} total={total_ms:.1f} ms max={max(values):.1f} ms avg={total_ms / count:.2f} ms"
+
+
+def _recent_plot_operation_summary_text(window: Any, prefix: str, seconds: float = 10.0) -> str:
+    events = getattr(window, "_plot_operation_events", None)
+    if not events:
+        return "-"
+    now = perf_counter()
+    try:
+        filtered = [op for ts, name, op in events if name == prefix and (now - float(ts)) <= float(seconds)]
+    except Exception:
+        return "-"
+    if not filtered:
+        return "count=0"
+    counts: dict[str, int] = {}
+    for op in filtered:
+        counts[str(op)] = counts.get(str(op), 0) + 1
+    order = ["setData", "setData_skipped", "setXRange", "setYRange", "autoRange", "enableAutoRange", "setLabel", "setLabel_skipped", "setVisible", "setVisible_skipped"]
+    parts = [f"{name}={counts[name]}" for name in order if counts.get(name, 0) > 0]
+    for name in sorted(counts):
+        if name not in order:
+            parts.append(f"{name}={counts[name]}")
+    return f"count={len(filtered)} " + " | ".join(parts)
+
+
+def _recent_log_append_summary_text(window: Any, seconds: float = 10.0) -> str:
+    events = getattr(window, "_log_append_events", None)
+    if not events:
+        return "-"
+    now = perf_counter()
+    try:
+        values = [elapsed for ts, _levelno, elapsed in events if (now - float(ts)) <= float(seconds)]
+    except Exception:
+        return "-"
+    if not values:
+        return "count=0"
+    total_ms = float(sum(values))
+    count = len(values)
+    return f"count={count} total={total_ms:.1f} ms max={max(values):.1f} ms avg={total_ms / count:.2f} ms"
+
+
+def _recent_log_event_count_text(window: Any, attr_name: str, seconds: float = 10.0) -> str:
+    events = getattr(window, attr_name, None)
+    if not events:
+        return "-"
+    now = perf_counter()
+    try:
+        count = sum(1 for event in events if (now - float(event[0])) <= float(seconds))
+    except Exception:
+        return "-"
+    return f"count={count}"
+
+
+def _gui_log_visible_entries_text(window: Any) -> str:
+    log_terminal = getattr(window, "log_terminal", None)
+    if log_terminal is None:
+        return "-"
+    try:
+        return str(max(int(log_terminal.document().blockCount()), 0))
+    except Exception:
+        return "-"
+
+
+def _gui_log_history_entries_text(window: Any) -> str:
+    history = getattr(window, "_log_history", None)
+    if history is None:
+        return "-"
+    try:
+        return str(max(int(len(history)), 0))
+    except Exception:
+        return "-"
+
+
+def _gui_log_pending_entries_text(window: Any) -> str:
+    buffer = getattr(window, "_log_buffer", None)
+    if buffer is None:
+        return "-"
+    try:
+        return str(max(int(len(buffer)), 0))
+    except Exception:
+        return "-"
+
+
+def _axis_tick_summary_text(window: Any, prefix: str, seconds: float = 10.0) -> str:
+    events = getattr(window, "_axis_tick_events", None)
+    if not events:
+        return "-"
+    now = perf_counter()
+    try:
+        values = [elapsed for ts, name, _count, elapsed in events if name == prefix and (now - float(ts)) <= float(seconds)]
     except Exception:
         return "-"
     if not values:
@@ -203,6 +312,16 @@ class SessionDiagnosticsSnapshot:
     scheduler_pending_text: str
     scheduler_task_breakdown_lines: list[str]
     log_buffer_total_text: str
+    log_records_generated_text: str
+    log_records_enqueued_text: str
+    log_records_appended_text: str
+    log_append_now_text: str
+    log_append_recent_text: str
+    gui_log_visible_entries_text: str
+    gui_log_history_entries_text: str
+    gui_log_pending_entries_text: str
+    log_throttle_suppressed_text: str
+    log_perf_suppressed_text: str
     gui_housekeeping_total_text: str
     processing_text: str
     wait_text: str
@@ -236,6 +355,11 @@ class SessionDiagnosticsSnapshot:
     trace_plot_paint_summary_text: str
     spectrum_plot_paint_recent_text: str
     trace_plot_paint_recent_text: str
+    spectrum_plot_operations_text: str
+    trace_plot_operations_text: str
+    trace_time_axis_tick_text: str
+    spectrum_left_axis_tick_text: str
+    trace_left_axis_tick_text: str
     sensorgram_heatmap_arrays_text: str
     sensorgram_heatmap_image_text: str
     sensorgram_heatmap_axes_text: str
@@ -246,6 +370,11 @@ class SessionDiagnosticsSnapshot:
     live_processed_queue_max_text: str
     live_recording_queue_text: str
     live_recording_queue_max_text: str
+    live_visual_refresh_count_text: str
+    live_visual_refresh_text: str
+    live_mode_deferred_display_flush_count_text: str
+    live_mode_deferred_metric_flush_count_text: str
+    live_mode_deferred_stats_flush_count_text: str
     pipeline_gap_lines: list[str]
     spectrum_redraw_lines: list[str]
     device_acquisition_lines: list[str]
@@ -264,8 +393,8 @@ class SessionDiagnosticsSnapshot:
                 simulation_rate_text = "-"
         actual_rate_text = "-"
         if getattr(window, "_actual_plot_refresh_rate_hz", None) is not None:
-            window_s = float(getattr(window, "_plot_refresh_rate_window_s", 5.0))
-            actual_rate_text = f"{float(window._actual_plot_refresh_rate_hz):.2f} Hz (recent {window_s:.1f}s avg)"
+            window_frames = max(2, int(getattr(window, "_plot_refresh_rate_window_frames", 5)))
+            actual_rate_text = f"{float(window._actual_plot_refresh_rate_hz):.2f} Hz (recent {window_frames} frames avg)"
         current_runtime_text, total_runtime_text = _measurement_runtime_text(window)
         scheduler = getattr(window, "_ui_task_scheduler", None)
         scheduler_lag_text = _timing_plain_text(getattr(scheduler, "_last_dispatch_lag_ms", None))
@@ -358,8 +487,28 @@ class SessionDiagnosticsSnapshot:
                 elapsed_ms = None
             if elapsed_ms is not None:
                 min_interval_ms = float(getattr(window, "_metric_plot_refresh_min_interval_ms", 250.0))
-                if bool(getattr(window, "_live_active", False)):
-                    min_interval_ms = max(min_interval_ms, 500.0)
+                last_trace_ms = getattr(window, "_last_deferred_ui_trace_plot_ms", None)
+                if last_trace_ms is not None:
+                    try:
+                        last_trace_ms = float(last_trace_ms)
+                    except (TypeError, ValueError):
+                        last_trace_ms = None
+                recent_trace_paint_ms = getattr(window, "_trace_plot_paint_recent_avg_ms", None)
+                if recent_trace_paint_ms is not None:
+                    try:
+                        recent_trace_paint_ms = float(recent_trace_paint_ms)
+                    except (TypeError, ValueError):
+                        recent_trace_paint_ms = None
+                pressure_ms = max(
+                    [
+                        value
+                        for value in (last_trace_ms, recent_trace_paint_ms)
+                        if value is not None and np.isfinite(value)
+                    ],
+                    default=0.0,
+                )
+                if pressure_ms >= 40.0:
+                    min_interval_ms = max(min_interval_ms, min(1000.0, pressure_ms * 4.0))
                 remaining_ms = max(min_interval_ms - elapsed_ms, 0.0)
                 trace_throttle_text = f"{remaining_ms:.1f} ms"
         metric_render_series_text = _timing_plain_text(
@@ -377,6 +526,11 @@ class SessionDiagnosticsSnapshot:
         trace_plot_paint_summary_text = _paint_summary_text(window, "trace_plot")
         spectrum_plot_paint_recent_text = _recent_paint_summary_text(window, "spectrum_plot")
         trace_plot_paint_recent_text = _recent_paint_summary_text(window, "trace_plot")
+        spectrum_plot_operations_text = _recent_plot_operation_summary_text(window, "spectrum_plot")
+        trace_plot_operations_text = _recent_plot_operation_summary_text(window, "trace_plot")
+        trace_time_axis_tick_text = _axis_tick_summary_text(window, "trace_time_axis")
+        spectrum_left_axis_tick_text = _axis_tick_summary_text(window, "spectrum_left_axis")
+        trace_left_axis_tick_text = _axis_tick_summary_text(window, "trace_left_axis")
         sensorgram_heatmap_arrays_text = _timing_plain_text(getattr(window, "_last_sensorgram_heatmap_arrays_ms", None))
         sensorgram_heatmap_image_text = _timing_plain_text(getattr(window, "_last_sensorgram_heatmap_image_ms", None))
         sensorgram_heatmap_axes_text = _timing_plain_text(getattr(window, "_last_sensorgram_heatmap_axes_ms", None))
@@ -390,14 +544,28 @@ class SessionDiagnosticsSnapshot:
         acquisition_ms = getattr(window, "_last_elapsed_ms", None)
         live_result_delay_ms = getattr(window, "_last_live_result_poll_delay_ms", None)
         live_acquisition_flush_ms = getattr(window, "_last_live_acquisition_flush_ms", None)
-        live_processed_delay_ms = getattr(window, "_last_live_processed_poll_delay_ms", None)
-        live_processed_flush_ms = getattr(window, "_last_live_processed_flush_ms", None)
+        live_visual_flush_ms = getattr(window, "_last_live_processed_flush_ms", None)
+        live_visual_refresh_count_text = str(int(getattr(window, "_live_visual_refresh_count", 0)))
+        live_visual_refresh_text = _timing_plain_text(getattr(window, "_last_live_visual_refresh_ms", None))
+        live_mode_deferred_display_flush_count_text = str(int(getattr(window, "_live_mode_deferred_display_flush_count", 0)))
+        live_mode_deferred_metric_flush_count_text = str(int(getattr(window, "_live_mode_deferred_metric_flush_count", 0)))
+        live_mode_deferred_stats_flush_count_text = str(int(getattr(window, "_live_mode_deferred_stats_flush_count", 0)))
         display_refresh_delay_ms = getattr(window, "_last_display_refresh_delay_ms", None)
         stats_refresh_delay_ms = getattr(window, "_last_stats_refresh_delay_ms", None)
         summary_refresh_ms = getattr(window, "_last_summary_refresh_ms", None)
         session_stats_refresh_ms = getattr(window, "_last_session_stats_refresh_ms", None)
         log_buffer_delay_ms = getattr(window, "_last_log_buffer_delay_ms", None)
         log_buffer_flush_ms = getattr(window, "_last_log_buffer_flush_ms", None)
+        log_records_generated_text = _recent_log_event_count_text(window, "_log_received_events")
+        log_records_enqueued_text = _recent_log_event_count_text(window, "_log_buffer_enqueue_events")
+        log_records_appended_text = _recent_log_append_summary_text(window)
+        log_append_now_text = _timing_plain_text(getattr(window, "_last_log_append_now_ms", None))
+        log_append_recent_text = _recent_log_append_summary_text(window)
+        gui_log_visible_entries_text = _gui_log_visible_entries_text(window)
+        gui_log_history_entries_text = _gui_log_history_entries_text(window)
+        gui_log_pending_entries_text = _gui_log_pending_entries_text(window)
+        log_throttle_suppressed_text = _recent_log_event_count_text(window, "_log_throttle_suppressed_events")
+        log_perf_suppressed_text = _recent_log_event_count_text(window, "_log_perf_suppressed_events")
         processing_wait_ms = getattr(window, "_last_processing_queue_wait_ms", None)
         processing_ms = getattr(window, "_last_processing_ms", None)
         plot_refresh_delay_ms = getattr(window, "_last_plot_refresh_delay_ms", None)
@@ -411,8 +579,7 @@ class SessionDiagnosticsSnapshot:
                 acquisition_ms,
                 live_result_delay_ms,
                 live_acquisition_flush_ms,
-                live_processed_delay_ms,
-                live_processed_flush_ms,
+                live_visual_flush_ms,
                 display_refresh_delay_ms,
                 stats_refresh_delay_ms,
                 summary_refresh_ms,
@@ -434,8 +601,7 @@ class SessionDiagnosticsSnapshot:
             _timing_line("Acquisition latency", acquisition_ms),
             _timing_line("Live acquisition timer delay", live_result_delay_ms),
             _timing_line("Live acquisition flush", live_acquisition_flush_ms),
-            _timing_line("Live processing timer delay", live_processed_delay_ms),
-            _timing_line("Live processing flush", live_processed_flush_ms),
+            _timing_line("Live visual flush", live_visual_flush_ms),
             _timing_line("Display refresh timer delay", display_refresh_delay_ms),
             _timing_line("Stats refresh timer delay", stats_refresh_delay_ms),
             _timing_line("Session summary refresh", summary_refresh_ms),
@@ -507,6 +673,16 @@ class SessionDiagnosticsSnapshot:
             scheduler_pending_text=scheduler_pending_text,
             scheduler_task_breakdown_lines=scheduler_task_breakdown_lines,
             log_buffer_total_text=_timing_plain_text(getattr(window, "_last_log_buffer_total_ms", None)),
+            log_records_generated_text=log_records_generated_text,
+            log_records_enqueued_text=log_records_enqueued_text,
+            log_records_appended_text=log_records_appended_text,
+            log_append_now_text=log_append_now_text,
+            log_append_recent_text=log_append_recent_text,
+            gui_log_visible_entries_text=gui_log_visible_entries_text,
+            gui_log_history_entries_text=gui_log_history_entries_text,
+            gui_log_pending_entries_text=gui_log_pending_entries_text,
+            log_throttle_suppressed_text=log_throttle_suppressed_text,
+            log_perf_suppressed_text=log_perf_suppressed_text,
             gui_housekeeping_total_text=_timing_plain_text(getattr(window, "_last_gui_housekeeping_total_ms", None)),
             processing_text=_timing_plain_text(getattr(window, "_last_processing_ms", None)),
             wait_text=_timing_plain_text(getattr(window, "_last_processing_queue_wait_ms", None)),
@@ -548,6 +724,11 @@ class SessionDiagnosticsSnapshot:
             trace_plot_paint_summary_text=trace_plot_paint_summary_text,
             spectrum_plot_paint_recent_text=spectrum_plot_paint_recent_text,
             trace_plot_paint_recent_text=trace_plot_paint_recent_text,
+            spectrum_plot_operations_text=spectrum_plot_operations_text,
+            trace_plot_operations_text=trace_plot_operations_text,
+            trace_time_axis_tick_text=trace_time_axis_tick_text,
+            spectrum_left_axis_tick_text=spectrum_left_axis_tick_text,
+            trace_left_axis_tick_text=trace_left_axis_tick_text,
             sensorgram_heatmap_arrays_text=sensorgram_heatmap_arrays_text,
             sensorgram_heatmap_image_text=sensorgram_heatmap_image_text,
             sensorgram_heatmap_axes_text=sensorgram_heatmap_axes_text,
@@ -558,6 +739,11 @@ class SessionDiagnosticsSnapshot:
             live_processed_queue_max_text=_queue_depth_max_text(getattr(window, "_live_processed_queue_max_depth", None)),
             live_recording_queue_text=_queue_depth_text(window, "_live_recording_queue"),
             live_recording_queue_max_text=_queue_depth_max_text(getattr(window, "_live_recording_queue_max_depth", None)),
+            live_visual_refresh_count_text=live_visual_refresh_count_text,
+            live_visual_refresh_text=live_visual_refresh_text,
+            live_mode_deferred_display_flush_count_text=live_mode_deferred_display_flush_count_text,
+            live_mode_deferred_metric_flush_count_text=live_mode_deferred_metric_flush_count_text,
+            live_mode_deferred_stats_flush_count_text=live_mode_deferred_stats_flush_count_text,
             pipeline_gap_lines=pipeline_gap_lines,
             spectrum_redraw_lines=spectrum_redraw_lines,
             device_acquisition_lines=device_acquisition_lines,
@@ -603,12 +789,29 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         f"  Deferred UI stats: {snapshot.deferred_ui_stats_text}",
         f"  Session summary total: {snapshot.session_summary_total_text}",
         f"  Session stats total: {snapshot.session_stats_total_text}",
+        "",
+        "Live visual cadence",
+        f"  Live visual refresh count: {snapshot.live_visual_refresh_count_text}",
+        f"  Live visual refresh time: {snapshot.live_visual_refresh_text}",
+        f"  Live deferred display flush count: {snapshot.live_mode_deferred_display_flush_count_text}",
+        f"  Live deferred metric flush count: {snapshot.live_mode_deferred_metric_flush_count_text}",
+        f"  Live deferred stats flush count: {snapshot.live_mode_deferred_stats_flush_count_text}",
         f"  GUI housekeeping switch: {snapshot.gui_housekeeping_enabled_text}",
         f"  Scheduler dispatch lag: {snapshot.scheduler_lag_text}",
         f"  Scheduler dispatch time: {snapshot.scheduler_duration_text}",
         f"  Scheduler dispatch tasks: {snapshot.scheduler_task_count_text}",
         f"  Scheduler pending tasks: {snapshot.scheduler_pending_text}",
         f"  Log buffer total: {snapshot.log_buffer_total_text}",
+        f"  Log records generated recent 10s: {snapshot.log_records_generated_text}",
+        f"  Log records enqueued recent 10s: {snapshot.log_records_enqueued_text}",
+        f"  Log records appended to GUI recent 10s: {snapshot.log_records_appended_text}",
+        f"  Log append now: {snapshot.log_append_now_text}",
+        f"  Log append recent 10s: {snapshot.log_append_recent_text}",
+        f"  GUI log visible entries: {snapshot.gui_log_visible_entries_text}",
+        f"  GUI log history entries: {snapshot.gui_log_history_entries_text}",
+        f"  GUI log pending entries: {snapshot.gui_log_pending_entries_text}",
+        f"  GUI log suppressed by throttle recent 10s: {snapshot.log_throttle_suppressed_text}",
+        f"  Performance diagnostics routed away recent 10s: {snapshot.log_perf_suppressed_text}",
         f"  GUI housekeeping total: {snapshot.gui_housekeeping_total_text}",
         "",
         "Scheduler task breakdown",
@@ -642,6 +845,11 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         f"  Trace paint: {snapshot.trace_plot_paint_summary_text}",
         f"  Spectrum paint recent 10s: {snapshot.spectrum_plot_paint_recent_text}",
         f"  Trace paint recent 10s: {snapshot.trace_plot_paint_recent_text}",
+        f"  Spectrum plot ops recent 10s: {snapshot.spectrum_plot_operations_text}",
+        f"  Trace plot ops recent 10s: {snapshot.trace_plot_operations_text}",
+        f"  Trace time axis tickStrings: {snapshot.trace_time_axis_tick_text}",
+        f"  Spectrum left axis tickStrings: {snapshot.spectrum_left_axis_tick_text}",
+        f"  Trace left axis tickStrings: {snapshot.trace_left_axis_tick_text}",
         f"  Sensorgram heatmap arrays: {snapshot.sensorgram_heatmap_arrays_text}",
         f"  Sensorgram heatmap image: {snapshot.sensorgram_heatmap_image_text}",
         f"  Sensorgram heatmap axes: {snapshot.sensorgram_heatmap_axes_text}",

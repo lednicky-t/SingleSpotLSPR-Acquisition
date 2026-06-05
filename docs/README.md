@@ -11,6 +11,7 @@ Suggested layout:
 - `runtime_pipeline_architecture.md` for the lossless acquisition, async file writing, and display-drop rules
 - `CODEX_ARCHITECTURE_RAILS_V7.md` for the controlling acquisition/storage versus UI/analysis architecture rules
 - `CODEX_IMPLEMENTATION_GUIDE_V8_LOSSLESS_ACQ_AND_LOSSY_UI.md` for the step-by-step lossless acquisition and lossy UI implementation guide
+- `CODEX_RUNTIME_SIMPLICITY_GUIDE_V12.md` for the simple-runtime baseline and anti-orchestration rules
 
 Deferred design notes:
 

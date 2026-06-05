@@ -47,30 +47,34 @@ def run_gui_callback_timed(window, label: str, callback: Callable[[], None], *, 
         if hasattr(window, attr_name):
             setattr(window, attr_name, elapsed_ms)
         warning_threshold_ms = {
-            "ui_heartbeat": 50.0,
-            "gui_housekeeping": 100.0,
-            "gui_housekeeping_log_buffer": 100.0,
-            "gui_housekeeping_ui_state": 75.0,
-            "gui_housekeeping_acquisition_state": 75.0,
-            "gui_housekeeping_session_stats_snapshot": 75.0,
-            "gui_housekeeping_session_stats_refresh": 75.0,
+            "ui_heartbeat": 75.0,
+            "gui_housekeeping": 150.0,
+            "gui_housekeeping_log_buffer": 150.0,
+            "gui_housekeeping_ui_state": 100.0,
+            "gui_housekeeping_acquisition_state": 100.0,
+            "gui_housekeeping_session_stats_snapshot": 100.0,
+            "gui_housekeeping_session_stats_refresh": 100.0,
             "deferred_ui_flush": 100.0,
-            "plot_refresh": 75.0,
-            "session_stats_refresh": 75.0,
-            "session_summary_refresh": 75.0,
-            "log_buffer": 100.0,
-            "ui_state_save": 75.0,
-            "acquisition_state_save": 75.0,
-            "session_stats_snapshot": 75.0,
-            "deferred_display_flush": 75.0,
-            "deferred_stats_flush": 50.0,
+            "plot_refresh": 100.0,
+            "session_stats_refresh": 100.0,
+            "session_summary_refresh": 100.0,
+            "log_buffer": 150.0,
+            "ui_state_save": 100.0,
+            "acquisition_state_save": 100.0,
+            "session_stats_snapshot": 100.0,
+            "deferred_display_flush": 100.0,
+            "deferred_metric_flush": 100.0,
+            "deferred_stats_flush": 100.0,
+            "live_visual_refresh": 100.0,
         }.get(label, warn_ms)
         if elapsed_ms >= warning_threshold_ms and not getattr(window, "_quiet_diagnostics_mode", False):
+            severe_threshold_ms = max(500.0, warning_threshold_ms * 5.0)
+            level = logging.WARNING if elapsed_ms >= severe_threshold_ms else logging.INFO
             window._log_throttled(
                 f"gui_callback_{label}",
                 f"GUI callback {label} took {elapsed_ms:.2f} ms",
-                level=logging.WARNING,
-                min_interval=5.0,
+                level=level,
+                min_interval=10.0,
             )
 
 
@@ -134,30 +138,44 @@ def drain_gui_housekeeping_tasks(window) -> None:
 
 def request_live_acquisition_poll(window, delay_ms: float | None = None) -> None:
     delay = float(delay_ms if delay_ms is not None else window._live_ui_refresh_delay_ms)
-    if not window._ui_task_scheduler.is_pending("live_acquisition"):
-        window._live_result_requested_at = perf_counter()
+    if not window._ui_task_scheduler.is_pending("live_visual_refresh"):
+        now = perf_counter()
+        window._live_result_requested_at = now
         window._live_result_requested_delay_ms = delay
-    window._ui_task_scheduler.request(
-        "live_acquisition",
-        delay,
-        window._flush_live_acquisition_results,
-        priority=-20,
-        coalesce="earliest",
-    )
-
-
-def request_live_processed_poll(window, delay_ms: float | None = None) -> None:
-    delay = float(delay_ms if delay_ms is not None else window._live_ui_refresh_delay_ms)
-    if not window._ui_task_scheduler.is_pending("live_processed"):
-        window._live_processed_requested_at = perf_counter()
+        window._live_processed_requested_at = now
         window._live_processed_requested_delay_ms = delay
     window._ui_task_scheduler.request(
-        "live_processed",
+        "live_visual_refresh",
         delay,
-        window._flush_live_processed_results,
-        priority=-19,
-        coalesce="earliest",
+        lambda: flush_live_visual_refreshes(window),
+        priority=-20,
+        coalesce="latest",
     )
+
+
+def request_live_visual_refresh(window, delay_ms: float | None = None) -> None:
+    delay = float(delay_ms if delay_ms is not None else window._live_ui_refresh_delay_ms)
+    window._ui_task_scheduler.request(
+        "live_visual_refresh",
+        delay,
+        lambda: flush_live_visual_refreshes(window),
+        priority=-20,
+        coalesce="latest",
+    )
+
+
+def flush_live_visual_refreshes(window) -> None:
+    started = perf_counter()
+    window._live_visual_refresh_in_progress = True
+    try:
+        window._flush_live_acquisition_results()
+        if not window._closing and window._live_processing_worker is not None:
+            window._flush_live_processed_results()
+        flush_live_visual_state(window)
+    finally:
+        window._live_visual_refresh_in_progress = False
+    window._last_live_visual_refresh_ms = (perf_counter() - started) * 1000.0
+    window._live_visual_refresh_count = int(getattr(window, "_live_visual_refresh_count", 0)) + 1
 
 
 def request_deferred_ui_refresh(
@@ -190,6 +208,15 @@ def request_deferred_ui_refresh(
     display_dirty = summary or telemetry or live_estimate
     metric_dirty = trace_plot or trace_label is not None
     stats_dirty = bool(stats)
+    live_visual_dirty = bool(window._live_active and (display_dirty or metric_dirty) and not stats_dirty)
+    if live_visual_dirty:
+        if not getattr(window, "_live_visual_refresh_in_progress", False):
+            request_live_visual_refresh(window, 0.0)
+        return
+    if session_stats or stats or summary or telemetry or live_estimate or trace_label is not None:
+        window._ui_refresh_state.session_stats_dirty = True
+        if window._session_stats_refresh_requested_at is None:
+            window._session_stats_refresh_requested_at = perf_counter()
     if display_dirty:
         display_delay_ms = window._live_ui_refresh_delay_ms if window._live_active else window._stats_refresh_delay_ms
         if window._live_active and (live_estimate or telemetry):
@@ -253,6 +280,23 @@ def refresh_session_statistics(window, force: bool = False) -> None:
         if refresh_state is not None:
             refresh_state.session_stats_dirty = False
         window._session_stats_refresh_requested_at = None
+
+
+def flush_live_visual_state(window) -> None:
+    refresh_state = getattr(window, "_ui_refresh_state", None)
+    if refresh_state is None:
+        return
+    if bool(getattr(refresh_state, "metric_plot_dirty", False)) or getattr(refresh_state, "pending_metric_label", None) is not None:
+        label = getattr(refresh_state, "pending_metric_label", None) or "Peak position (nm)"
+        window._refresh_trace_plot(label)
+    if bool(getattr(refresh_state, "live_estimate_dirty", False)):
+        window._update_live_estimate()
+    if bool(getattr(refresh_state, "telemetry_dirty", False)):
+        window._refresh_telemetry()
+    if bool(getattr(refresh_state, "summary_dirty", False)):
+        window._refresh_session_summary(force=True)
+    if bool(getattr(refresh_state, "plot_render_dirty", False)):
+        window._refresh_plot()
 
 
 def flush_deferred_ui_refreshes(window) -> None:

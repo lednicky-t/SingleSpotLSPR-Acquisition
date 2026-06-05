@@ -55,11 +55,11 @@ def initialize_logging_ui_for(window) -> None:
     log_font = QFont("Consolas", 9)
     window.log_terminal.setFont(log_font)
     window.log_terminal.document().setDefaultFont(log_font)
-    window.log_terminal.document().setMaximumBlockCount(220)
+    window.log_terminal.document().setMaximumBlockCount(300)
     window.log_terminal.setToolTip("Live event log for acquisition, processing, and controller activity.")
 
     window._log_history: list[tuple[int, str, str]] = []
-    window._log_history_max_entries = 2000
+    window._log_history_max_entries = 1000
     window._log_view_mode = "all"
     window.log_view_all_button = QToolButton()
     window.log_view_all_button.setObjectName("logViewButton")
@@ -123,7 +123,7 @@ def initialize_logging_ui_for(window) -> None:
         window._ui_logger.addHandler(window._log_handler)
     window._log_buffer: list[tuple[int, str, str]] = []
     window._log_buffer_timer = QTimer(window)
-    window._log_buffer_timer.setInterval(75)
+    window._log_buffer_timer.setInterval(250)
     window._log_buffer_timer.timeout.connect(window._flush_log_buffer)
     window._last_log_buffer_flush_ms: float | None = None
     window._last_log_buffer_delay_ms: float | None = None

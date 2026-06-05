@@ -40,6 +40,37 @@ class FlexibleTimeAxis(pg.AxisItem):
         super().__init__(orientation=orientation)
         self._mode = "elapsed"
         self._reference_value = 0.0
+        self._diagnostics_owner = None
+        self._diagnostics_prefix = ""
+
+    def _record_tickstrings(self, count: int, elapsed_ms: float) -> None:
+        owner = getattr(self, "_diagnostics_owner", None)
+        prefix = getattr(self, "_diagnostics_prefix", "")
+        if owner is None or not prefix:
+            return
+        try:
+            events = getattr(owner, "_axis_tick_events", None)
+            if events is not None:
+                now = perf_counter()
+                events.append((now, prefix, int(count), float(elapsed_ms)))
+            recent_count_name = f"_{prefix}_tick_recent_count"
+            recent_total_name = f"_{prefix}_tick_recent_total_ms"
+            recent_max_name = f"_{prefix}_tick_recent_max_ms"
+            recent_avg_name = f"_{prefix}_tick_recent_avg_ms"
+            recent_values = [value for ts, name, _, value in events if name == prefix and (now - float(ts)) <= 10.0]
+            if recent_values:
+                recent_total = float(sum(recent_values))
+                setattr(owner, recent_count_name, len(recent_values))
+                setattr(owner, recent_total_name, recent_total)
+                setattr(owner, recent_max_name, max(recent_values))
+                setattr(owner, recent_avg_name, recent_total / len(recent_values))
+            else:
+                setattr(owner, recent_count_name, 0)
+                setattr(owner, recent_total_name, 0.0)
+                setattr(owner, recent_max_name, 0.0)
+                setattr(owner, recent_avg_name, 0.0)
+        except Exception:
+            return
 
     def set_mode(self, mode: str) -> None:
         normalized = mode if mode in {"elapsed", "clock", "relative"} else "elapsed"
@@ -79,6 +110,7 @@ class FlexibleTimeAxis(pg.AxisItem):
         else:
             result = [f"{float(value):.0f}" if abs(float(value)) >= 10 else f"{float(value):.1f}" for value in values]
         elapsed_ms = (perf_counter() - started) * 1000.0
+        self._record_tickstrings(len(values), elapsed_ms)
         if elapsed_ms > 5.0:
             logging.getLogger("lspr_app.plot").info(
                 "FlexibleTimeAxis.tickStrings slow: %.2f ms | ticks=%d | mode=%s",
@@ -93,8 +125,40 @@ class ScientificAxis(pg.AxisItem):
     def __init__(self, orientation: str = "left") -> None:
         super().__init__(orientation=orientation)
         self.enableAutoSIPrefix(False)
+        self._diagnostics_owner = None
+        self._diagnostics_prefix = ""
+
+    def _record_tickstrings(self, count: int, elapsed_ms: float) -> None:
+        owner = getattr(self, "_diagnostics_owner", None)
+        prefix = getattr(self, "_diagnostics_prefix", "")
+        if owner is None or not prefix:
+            return
+        try:
+            events = getattr(owner, "_axis_tick_events", None)
+            if events is not None:
+                now = perf_counter()
+                events.append((now, prefix, int(count), float(elapsed_ms)))
+            recent_count_name = f"_{prefix}_tick_recent_count"
+            recent_total_name = f"_{prefix}_tick_recent_total_ms"
+            recent_max_name = f"_{prefix}_tick_recent_max_ms"
+            recent_avg_name = f"_{prefix}_tick_recent_avg_ms"
+            recent_values = [value for ts, name, _, value in events if name == prefix and (now - float(ts)) <= 10.0]
+            if recent_values:
+                recent_total = float(sum(recent_values))
+                setattr(owner, recent_count_name, len(recent_values))
+                setattr(owner, recent_total_name, recent_total)
+                setattr(owner, recent_max_name, max(recent_values))
+                setattr(owner, recent_avg_name, recent_total / len(recent_values))
+            else:
+                setattr(owner, recent_count_name, 0)
+                setattr(owner, recent_total_name, 0.0)
+                setattr(owner, recent_max_name, 0.0)
+                setattr(owner, recent_avg_name, 0.0)
+        except Exception:
+            return
 
     def tickStrings(self, values, scale, spacing):  # type: ignore[override]
+        started = perf_counter()
         labels: list[str] = []
         for value in values:
             numeric = float(value)
@@ -111,6 +175,8 @@ class ScientificAxis(pg.AxisItem):
                 labels.append(f"{numeric:.2f}")
             else:
                 labels.append(f"{numeric:.1f}")
+        elapsed_ms = (perf_counter() - started) * 1000.0
+        self._record_tickstrings(len(values), elapsed_ms)
         return labels
 
 

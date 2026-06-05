@@ -80,12 +80,6 @@ def _request_live_acquisition_poll_for(window, delay_ms: float) -> None:
         request(delay_ms)
 
 
-def _request_live_processed_poll_for(window, delay_ms: float) -> None:
-    request = getattr(window, "_request_live_processed_poll", None)
-    if callable(request):
-        request(delay_ms)
-
-
 def _update_live_source_rate_from_event(window, event: LiveAcquisitionEvent, now: float) -> None:
     previous_finish = getattr(window, "_raw_last_finish_ts", None)
     previous_sample_index = getattr(window, "_raw_last_sample_index", None)
@@ -520,9 +514,11 @@ def flush_live_acquisition_results(window) -> None:
                 level=logging.DEBUG,
                 min_interval=1.0,
             )
-        window._request_deferred_ui_refresh(telemetry=True, live_estimate=True)
+        refresh_state = window._ui_refresh_state
+        refresh_state.telemetry_dirty = True
+        refresh_state.live_estimate_dirty = True
         if window._live_active:
-            _request_live_processed_poll_for(window, window._live_ui_refresh_delay_ms)
+            _request_live_acquisition_poll_for(window, window._live_ui_refresh_delay_ms)
         window._ui_preview_displayed_count = int(getattr(window, "_ui_preview_displayed_count", 0)) + 1
 
     if dropped_events > 0:
@@ -566,7 +562,7 @@ def flush_live_processed_results(window) -> None:
     if latest_event is None:
         window._last_live_processed_flush_ms = (perf_counter() - started) * 1000.0
         if window._live_processing_worker is not None and window._live_processing_worker.is_alive() and window._live_active:
-            _request_live_processed_poll_for(window, window._live_ui_refresh_delay_ms)
+            _request_live_acquisition_poll_for(window, window._live_ui_refresh_delay_ms)
         return
 
     drain_ms = (perf_counter() - started) * 1000.0
@@ -582,7 +578,7 @@ def flush_live_processed_results(window) -> None:
 
     if latest_event.result is None or latest_event.result.processed is None:
         if window._live_processing_worker is not None and window._live_processing_worker.is_alive() and window._live_active:
-            _request_live_processed_poll_for(window, window._live_ui_refresh_delay_ms)
+            _request_live_acquisition_poll_for(window, window._live_ui_refresh_delay_ms)
         return
 
     if latest_event.source_epoch != window._source_epoch:
@@ -647,8 +643,13 @@ def flush_live_processed_results(window) -> None:
     window._update_poly_warning_indicator(fit)
     window._live_plot_update_counter = int(getattr(window, "_live_plot_update_counter", 0)) + 1
     window._ui_refresh_state.plot_render_dirty = True
-    window._request_plot_refresh()
-    window._request_deferred_ui_refresh(trace_plot=True, live_estimate=True, telemetry=True, trace_label="Peak position (nm)")
+    if not window._live_active:
+        window._request_plot_refresh()
+    refresh_state = window._ui_refresh_state
+    refresh_state.metric_plot_dirty = True
+    refresh_state.live_estimate_dirty = True
+    refresh_state.telemetry_dirty = True
+    refresh_state.pending_metric_label = "Peak position (nm)"
     window._request_trace_autoscale()
     window._append_processed_trace_history(processed, fit)
     window._append_sensorgram_heatmap_history(processed)
@@ -659,7 +660,7 @@ def flush_live_processed_results(window) -> None:
         min_interval=1.0,
     )
     if window._live_processing_worker is not None and window._live_processing_worker.is_alive() and window._live_active:
-        _request_live_processed_poll_for(window, window._live_ui_refresh_delay_ms)
+        _request_live_acquisition_poll_for(window, window._live_ui_refresh_delay_ms)
 
 
 def handle_acquisition_error(window, source_epoch: int, message: str) -> None:
@@ -749,6 +750,12 @@ def start_live_acquisition(window) -> None:
     window._processing_headroom_ratio = None
     window._last_live_acquisition_flush_ms = None
     window._last_live_processed_flush_ms = None
+    window._last_live_visual_refresh_ms = None
+    window._live_visual_refresh_count = 0
+    window._live_visual_refresh_in_progress = False
+    window._live_mode_deferred_display_flush_count = 0
+    window._live_mode_deferred_metric_flush_count = 0
+    window._live_mode_deferred_stats_flush_count = 0
     window._last_live_result_poll_delay_ms = None
     window._last_live_processed_poll_delay_ms = None
     window._last_summary_refresh_ms = None
@@ -806,7 +813,8 @@ def start_live_acquisition(window) -> None:
         _suspend_spectrometer_backend_for_live(window)
     window._set_measurement_buttons_enabled(False)
     window._set_manual_acquisition_buttons_enabled(True)
-    window._request_deferred_ui_refresh(live_estimate=True)
+    refresh_state = window._ui_refresh_state
+    refresh_state.live_estimate_dirty = True
     request = AcquisitionRequest(
         kind="sample",
         settings=window._current_settings(),
@@ -842,7 +850,6 @@ def start_live_acquisition(window) -> None:
         window._live_recording_timer.start()
     flush_live_recording_results(window)
     _request_live_acquisition_poll_for(window, window._live_ui_refresh_delay_ms)
-    _request_live_processed_poll_for(window, 0)
     live_result_depth = _queue_size_safe(window._live_result_queue)
     live_processed_depth = _queue_size_safe(window._live_processed_queue)
     if live_result_depth is not None:
@@ -857,12 +864,10 @@ def stop_live_acquisition(window, message: str = "Live acquisition stopped.") ->
     window._live_stop_event.set()
     if hasattr(window, "_live_recording_timer"):
         window._live_recording_timer.stop()
+    window._ui_task_scheduler.cancel("live_visual_refresh")
     window._ui_task_scheduler.cancel("live_acquisition")
-    window._ui_task_scheduler.cancel("live_processed")
     window._live_result_requested_at = None
     window._live_result_requested_delay_ms = None
-    window._live_processed_requested_at = None
-    window._live_processed_requested_delay_ms = None
     window._live_display_started_at = None
     window._live_trace_started_at = None
     window._trace_display_cursor_s = 0.0
@@ -914,6 +919,12 @@ def stop_live_acquisition(window, message: str = "Live acquisition stopped.") ->
     window._processing_headroom_ratio = None
     window._last_live_acquisition_flush_ms = None
     window._last_live_processed_flush_ms = None
+    window._last_live_visual_refresh_ms = None
+    window._live_visual_refresh_count = 0
+    window._live_visual_refresh_in_progress = False
+    window._live_mode_deferred_display_flush_count = 0
+    window._live_mode_deferred_metric_flush_count = 0
+    window._live_mode_deferred_stats_flush_count = 0
     window._last_live_result_poll_delay_ms = None
     window._last_live_processed_poll_delay_ms = None
     window._last_summary_refresh_ms = None
