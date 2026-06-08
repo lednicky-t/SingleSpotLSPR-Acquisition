@@ -36,16 +36,57 @@ def _metric_absolute_cache_modes_text(window: Any) -> str:
         return "-"
     if not isinstance(cache_info, dict) or not cache_info:
         return "-"
+    def _int_field(entry: dict[str, object], key: str, default: int = 0) -> int:
+        value = entry.get(key, default)
+        try:
+            return int(value) if value is not None else int(default)
+        except (TypeError, ValueError):
+            return int(default)
+    def _float_text(entry: dict[str, object], key: str) -> str:
+        return _timing_plain_text(entry.get(key))
     total_hit = 0
     total_incremental = 0
     total_rebuild = 0
+    latest_key: str | None = None
+    latest_entry: dict[str, object] | None = None
     for entry in cache_info.values():
         if not isinstance(entry, dict):
             continue
         total_hit += int(entry.get("hits", 0) or 0)
         total_incremental += int(entry.get("incremental", 0) or 0)
         total_rebuild += int(entry.get("rebuilds", 0) or 0)
-    return f"hit={total_hit} incremental={total_incremental} rebuild={total_rebuild}"
+    for key, entry in cache_info.items():
+        if not isinstance(entry, dict):
+            continue
+        if latest_entry is None:
+            latest_key = str(key)
+            latest_entry = entry
+            continue
+        try:
+            if int(entry.get("source_len", 0) or 0) >= int(latest_entry.get("source_len", 0) or 0):
+                latest_key = str(key)
+                latest_entry = entry
+        except (TypeError, ValueError):
+            continue
+    if latest_entry is None:
+        return f"hit={total_hit} incremental={total_incremental} rebuild={total_rebuild}"
+    latest_parts = [
+        f"key={latest_key}",
+        f"src={_int_field(latest_entry, 'source_len')}",
+        f"target={_int_field(latest_entry, 'target_points')}",
+        f"display={_int_field(latest_entry, 'display_len')}",
+        f"mode={latest_entry.get('last_mode', '-')}",
+        f"new={_int_field(latest_entry, 'new_points')}",
+        f"base={_int_field(latest_entry, 'base_blocks')}",
+        f"levels={_int_field(latest_entry, 'level_count')}",
+        f"tail={_int_field(latest_entry, 'tail_groups_updated')}",
+        f"disp_level={_int_field(latest_entry, 'display_level', -1)}",
+        f"disp_blocks={_int_field(latest_entry, 'display_blocks')}",
+        f"append={_float_text(latest_entry, 'append_ms')}",
+        f"assemble={_float_text(latest_entry, 'assemble_ms')}",
+        f"rebuild={_float_text(latest_entry, 'full_rebuild_ms')}",
+    ]
+    return f"hit={total_hit} incremental={total_incremental} rebuild={total_rebuild} | latest " + " ".join(latest_parts)
 
 
 def _scheduler_visual_coalescing_text(window: Any) -> str:
@@ -322,6 +363,13 @@ class SessionDiagnosticsSnapshot:
     gui_log_pending_entries_text: str
     log_throttle_suppressed_text: str
     log_perf_suppressed_text: str
+    diagnostic_export_recent_text: str
+    diagnostic_export_pending_text: str
+    diagnostic_export_file_text: str
+    diagnostic_export_flush_text: str
+    diagnostic_snapshot_export_recent_text: str
+    diagnostic_snapshot_export_file_text: str
+    diagnostic_snapshot_export_flush_text: str
     gui_housekeeping_total_text: str
     processing_text: str
     wait_text: str
@@ -349,6 +397,13 @@ class SessionDiagnosticsSnapshot:
     metric_setdata_calls_text: str
     metric_setdata_skips_text: str
     metric_absolute_cache_modes_text: str
+    metric_absolute_source_text: str
+    metric_absolute_invalidation_text: str
+    metric_absolute_rebuild_count_text: str
+    metric_absolute_hdf5_reads_text: str
+    metric_absolute_archive_points_text: str
+    metric_absolute_display_points_text: str
+    metric_absolute_view_prep_text: str
     scheduler_visual_coalescing_text: str
     metric_autoscale_text: str
     spectrum_plot_paint_summary_text: str
@@ -372,6 +427,8 @@ class SessionDiagnosticsSnapshot:
     live_recording_queue_max_text: str
     live_visual_refresh_count_text: str
     live_visual_refresh_text: str
+    live_trace_stats_count_text: str
+    live_trace_stats_text: str
     live_mode_deferred_display_flush_count_text: str
     live_mode_deferred_metric_flush_count_text: str
     live_mode_deferred_stats_flush_count_text: str
@@ -403,17 +460,11 @@ class SessionDiagnosticsSnapshot:
         scheduler_pending_text = "-" if scheduler is None else str(int(getattr(scheduler, "pending_count", lambda: 0)()))
         scheduler_task_breakdown_lines = _scheduler_task_breakdown_lines(window)
         trace_points_text = "-"
-        peak_history = getattr(window, "_peak_history", None)
-        if peak_history:
-            try:
-                trace_points_text = str(max(len(buffer) for buffer in peak_history.values()))
-            except ValueError:
-                trace_points_text = "0"
         trace_buffer_points_text = "-"
-        peak_history_buffers = getattr(window, "_peak_history_buffers", None)
-        if peak_history_buffers:
+        metric_history_buffers = getattr(window, "_metric_history_buffers", None)
+        if metric_history_buffers:
             try:
-                trace_buffer_points_text = str(max(len(buffer) for buffer in peak_history_buffers.values()))
+                trace_buffer_points_text = str(max(len(buffer) for buffer in metric_history_buffers.values()))
             except ValueError:
                 trace_buffer_points_text = "0"
         trace_raw_points_text = "-"
@@ -520,6 +571,13 @@ class SessionDiagnosticsSnapshot:
         metric_setdata_calls_text = _queue_depth_max_text(getattr(window, "_last_metric_render_setdata_calls", None))
         metric_setdata_skips_text = _queue_depth_max_text(getattr(window, "_last_metric_render_setdata_skips", None))
         metric_absolute_cache_modes_text = _metric_absolute_cache_modes_text(window)
+        metric_absolute_source_text = str(getattr(window, "_last_metric_absolute_source_text", "-"))
+        metric_absolute_invalidation_text = str(getattr(window, "_last_metric_absolute_cache_invalidation_text", "-"))
+        metric_absolute_rebuild_count_text = str(getattr(window, "_last_metric_absolute_cache_rebuild_count_text", "-"))
+        metric_absolute_hdf5_reads_text = str(getattr(window, "_last_metric_absolute_hdf5_read_count_text", "-"))
+        metric_absolute_archive_points_text = str(getattr(window, "_last_metric_absolute_archive_points_text", "-"))
+        metric_absolute_display_points_text = str(getattr(window, "_last_metric_absolute_display_points_text", "-"))
+        metric_absolute_view_prep_text = str(getattr(window, "_last_metric_absolute_view_prep_text", "-"))
         scheduler_visual_coalescing_text = _scheduler_visual_coalescing_text(window)
         metric_autoscale_text = _timing_plain_text(getattr(window, "_last_metric_autoscale_ms", None))
         spectrum_plot_paint_summary_text = _paint_summary_text(window, "spectrum_plot")
@@ -547,6 +605,8 @@ class SessionDiagnosticsSnapshot:
         live_visual_flush_ms = getattr(window, "_last_live_processed_flush_ms", None)
         live_visual_refresh_count_text = str(int(getattr(window, "_live_visual_refresh_count", 0)))
         live_visual_refresh_text = _timing_plain_text(getattr(window, "_last_live_visual_refresh_ms", None))
+        live_trace_stats_count_text = str(int(getattr(window, "_live_trace_stats_count", 0)))
+        live_trace_stats_text = _timing_plain_text(getattr(window, "_last_live_trace_stats_ms", None))
         live_mode_deferred_display_flush_count_text = str(int(getattr(window, "_live_mode_deferred_display_flush_count", 0)))
         live_mode_deferred_metric_flush_count_text = str(int(getattr(window, "_live_mode_deferred_metric_flush_count", 0)))
         live_mode_deferred_stats_flush_count_text = str(int(getattr(window, "_live_mode_deferred_stats_flush_count", 0)))
@@ -566,6 +626,15 @@ class SessionDiagnosticsSnapshot:
         gui_log_pending_entries_text = _gui_log_pending_entries_text(window)
         log_throttle_suppressed_text = _recent_log_event_count_text(window, "_log_throttle_suppressed_events")
         log_perf_suppressed_text = _recent_log_event_count_text(window, "_log_perf_suppressed_events")
+        diagnostic_export_recent_text = _recent_log_event_count_text(window, "_diagnostic_export_events")
+        diagnostic_export_buffer = getattr(window, "_diagnostic_export_buffer", None)
+        diagnostic_export_pending_text = str(max(len(diagnostic_export_buffer), 0)) if diagnostic_export_buffer is not None else "-"
+        diagnostic_export_path = getattr(window, "_diagnostic_export_path", None)
+        diagnostic_export_file_text = str(diagnostic_export_path) if diagnostic_export_path is not None else "-"
+        diagnostic_export_flush_text = _timing_plain_text(getattr(window, "_last_diagnostic_export_flush_ms", None))
+        diagnostic_snapshot_export_recent_text = _recent_log_event_count_text(window, "_diagnostic_snapshot_export_events")
+        diagnostic_snapshot_export_file_text = str(diagnostic_export_path) if diagnostic_export_path is not None else "-"
+        diagnostic_snapshot_export_flush_text = _timing_plain_text(getattr(window, "_last_diagnostic_snapshot_export_ms", None))
         processing_wait_ms = getattr(window, "_last_processing_queue_wait_ms", None)
         processing_ms = getattr(window, "_last_processing_ms", None)
         plot_refresh_delay_ms = getattr(window, "_last_plot_refresh_delay_ms", None)
@@ -683,6 +752,13 @@ class SessionDiagnosticsSnapshot:
             gui_log_pending_entries_text=gui_log_pending_entries_text,
             log_throttle_suppressed_text=log_throttle_suppressed_text,
             log_perf_suppressed_text=log_perf_suppressed_text,
+            diagnostic_export_recent_text=diagnostic_export_recent_text,
+            diagnostic_export_pending_text=diagnostic_export_pending_text,
+            diagnostic_export_file_text=diagnostic_export_file_text,
+            diagnostic_export_flush_text=diagnostic_export_flush_text,
+            diagnostic_snapshot_export_recent_text=diagnostic_snapshot_export_recent_text,
+            diagnostic_snapshot_export_file_text=diagnostic_snapshot_export_file_text,
+            diagnostic_snapshot_export_flush_text=diagnostic_snapshot_export_flush_text,
             gui_housekeeping_total_text=_timing_plain_text(getattr(window, "_last_gui_housekeeping_total_ms", None)),
             processing_text=_timing_plain_text(getattr(window, "_last_processing_ms", None)),
             wait_text=_timing_plain_text(getattr(window, "_last_processing_queue_wait_ms", None)),
@@ -718,6 +794,13 @@ class SessionDiagnosticsSnapshot:
             metric_setdata_calls_text=metric_setdata_calls_text,
             metric_setdata_skips_text=metric_setdata_skips_text,
             metric_absolute_cache_modes_text=metric_absolute_cache_modes_text,
+            metric_absolute_source_text=metric_absolute_source_text,
+            metric_absolute_invalidation_text=metric_absolute_invalidation_text,
+            metric_absolute_rebuild_count_text=metric_absolute_rebuild_count_text,
+            metric_absolute_hdf5_reads_text=metric_absolute_hdf5_reads_text,
+            metric_absolute_archive_points_text=metric_absolute_archive_points_text,
+            metric_absolute_display_points_text=metric_absolute_display_points_text,
+            metric_absolute_view_prep_text=metric_absolute_view_prep_text,
             scheduler_visual_coalescing_text=scheduler_visual_coalescing_text,
             metric_autoscale_text=metric_autoscale_text,
             spectrum_plot_paint_summary_text=spectrum_plot_paint_summary_text,
@@ -741,6 +824,8 @@ class SessionDiagnosticsSnapshot:
             live_recording_queue_max_text=_queue_depth_max_text(getattr(window, "_live_recording_queue_max_depth", None)),
             live_visual_refresh_count_text=live_visual_refresh_count_text,
             live_visual_refresh_text=live_visual_refresh_text,
+            live_trace_stats_count_text=live_trace_stats_count_text,
+            live_trace_stats_text=live_trace_stats_text,
             live_mode_deferred_display_flush_count_text=live_mode_deferred_display_flush_count_text,
             live_mode_deferred_metric_flush_count_text=live_mode_deferred_metric_flush_count_text,
             live_mode_deferred_stats_flush_count_text=live_mode_deferred_stats_flush_count_text,
@@ -793,6 +878,8 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         "Live visual cadence",
         f"  Live visual refresh count: {snapshot.live_visual_refresh_count_text}",
         f"  Live visual refresh time: {snapshot.live_visual_refresh_text}",
+        f"  Live trace stats count: {snapshot.live_trace_stats_count_text}",
+        f"  Live trace stats time: {snapshot.live_trace_stats_text}",
         f"  Live deferred display flush count: {snapshot.live_mode_deferred_display_flush_count_text}",
         f"  Live deferred metric flush count: {snapshot.live_mode_deferred_metric_flush_count_text}",
         f"  Live deferred stats flush count: {snapshot.live_mode_deferred_stats_flush_count_text}",
@@ -812,6 +899,13 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         f"  GUI log pending entries: {snapshot.gui_log_pending_entries_text}",
         f"  GUI log suppressed by throttle recent 10s: {snapshot.log_throttle_suppressed_text}",
         f"  Performance diagnostics routed away recent 10s: {snapshot.log_perf_suppressed_text}",
+        f"  Diagnostics export recent 10s: {snapshot.diagnostic_export_recent_text}",
+        f"  Diagnostics export pending entries: {snapshot.diagnostic_export_pending_text}",
+        f"  Diagnostics export file: {snapshot.diagnostic_export_file_text}",
+        f"  Diagnostics export flush: {snapshot.diagnostic_export_flush_text}",
+        f"  Diagnostics snapshot export recent 10s: {snapshot.diagnostic_snapshot_export_recent_text}",
+        f"  Diagnostics snapshot export file: {snapshot.diagnostic_snapshot_export_file_text}",
+        f"  Diagnostics snapshot export flush: {snapshot.diagnostic_snapshot_export_flush_text}",
         f"  GUI housekeeping total: {snapshot.gui_housekeeping_total_text}",
         "",
         "Scheduler task breakdown",
@@ -839,6 +933,13 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         f"  Metric plot disabled fast path: {snapshot.metric_plot_disabled_fast_path_text}",
         f"  Metric setData calls/skips: {snapshot.metric_setdata_calls_text}/{snapshot.metric_setdata_skips_text}",
         f"  Metric absolute cache modes: {snapshot.metric_absolute_cache_modes_text}",
+        f"  Live absolute source used: {snapshot.metric_absolute_source_text}",
+        f"  Live absolute invalidation reason: {snapshot.metric_absolute_invalidation_text}",
+        f"  Live absolute cache rebuild count: {snapshot.metric_absolute_rebuild_count_text}",
+        f"  Live absolute HDF5 reads: {snapshot.metric_absolute_hdf5_reads_text}",
+        f"  Live absolute archive points: {snapshot.metric_absolute_archive_points_text}",
+        f"  Live absolute display points: {snapshot.metric_absolute_display_points_text}",
+        f"  Live absolute view prep: {snapshot.metric_absolute_view_prep_text}",
         f"  Scheduler visual coalescing: {snapshot.scheduler_visual_coalescing_text}",
         f"  Metric autoscale: {snapshot.metric_autoscale_text}",
         f"  Spectrum paint: {snapshot.spectrum_plot_paint_summary_text}",

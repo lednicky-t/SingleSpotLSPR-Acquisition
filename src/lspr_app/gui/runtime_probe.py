@@ -30,8 +30,8 @@ class RuntimeDriftSample:
     log_history_count: int
     log_buffer_count: int
     session_stats_log_count: int
-    peak_history_points: int
-    peak_history_buffer_points: int
+    metric_history_points: int
+    metric_history_buffer_points: int
     temporal_history_count: int
     sensorgram_rows: int
     widget_count: int
@@ -117,8 +117,7 @@ def _current_process_working_set_mb() -> float | None:
 
 def _sample_runtime_drift(window: Any) -> RuntimeDriftSample:
     scheduler = getattr(window, "_ui_task_scheduler", None)
-    peak_history = getattr(window, "_peak_history", None)
-    peak_history_buffers = getattr(window, "_peak_history_buffers", None)
+    metric_history_buffers = getattr(window, "_metric_history_buffers", None)
     startup_t0 = float(getattr(window, "_startup_t0", perf_counter()))
     return RuntimeDriftSample(
         captured_at_s=float(perf_counter() - startup_t0),
@@ -135,8 +134,8 @@ def _sample_runtime_drift(window: Any) -> RuntimeDriftSample:
         log_history_count=_safe_count(getattr(window, "_log_history", None)),
         log_buffer_count=_safe_count(getattr(window, "_log_buffer", None)),
         session_stats_log_count=_safe_count(getattr(window, "_session_stats_log", None)),
-        peak_history_points=_sum_buffer_lengths(peak_history) if peak_history else 0,
-        peak_history_buffer_points=_sum_buffer_lengths(peak_history_buffers) if peak_history_buffers else 0,
+        metric_history_points=0,
+        metric_history_buffer_points=_sum_buffer_lengths(metric_history_buffers) if metric_history_buffers else 0,
         temporal_history_count=_safe_count(getattr(window, "_temporal_processed_history", None)),
         sensorgram_rows=_safe_count(getattr(window, "_sensorgram_heatmap_history", None)),
         widget_count=_widget_count(),
@@ -248,8 +247,8 @@ def _top_growth_contributors(first: RuntimeDriftSample, latest: RuntimeDriftSamp
         ("Working set", first.working_set_mb, latest.working_set_mb, "MB", 2),
         ("Scheduler lag", first.scheduler_lag_ms, latest.scheduler_lag_ms, "ms", 1),
         ("Log history", first.log_history_count, latest.log_history_count, "count", 1),
-        ("Peak history", first.peak_history_points, latest.peak_history_points, "count", 1),
-        ("Peak buffers", first.peak_history_buffer_points, latest.peak_history_buffer_points, "count", 1),
+        ("Metric history", first.metric_history_points, latest.metric_history_points, "count", 1),
+        ("Metric buffers", first.metric_history_buffer_points, latest.metric_history_buffer_points, "count", 1),
         ("Sensorgram rows", first.sensorgram_rows, latest.sensorgram_rows, "count", 1),
         ("Widget count", first.widget_count, latest.widget_count, "count", 1),
         ("Scheduler pending", first.scheduler_pending, latest.scheduler_pending, "count", 1),
@@ -289,8 +288,8 @@ def build_runtime_drift_lines_for(window) -> list[str]:
     max_deferred_display = max((sample.deferred_display_total_ms or 0.0) for sample in samples)
     max_deferred_stats = max((sample.deferred_stats_total_ms or 0.0) for sample in samples)
     max_plot_refresh = max((sample.plot_refresh_total_ms or 0.0) for sample in samples)
-    max_peak_history_points = max(sample.peak_history_points for sample in samples)
-    max_peak_history_buffer_points = max(sample.peak_history_buffer_points for sample in samples)
+    max_metric_history_points = max(sample.metric_history_points for sample in samples)
+    max_metric_history_buffer_points = max(sample.metric_history_buffer_points for sample in samples)
     max_sensorgram_rows = max(sample.sensorgram_rows for sample in samples)
     max_widget_count = max(sample.widget_count for sample in samples)
     max_working_set_mb = max((sample.working_set_mb or 0.0) for sample in samples)
@@ -308,8 +307,8 @@ def build_runtime_drift_lines_for(window) -> list[str]:
         f"  Log history entries: {_format_count(first.log_history_count)} -> {_format_count(latest.log_history_count)}{_numeric_delta(first.log_history_count, latest.log_history_count)}",
         f"  Log buffer entries: {_format_count(first.log_buffer_count)} -> {_format_count(latest.log_buffer_count)}{_numeric_delta(first.log_buffer_count, latest.log_buffer_count)}",
         f"  Session stats log entries: {_format_count(first.session_stats_log_count)} -> {_format_count(latest.session_stats_log_count)}{_numeric_delta(first.session_stats_log_count, latest.session_stats_log_count)}",
-        f"  Peak history points: {_format_count(first.peak_history_points)} -> {_format_count(latest.peak_history_points)} | max {_format_count(max_peak_history_points)}",
-        f"  Peak buffer points: {_format_count(first.peak_history_buffer_points)} -> {_format_count(latest.peak_history_buffer_points)} | max {_format_count(max_peak_history_buffer_points)}",
+        f"  Metric history points: {_format_count(first.metric_history_points)} -> {_format_count(latest.metric_history_points)} | max {_format_count(max_metric_history_points)}",
+        f"  Metric buffer points: {_format_count(first.metric_history_buffer_points)} -> {_format_count(latest.metric_history_buffer_points)} | max {_format_count(max_metric_history_buffer_points)}",
         f"  Temporal history points: {_format_count(first.temporal_history_count)} -> {_format_count(latest.temporal_history_count)}",
         f"  Sensorgram rows: {_format_count(first.sensorgram_rows)} -> {_format_count(latest.sensorgram_rows)} | max {_format_count(max_sensorgram_rows)}",
         f"  Live result queue: {_format_count(first.live_result_queue_size)} -> {_format_count(latest.live_result_queue_size)}",
@@ -318,8 +317,8 @@ def build_runtime_drift_lines_for(window) -> list[str]:
         f"  Working set: {_format_memory(first.working_set_mb)} -> {_format_memory(latest.working_set_mb)} | max {_format_memory(max_working_set_mb)}",
         f"  Per-minute scheduler lag: {_per_minute_delta(first.scheduler_lag_ms, latest.scheduler_lag_ms, span_s, precision=1)}",
         f"  Per-minute log history: {_per_minute_delta(first.log_history_count, latest.log_history_count, span_s, precision=1)}",
-        f"  Per-minute peak history: {_per_minute_delta(first.peak_history_points, latest.peak_history_points, span_s, precision=1)}",
-        f"  Per-minute peak buffers: {_per_minute_delta(first.peak_history_buffer_points, latest.peak_history_buffer_points, span_s, precision=1)}",
+        f"  Per-minute metric history: {_per_minute_delta(first.metric_history_points, latest.metric_history_points, span_s, precision=1)}",
+        f"  Per-minute metric buffers: {_per_minute_delta(first.metric_history_buffer_points, latest.metric_history_buffer_points, span_s, precision=1)}",
         f"  Per-minute sensorgram rows: {_per_minute_delta(first.sensorgram_rows, latest.sensorgram_rows, span_s, precision=1)}",
         f"  Per-minute working set: {_per_minute_delta(first.working_set_mb, latest.working_set_mb, span_s, precision=2)} MB/min",
         "  Top growth contributors:",

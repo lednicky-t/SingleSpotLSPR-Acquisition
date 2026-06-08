@@ -28,6 +28,9 @@ def _write_payload(payload: dict, path: Path) -> None:
 def _coerce_processing_settings(raw: object) -> ProcessingSettings:
     defaults = asdict(ProcessingSettings())
     if isinstance(raw, dict):
+        if "peak_tracking_mode" in raw and "spectrum_tracking_mode" not in raw:
+            raw = dict(raw)
+            raw["spectrum_tracking_mode"] = raw["peak_tracking_mode"]
         defaults.update({key: value for key, value in raw.items() if key in defaults})
     if defaults.get("baseline_method") == "asls":
         defaults["baseline_method"] = "linear"
@@ -100,7 +103,7 @@ def load_processing_settings_from_hdf5(path: Path) -> ProcessingSettings:
                 "polynomial_order": attrs.get("processing_polynomial_order", 2),
                 "fit_window_width_nm": attrs.get("processing_fit_window_width_nm", 120.0),
                 "analysis_resolution_nm": attrs.get("processing_analysis_resolution_nm", 0.001),
-                "peak_tracking_mode": attrs.get("peak_tracking_mode", "poly_max"),
+                "spectrum_tracking_mode": attrs.get("spectrum_tracking_mode", attrs.get("peak_tracking_mode", "poly_max")),
                 "trace_noise_window_s": attrs.get("processing_trace_noise_window_s", 10.0),
             }
             trace_metrics = attrs.get("trace_metrics", ["smoothed_max", "centroid"])

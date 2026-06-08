@@ -33,7 +33,7 @@ def processing_cache_token(spectrum: Spectrum | None, settings: ProcessingSettin
         settings.fit_method,
         settings.polynomial_order,
         settings.fit_window_width_nm,
-        settings.peak_tracking_mode,
+        settings.spectrum_tracking_mode,
     )
 
 
@@ -90,12 +90,12 @@ def analysis_metrics_cache_token(
         settings.polynomial_order,
         settings.fit_window_width_nm,
         settings.analysis_resolution_nm,
-        settings.peak_tracking_mode,
+        settings.spectrum_tracking_mode,
     )
 
 
 def needs_gaussian_metric(settings: ProcessingSettings) -> bool:
-    return settings.peak_tracking_mode == "gaussian_center" or "gaussian_center" in settings.trace_metrics
+    return settings.spectrum_tracking_mode == "gaussian_center" or "gaussian_center" in settings.trace_metrics
 
 
 def get_processed_spectrum(
@@ -142,7 +142,7 @@ def compute_peak_metric_nm(processed: Spectrum, fit: Spectrum | None, settings: 
     peak = metrics.get("primary_peak_nm")
     if isinstance(peak, (int, float)) and np.isfinite(float(peak)):
         return float(peak)
-    return compute_metric_nm(settings.peak_tracking_mode, processed, fit, settings)
+    return compute_metric_nm(settings.spectrum_tracking_mode, processed, fit, settings)
 
 
 def compute_trace_metrics(
@@ -351,7 +351,7 @@ def get_analysis_metrics(
         "gaussian_center": gaussian_center_nm,
         "poly_max": poly_peak_nm,
     }
-    primary_mode = settings.peak_tracking_mode
+    primary_mode = settings.spectrum_tracking_mode
     primary_peak_nm = metric_values.get(primary_mode, dense_max_nm)
     if not np.isfinite(float(primary_peak_nm)):
         primary_peak_nm = dense_max_nm

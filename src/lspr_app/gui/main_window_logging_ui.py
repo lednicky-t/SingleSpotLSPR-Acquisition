@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 import logging
 
 from PyQt6.QtCore import Qt, QTimer
@@ -107,11 +108,13 @@ def initialize_logging_ui_for(window) -> None:
     window._diagnostics = DiagnosticsConfig.from_env()
     window._quiet_diagnostics_mode = window._diagnostics.quiet_mode
     window._suppress_diagnostic_info_logs = window._diagnostics.suppress_info_logs
+    window._export_diagnostic_events = window._diagnostics.export_diagnostic_events
     window._log_follow_enabled = not window._quiet_diagnostics_mode
     window._ui_logger.info(
-        "Startup diagnostics flags resolved | quiet=%s | file_info=%s",
+        "Startup diagnostics flags resolved | quiet=%s | file_info=%s | diag_export=%s",
         "on" if window._quiet_diagnostics_mode else "off",
         "off" if window._suppress_diagnostic_info_logs else "on",
+        "on" if window._export_diagnostic_events else "off",
     )
     window._log_bridge = None
     window._log_handler = None
@@ -129,6 +132,13 @@ def initialize_logging_ui_for(window) -> None:
     window._last_log_buffer_delay_ms: float | None = None
     window._last_log_buffer_total_ms: float | None = None
     window._log_buffer_requested_at: float | None = None
+    window._diagnostic_export_buffer: list[dict[str, object]] = []
+    window._diagnostic_export_path = None
+    window._last_diagnostic_export_flush_ms: float | None = None
+    window._diagnostic_snapshot_export_events = deque(maxlen=4000)
+    window._diagnostic_snapshot_export_last_ts = 0.0
+    window._diagnostic_snapshot_export_interval_s = 2.5
+    window._last_diagnostic_snapshot_export_ms: float | None = None
     window._log_throttle_state: dict[str, tuple[float, str]] = {}
     window._log_emit_levels = {
         logging.INFO,

@@ -242,16 +242,19 @@ def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
     window._analysis_cache_result = (np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64), {})
     window._analysis_metrics_cache_key = None
     window._analysis_metrics_cache_result = {}
+    try:
+        window._refresh_spectrum_plot(processed, fit)
+        window._autoscale_spectrum_plot()
+    except Exception as exc:
+        window._log_error(f"Spectrum refresh failed: {exc}")
     window._update_poly_warning_indicator(fit)
-    window._ui_refresh_state.plot_render_dirty = True
-    window._request_plot_refresh()
     window._log_throttled(
         "plot_refresh",
         f"Plot refreshed | mode={window.plot_selector.currentText().lower()} | fit={'on' if fit is not None else 'off'}",
         level=logging.DEBUG,
         min_interval=0.75,
     )
-    window._request_deferred_ui_refresh(trace_plot=True, live_estimate=True, telemetry=True, trace_label="Peak position (nm)")
+    window._request_deferred_ui_refresh(trace_plot=True, live_estimate=True, telemetry=True, trace_label="Metric position (nm)")
     if window._pending_plot_request is not None:
         pending = window._pending_plot_request
         window._pending_plot_request = None
@@ -387,10 +390,7 @@ def flush_plot_refreshes_for(window) -> None:
         if elapsed_ms >= 2.0:
             window._log_throttled(
                 "gui_plot_refresh",
-                (
-                    "GUI plot refresh: "
-                    f"{elapsed_ms:.2f} ms | dirty={int(bool(getattr(getattr(window, '_ui_refresh_state', None), 'plot_render_dirty', False)))}"
-                ),
+                f"GUI plot refresh: {elapsed_ms:.2f} ms",
                 level=logging.INFO,
                 min_interval=0.5,
             )
@@ -480,16 +480,15 @@ def set_sensorgram_frozen_for(window, frozen: bool) -> None:
         window.sensorgram_freeze_button.blockSignals(False)
     window._update_sensorgram_freeze_button_icon()
     if not frozen:
-        window._refresh_trace_plot("Peak position (nm)")
+        window._refresh_trace_plot("Metric position (nm)")
         window._ui_refresh_state.metric_plot_dirty = False
         window._request_trace_autoscale()
     window._schedule_acquisition_state_persist()
 
 
 def clear_trace_history_for(window) -> None:
-    window._peak_history.clear()
-    if hasattr(window, "_peak_history_buffers"):
-        window._peak_history_buffers.clear()
+    if hasattr(window, "_metric_history_buffers"):
+        window._metric_history_buffers.clear()
     if hasattr(window, "_metric_render_display_cache"):
         window._metric_render_display_cache.clear()
     if hasattr(window, "_metric_render_state_cache"):
@@ -507,12 +506,12 @@ def clear_trace_history_for(window) -> None:
     signal = window._session.state.absorbance or window._session.state.sample
     if signal is not None:
         processed, _ = window._get_analysis_processed_spectrum(signal)
-        window._peak_reference_processed = (
-            processed.with_metadata(role="peak_reference_reset") if processed is not None else None
+        window._metric_reference_processed = (
+            processed.with_metadata(role="metric_reference_reset") if processed is not None else None
         )
     else:
-        window._peak_reference_processed = None
-    window._refresh_trace_plot("Peak position (nm)")
+        window._metric_reference_processed = None
+    window._refresh_trace_plot("Metric position (nm)")
     window._update_trace_stats()
     window.status_label.setText("Metric history cleared.")
 
@@ -522,7 +521,7 @@ def compute_centroid_nm_for(window, processed: Spectrum, fit: Spectrum | None) -
 
 
 def reference_peak_nm_for_shift_for(window) -> float | None:
-    reference = window._peak_reference_processed
+    reference = window._metric_reference_processed
     if reference is None:
         return None
     finite = np.isfinite(reference.values)
@@ -548,7 +547,7 @@ def build_summary_text_for(window) -> str:
     smoothing_method = str(processing.smoothing_method).replace("_", " ")
     crop_method = str(getattr(processing, "crop_method", "fixed_width")).replace("_", " ")
     fit_method = str(getattr(processing, "fit_method", "none")).replace("_", " ")
-    peak_tracking_mode = str(getattr(processing, "peak_tracking_mode", "smoothed_max")).replace("_", " ")
+    spectrum_tracking_mode = str(processing.spectrum_tracking_mode).replace("_", " ")
     return "\n".join(
         [
             "Recording settings",
@@ -577,7 +576,7 @@ def build_summary_text_for(window) -> str:
             f"  Fit width: {processing.fit_window_width_nm:.0f} nm",
             f"  Analysis resolution: {getattr(processing, 'analysis_resolution_nm', 0.001):.6f} nm",
             f"  Noise window: {processing.trace_noise_window_s:.1f} s",
-            f"  Peak trace: {peak_tracking_mode}",
+            f"  Spectrum trace: {spectrum_tracking_mode}",
             f"  Metric traces: {', '.join(processing.trace_metrics)}",
         ]
     )
@@ -697,7 +696,7 @@ def handle_live_setting_change_for(window) -> None:
             window._ui_task_scheduler.cancel("live_processed")
         window._ui_refresh_state.metric_plot_dirty = True
         window._ui_refresh_state.telemetry_dirty = True
-        window._ui_refresh_state.pending_metric_label = "Peak position (nm)"
+        window._ui_refresh_state.pending_metric_label = "Metric position (nm)"
         window._request_live_visual_refresh(0)
         window._request_trace_autoscale()
         window.status_label.setText("Live display window reset after settings change.")

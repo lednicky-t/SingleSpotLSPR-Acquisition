@@ -94,7 +94,7 @@ def current_processing_settings(window) -> ProcessingSettings:
         polynomial_order=window.poly_order_spin.value(),
         fit_window_width_nm=window.fit_window_spin.value(),
         analysis_resolution_nm=analysis_resolution_value(window.analysis_resolution_spin),
-        peak_tracking_mode=window.peak_metric_combo.currentText(),
+        spectrum_tracking_mode=window.metric_mode_combo.currentText(),
         trace_noise_window_s=window.trace_noise_window_spin.value(),
         trace_metrics=selected_trace_metrics(window),
     )
@@ -133,7 +133,7 @@ def apply_processing_settings_to_widgets(window, settings: ProcessingSettings) -
     window.poly_order_spin.setValue(settings.polynomial_order)
     window.fit_window_spin.setValue(int(round(settings.fit_window_width_nm)))
     set_analysis_resolution_value(window.analysis_resolution_spin, float(getattr(settings, "analysis_resolution_nm", 0.001)))
-    window.peak_metric_combo.setCurrentText(settings.peak_tracking_mode)
+    window.metric_mode_combo.setCurrentText(settings.spectrum_tracking_mode)
     window.trace_noise_window_spin.setValue(float(getattr(settings, "trace_noise_window_s", 10.0)))
     trace_metrics = set(getattr(settings, "trace_metrics", ["smoothed_max", "centroid"]))
     window.trace_max_check.setChecked("smoothed_max" in trace_metrics)
@@ -206,7 +206,7 @@ def load_processing_settings_dialog(window) -> None:
 
 
 def primary_trace_metric(window) -> str:
-    peak_mode = current_processing_settings(window).peak_tracking_mode
+    peak_mode = current_processing_settings(window).spectrum_tracking_mode
     selected = selected_trace_metrics(window)
     if peak_mode in selected:
         return peak_mode

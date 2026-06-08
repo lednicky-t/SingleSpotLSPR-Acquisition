@@ -33,11 +33,19 @@ class ProcessingSettings:
     polynomial_order: int = 2
     fit_window_width_nm: float = 120.0
     analysis_resolution_nm: float = 0.001
-    peak_tracking_mode: str = "poly_max"
+    spectrum_tracking_mode: str = "poly_max"
     trace_noise_window_s: float = 10.0
     trace_metrics: list[str] = field(
         default_factory=lambda: ["smoothed_max", "centroid"]
     )
+
+    @property
+    def peak_tracking_mode(self) -> str:
+        return self.spectrum_tracking_mode
+
+    @peak_tracking_mode.setter
+    def peak_tracking_mode(self, value: str) -> None:
+        self.spectrum_tracking_mode = value
 
 
 @dataclass(slots=True)

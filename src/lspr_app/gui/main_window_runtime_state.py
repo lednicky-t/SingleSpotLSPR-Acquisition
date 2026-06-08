@@ -11,7 +11,6 @@ class UiRefreshState:
     stats_dirty: bool = False
     metric_plot_dirty: bool = False
     session_stats_dirty: bool = False
-    plot_render_dirty: bool = False
     pending_metric_label: str | None = None
 
     @property

@@ -27,7 +27,14 @@ def restore_ui_state(window) -> None:
     sensorgram_view_mode = ui_state.get("sensorgram_view_mode")
     sensorgram_content_mode = ui_state.get("sensorgram_content_mode")
     trace_display_window_s = ui_state.get("trace_display_window_s")
-    sensorgram_downsampling_enabled = ui_state.get("sensorgram_downsampling_enabled")
+    metric_display_points = ui_state.get("metric_display_points")
+    metric_autoscale_follow_latest_buffer_fraction = ui_state.get("metric_autoscale_follow_latest_buffer_fraction")
+    metric_autoscale_min_interval_s = ui_state.get("metric_autoscale_min_interval_s")
+    metric_autoscale_throttle_mode = ui_state.get("metric_autoscale_throttle_mode")
+    metric_autoscale_skip_tiny_changes_enabled = ui_state.get("metric_autoscale_skip_tiny_changes_enabled")
+    sensorgram_line_mode = ui_state.get("sensorgram_line_mode")
+    plot_antialias_enabled = ui_state.get("plot_antialias_enabled")
+    sensorgram_heatmap_history_max_rows = ui_state.get("sensorgram_heatmap_history_max_rows")
     sensorgram_frozen = ui_state.get("sensorgram_frozen")
     left_controls_visible = ui_state.get("left_controls_visible")
     sensorgram_visible = ui_state.get("sensorgram_visible")
@@ -106,10 +113,36 @@ def restore_ui_state(window) -> None:
         window._apply_sensorgram_content_mode(save=False)
     if isinstance(trace_display_window_s, (int, float)) and float(trace_display_window_s) > 0:
         window._trace_display_window_s = window._normalize_sensorgram_display_window_s(trace_display_window_s)
-    if isinstance(sensorgram_downsampling_enabled, (bool, str)):
-        window._sensorgram_downsampling_enabled = window._normalize_sensorgram_downsampling_enabled(
-            sensorgram_downsampling_enabled
-        )
+    if isinstance(metric_display_points, (int, float)) and int(metric_display_points) > 0:
+        window._plot_display_points = max(int(metric_display_points), 1)
+    if isinstance(metric_autoscale_follow_latest_buffer_fraction, (int, float)):
+        window._metric_autoscale_follow_latest_buffer_fraction = max(float(metric_autoscale_follow_latest_buffer_fraction), 0.0)
+    if isinstance(metric_autoscale_min_interval_s, (int, float)):
+        window._metric_autoscale_min_interval_s = max(float(metric_autoscale_min_interval_s), 0.0)
+    if isinstance(metric_autoscale_throttle_mode, str) and metric_autoscale_throttle_mode:
+        window._metric_autoscale_throttle_mode = metric_autoscale_throttle_mode
+    if isinstance(metric_autoscale_skip_tiny_changes_enabled, (bool, str)):
+        if isinstance(metric_autoscale_skip_tiny_changes_enabled, bool):
+            window._metric_autoscale_skip_tiny_changes_enabled = bool(metric_autoscale_skip_tiny_changes_enabled)
+        else:
+            window._metric_autoscale_skip_tiny_changes_enabled = str(metric_autoscale_skip_tiny_changes_enabled).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+    if isinstance(sensorgram_line_mode, str):
+        window._sensorgram_line_step_mode = window._normalize_sensorgram_line_mode(sensorgram_line_mode)
+    if isinstance(plot_antialias_enabled, (bool, str)):
+        if isinstance(plot_antialias_enabled, bool):
+            window._plot_antialias_enabled = bool(plot_antialias_enabled)
+        else:
+            window._plot_antialias_enabled = str(plot_antialias_enabled).strip().lower() in {"1", "true", "yes", "on"}
+        import pyqtgraph as pg
+
+        pg.setConfigOptions(antialias=window._plot_antialias_enabled)
+    if isinstance(sensorgram_heatmap_history_max_rows, (int, float)) and float(sensorgram_heatmap_history_max_rows) > 0:
+        window._sensorgram_heatmap_history_max_rows = int(max(int(sensorgram_heatmap_history_max_rows), 16))
     if isinstance(sensorgram_frozen, bool):
         window._sensorgram_frozen = bool(sensorgram_frozen)
         window._update_sensorgram_freeze_button_icon()
@@ -126,7 +159,6 @@ def restore_ui_state(window) -> None:
                 window.residual_view.setYRange(y_min, y_max, padding=0.0)
                 window._residual_axis_autoscaled = True
     window._update_sensorgram_display_window_button()
-    window._update_sensorgram_downsampling_button()
     window._start_maximized = bool(maximized)
     window._sync_view_actions()
 
@@ -177,7 +209,18 @@ def save_ui_state(window) -> None:
             "sensorgram_view_mode": window._sensorgram_view_mode,
             "sensorgram_content_mode": window._sensorgram_content_mode,
             "trace_display_window_s": float(window._trace_display_window_s),
-            "sensorgram_downsampling_enabled": bool(window._sensorgram_downsampling_enabled),
+            "metric_display_points": int(getattr(window, "_plot_display_points", 512)),
+            "metric_autoscale_follow_latest_buffer_fraction": float(
+                getattr(window, "_metric_autoscale_follow_latest_buffer_fraction", 0.05)
+            ),
+            "metric_autoscale_min_interval_s": float(getattr(window, "_metric_autoscale_min_interval_s", 1.0)),
+            "metric_autoscale_throttle_mode": str(getattr(window, "_metric_autoscale_throttle_mode", "Medium")),
+            "metric_autoscale_skip_tiny_changes_enabled": bool(
+                getattr(window, "_metric_autoscale_skip_tiny_changes_enabled", True)
+            ),
+            "sensorgram_line_mode": "linear" if getattr(window, "_sensorgram_line_step_mode", None) is None else str(window._sensorgram_line_step_mode),
+            "plot_antialias_enabled": bool(getattr(window, "_plot_antialias_enabled", False)),
+            "sensorgram_heatmap_history_max_rows": int(getattr(window, "_sensorgram_heatmap_history_max_rows", 800)),
             "sensorgram_frozen": bool(getattr(window, "_sensorgram_frozen", False)),
             "left_controls_visible": window._left_controls_scroll.isVisible(),
             "sensorgram_visible": window._sensorgram_block.isVisible(),

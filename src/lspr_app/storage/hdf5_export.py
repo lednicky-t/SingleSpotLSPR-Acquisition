@@ -9,6 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 from time import monotonic
 from datetime import datetime, timezone
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -531,7 +532,8 @@ class HDF5MeasurementWriter:
         self._metadata.attrs["processing_polynomial_order"] = processing.polynomial_order
         self._metadata.attrs["processing_fit_window_width_nm"] = processing.fit_window_width_nm
         self._metadata.attrs["processing_analysis_resolution_nm"] = processing.analysis_resolution_nm
-        self._metadata.attrs["peak_tracking_mode"] = processing.peak_tracking_mode
+        self._metadata.attrs["spectrum_tracking_mode"] = processing.spectrum_tracking_mode
+        self._metadata.attrs["peak_tracking_mode"] = processing.spectrum_tracking_mode
         self._metadata.attrs["processing_trace_noise_window_s"] = processing.trace_noise_window_s
         self._metadata.attrs["trace_metrics"] = _string_array(processing.trace_metrics)
 
@@ -813,3 +815,71 @@ def _float_or_nan(value: object) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float("nan")
+
+
+def load_processed_metric_history(path: Path, metric_names: set[str] | None = None) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    path = Path(path).expanduser()
+    if not path.exists():
+        return {}
+    try:
+        with h5py.File(path, "r") as handle:
+            processed_group = handle.get("processed")
+            if processed_group is None:
+                return {}
+            metrics_group = processed_group.get("metrics")
+            if metrics_group is None:
+                return {}
+            time_dataset = metrics_group.get("t_ms")
+            if time_dataset is None:
+                return {}
+            times = np.asarray(time_dataset[...], dtype=np.float64) / 1000.0
+            if len(times) == 0:
+                return {}
+            history: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+            excluded = {
+                LSPR_PROCESSED_METRICS_ACQUIRED_AT_UNIX_MS_DATASET_NAME,
+                "t_ms",
+                "sample_index",
+            }
+            for name, dataset in metrics_group.items():
+                if name in excluded or not isinstance(dataset, h5py.Dataset):
+                    continue
+                if metric_names is not None and name not in metric_names:
+                    continue
+                if dataset.ndim != 1:
+                    continue
+                values = np.asarray(dataset[...], dtype=np.float64)
+                if len(values) != len(times):
+                    continue
+                history[name] = (times, values)
+            return history
+    except Exception:
+        return {}
+def load_processed_metric_history(path: Path, metric_names: set[str] | None = None) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    from lspr_app.storage.metric_archive import load_metric_archive_history
+
+    if path.suffix.lower() == ".jsonl":
+        return load_metric_archive_history(path, metric_names=metric_names)
+
+    series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    with h5py.File(path, "r") as handle:
+        processed_group = handle.get("processed")
+        if processed_group is None:
+            return {}
+        metrics_group = processed_group.get("metrics")
+        if metrics_group is None:
+            return {}
+
+        time_ds = metrics_group.get("t_ms")
+        if time_ds is None:
+            return {}
+        times_s = np.asarray(time_ds[...], dtype=float) / 1000.0
+
+        for metric_name, dataset in metrics_group.items():
+            if metric_name in {"t_ms", "acquired_at_unix_ms", "sample_index"}:
+                continue
+            if metric_names is not None and metric_name not in metric_names:
+                continue
+            values = np.asarray(dataset[...], dtype=float)
+            series[metric_name] = (times_s.copy(), values)
+    return series

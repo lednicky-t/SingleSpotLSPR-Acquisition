@@ -193,9 +193,9 @@ def build_processing_group(window) -> QGroupBox:
     poly_label.setToolTip("Polynomial order used when polynomial fitting is selected.")
     processing_layout.addRow(poly_label, poly_row)
 
-    peak_label = QLabel("Peak method")
-    peak_label.setToolTip("Choose which peak metric is shown in the metric plot and summary.")
-    processing_layout.addRow(peak_label, window.peak_metric_combo)
+    metric_label = QLabel("Metric mode")
+    metric_label.setToolTip("Choose which spectrum tracking metric is shown in the metric plot and summary.")
+    processing_layout.addRow(metric_label, window.metric_mode_combo)
 
     trace_label = QLabel("Metric")
     trace_label.setToolTip("Toggle individual metric traces on and off.")
@@ -240,7 +240,7 @@ def configure_processing_group_controls(window) -> None:
         window.crop_method_combo,
         window.fit_method_combo,
         window.poly_order_spin,
-        window.peak_metric_combo,
+        window.metric_mode_combo,
     )
     uniform_width = max(control.sizeHint().width() for control in uniform_controls)
     uniform_width = max(int(round(uniform_width * 0.8)), 84)

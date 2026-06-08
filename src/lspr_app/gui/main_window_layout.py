@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -85,18 +86,13 @@ def build_main_layout_for(window) -> None:
     window.sensorgram_view_mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
     window.sensorgram_view_mode_button.clicked.connect(window._cycle_sensorgram_view_mode)
     window._update_sensorgram_view_mode_button()
-    window.sensorgram_downsampling_button.setObjectName("sensorgramDownsamplingButton")
-    window.sensorgram_downsampling_button.setAutoRaise(True)
-    window.sensorgram_downsampling_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-    window.sensorgram_downsampling_button.setCursor(Qt.CursorShape.PointingHandCursor)
-    window.sensorgram_downsampling_button.clicked.connect(window._cycle_sensorgram_downsampling_enabled)
-    window._update_sensorgram_downsampling_button()
     window.sensorgram_content_mode_button.setObjectName("sensorgramContentModeButton")
     window.sensorgram_content_mode_button.setAutoRaise(True)
     window.sensorgram_content_mode_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
     window.sensorgram_content_mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
     window.sensorgram_content_mode_button.clicked.connect(window._cycle_sensorgram_content_mode)
     window._update_sensorgram_content_mode_button()
+    window.sensorgram_settings_button.clicked.connect(window._show_sensorgram_plot_settings_dialog)
     window.sensorgram_window_button.setObjectName("sensorgramWindowButton")
     window.sensorgram_window_button.setAutoRaise(True)
     window.sensorgram_window_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
@@ -110,8 +106,6 @@ def build_main_layout_for(window) -> None:
     trace_title_row.setSpacing(6)
     trace_title_row.addWidget(trace_title)
     trace_title_row.addWidget(window.sensorgram_view_mode_button)
-    trace_title_row.addWidget(window.sensorgram_downsampling_button)
-    trace_title_row.addWidget(window.sensorgram_window_button)
     trace_title_row.addWidget(window.sensorgram_content_mode_button)
     trace_title_row.addStretch(1)
     trace_title_row_widget = QWidget()
@@ -124,6 +118,7 @@ def build_main_layout_for(window) -> None:
     trace_left_field.addWidget(window.trace_record_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
     trace_left_field.addWidget(window.sensorgram_freeze_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
     trace_left_field.addWidget(window.clear_trace_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+    trace_left_field.addWidget(window.sensorgram_settings_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
     trace_left_field.addStretch(1)
 
     trace_right_field = QVBoxLayout()
@@ -292,6 +287,8 @@ def build_main_layout_for(window) -> None:
     footer_bar.addWidget(window.status_label, 1)
     footer_bar.addWidget(window.live_estimate, 1)
     footer_bar.addWidget(window.telemetry_label, 2)
+    # Keep the detailed telemetry available for diagnostics exports, but remove it from the visible footer.
+    window.telemetry_label.setVisible(False)
     window._window_size_grip = QSizeGrip(window)
     window._window_size_grip.setToolTip("Drag to resize the window.")
     footer_bar.addWidget(window._window_size_grip, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)

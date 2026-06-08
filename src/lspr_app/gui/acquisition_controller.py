@@ -25,7 +25,7 @@ from lspr_app.gui.experiment_control_runtime import (
     experiment_runtime_state_name,
 )
 from lspr_app.gui.main_window_headers import update_source_link_buttons
-from lspr_app.gui.trace_history_buffer import AppendOnlyMetricHistoryBuffer, MetricHistoryBuffer
+from lspr_app.gui.trace_history_buffer import MetricHistoryBuffer
 from lspr_app.gui.workers import (
     AcquisitionRequest,
     AcquisitionResult,
@@ -131,7 +131,7 @@ def _handle_measurement_file_compression_finished(window, result: object) -> Non
         window._log_warning("Measurement file compression finished with an unexpected result payload.")
         window._log_success("Measurement recording stopped.")
         window._refresh_plot()
-        window._refresh_trace_plot("Peak position (nm)")
+        window._refresh_trace_plot("Metric position (nm)")
         window._request_trace_autoscale()
         window._refresh_session_summary(force=True)
         window._update_window_mode_label()
@@ -141,7 +141,7 @@ def _handle_measurement_file_compression_finished(window, result: object) -> Non
     window._log_success("Measurement file compression finished.")
     window._log_success("Measurement recording stopped.")
     window._refresh_plot()
-    window._refresh_trace_plot("Peak position (nm)")
+    window._refresh_trace_plot("Metric position (nm)")
     window._request_trace_autoscale()
     window._refresh_session_summary(force=True)
     window._update_window_mode_label()
@@ -156,7 +156,7 @@ def _handle_measurement_file_compression_failed(window, message: str) -> None:
     window._log_warning(f"Measurement file compression failed: {message}")
     window._log_success("Measurement recording stopped.")
     window._refresh_plot()
-    window._refresh_trace_plot("Peak position (nm)")
+    window._refresh_trace_plot("Metric position (nm)")
     window._request_trace_autoscale()
     window._refresh_session_summary(force=True)
     window._update_window_mode_label()
@@ -277,6 +277,10 @@ def request_manual_acquisition(window, kind: str) -> None:
             window._session.set_dark(current_sample)
         else:
             window._session.set_reference(current_sample)
+        from lspr_app.storage.measurement_archive import ensure_temp_measurement_writer
+        ensure_temp_measurement_writer(window)
+
+
         if window._measurement_writer is not None:
             window._measurement_writer.update_baselines(
                 window._session.state.dark,
@@ -289,7 +293,7 @@ def request_manual_acquisition(window, kind: str) -> None:
             window.plot_selector.blockSignals(False)
         window._refresh_spectrum_plot(window._session.get_plot_data(window.PLOT_MODES[target_plot]), None)
         window._update_dark_reference_button_icons()
-        window._request_deferred_ui_refresh(summary=True, telemetry=True)
+        window._request_deferred_ui_refresh(telemetry=True)
         window._schedule_acquisition_state_persist()
         window._log_success(f"{kind.capitalize()} spectrum cached from live sample without pausing acquisition.")
         window.status_label.setText(f"{kind.capitalize()} cached from live sample.")
@@ -642,15 +646,42 @@ def flush_live_processed_results(window) -> None:
     window._analysis_metrics_cache_result = {}
     window._update_poly_warning_indicator(fit)
     window._live_plot_update_counter = int(getattr(window, "_live_plot_update_counter", 0)) + 1
-    window._ui_refresh_state.plot_render_dirty = True
-    if not window._live_active:
-        window._request_plot_refresh()
+    spectrum_render_started = perf_counter()
+    try:
+        window._refresh_spectrum_plot(processed, fit)
+        window._autoscale_spectrum_plot()
+        window._update_spectrum_stats(processed, fit)
+        spectrum_render_finished = perf_counter()
+        window._last_plot_refresh_ms = (spectrum_render_finished - spectrum_render_started) * 1000.0
+        previous_finish = getattr(window, "_last_plot_refresh_finished_at", None)
+        window._last_plot_refresh_gap_ms = (
+            None if previous_finish is None else (spectrum_render_finished - float(previous_finish)) * 1000.0
+        )
+        window._last_plot_refresh_finished_at = spectrum_render_finished
+        refresh_timestamps = getattr(window, "_plot_refresh_timestamps", None)
+        if refresh_timestamps is None:
+            refresh_timestamps = []
+            window._plot_refresh_timestamps = refresh_timestamps
+        refresh_timestamps.append(spectrum_render_finished)
+        window_frames = max(2, int(getattr(window, "_plot_refresh_rate_window_frames", 5)))
+        if len(refresh_timestamps) > window_frames:
+            refresh_timestamps = refresh_timestamps[-window_frames:]
+        window._plot_refresh_timestamps = refresh_timestamps
+        if len(window._plot_refresh_timestamps) >= 2:
+            first_timestamp = float(window._plot_refresh_timestamps[0])
+            last_timestamp = float(window._plot_refresh_timestamps[-1])
+            span_s = last_timestamp - first_timestamp
+            if span_s > 0:
+                window._actual_plot_refresh_rate_hz = (len(window._plot_refresh_timestamps) - 1) / span_s
+            else:
+                window._actual_plot_refresh_rate_hz = None
+        else:
+            window._actual_plot_refresh_rate_hz = None
+    except Exception as exc:
+        window._log_error(f"Spectrum refresh failed: {exc}")
     refresh_state = window._ui_refresh_state
-    refresh_state.metric_plot_dirty = True
     refresh_state.live_estimate_dirty = True
     refresh_state.telemetry_dirty = True
-    refresh_state.pending_metric_label = "Peak position (nm)"
-    window._request_trace_autoscale()
     window._append_processed_trace_history(processed, fit)
     window._append_sensorgram_heatmap_history(processed)
     window._log_throttled(
@@ -724,8 +755,7 @@ def start_live_acquisition(window) -> None:
     window._last_metric_render_setdata_calls = None
     window._last_metric_render_setdata_skips = None
     window._last_metric_view_cache_modes = {}
-    window._metric_live_display_points = 384
-    window._metric_idle_display_points = 512
+    window._plot_display_points = max(int(getattr(window, "_plot_display_points", 512)), 1)
     window._trace_plot_paint_count = 0
     window._trace_plot_paint_total_ms = None
     window._trace_plot_paint_max_ms = None
@@ -790,9 +820,10 @@ def start_live_acquisition(window) -> None:
     window._live_display_started_at = perf_counter()
     window._live_trace_started_at = None
     window._last_live_processing_perf = None
-    window._peak_history.clear()
-    if hasattr(window, "_peak_history_buffers"):
-        window._peak_history_buffers.clear()
+    if hasattr(window, "_metric_history_buffers"):
+        window._metric_history_buffers.clear()
+    if hasattr(window, "_plot_view_cache") and hasattr(window._plot_view_cache, "clear_live_absolute_metric_cache"):
+        window._plot_view_cache.clear_live_absolute_metric_cache()
     window._reset_live_accumulator()
     ctx = mp.get_context("spawn")
     window._live_stop_event = ctx.Event()
@@ -893,8 +924,7 @@ def stop_live_acquisition(window, message: str = "Live acquisition stopped.") ->
     window._last_metric_render_setdata_calls = None
     window._last_metric_render_setdata_skips = None
     window._last_metric_view_cache_modes = {}
-    window._metric_live_display_points = 384
-    window._metric_idle_display_points = 512
+    window._plot_display_points = max(int(getattr(window, "_plot_display_points", 512)), 1)
     window._trace_plot_paint_count = 0
     window._trace_plot_paint_total_ms = None
     window._trace_plot_paint_max_ms = None
@@ -1203,9 +1233,10 @@ def start_measurement_run(window) -> None:
         window._apply_sensorgram_view_mode(save=False)
     if hasattr(window, "_apply_sensorgram_content_mode"):
         window._apply_sensorgram_content_mode(save=False)
-    window._peak_history.clear()
-    if hasattr(window, "_peak_history_buffers"):
-        window._peak_history_buffers.clear()
+    if hasattr(window, "_metric_history_buffers"):
+        window._metric_history_buffers.clear()
+    if hasattr(window, "_plot_view_cache") and hasattr(window._plot_view_cache, "clear_live_absolute_metric_cache"):
+        window._plot_view_cache.clear_live_absolute_metric_cache()
     if hasattr(window, "_sensorgram_heatmap_history"):
         window._sensorgram_heatmap_history.clear()
     if hasattr(window, "_sensorgram_heatmap_history_revision"):
@@ -1220,9 +1251,9 @@ def start_measurement_run(window) -> None:
         window._sensorgram_heatmap_levels = None
     window._trace_display_cursor_s = 0.0
     window._live_trace_started_at = None
-    window._peak_reference_processed = None
+    window._metric_reference_processed = None
     window._refresh_session_statistics(force=True)
-    window._refresh_trace_plot("Peak position (nm)")
+    window._refresh_trace_plot("Metric position (nm)")
     window._request_trace_autoscale()
     set_measurement_buttons_enabled(window, True)
     window.status_label.setText(f"Recording to {destination.name}")
@@ -1264,28 +1295,23 @@ def stop_measurement_run(window) -> None:
         window._set_recording_blink_indicator(False)
     window._sync_simulation_backend_from_controls()
     if started_at is not None:
-        peak_history_buffers = getattr(window, "_peak_history_buffers", None)
-        if isinstance(peak_history_buffers, dict) and peak_history_buffers:
-            converted_history: dict[str, AppendOnlyMetricHistoryBuffer] = {}
+        metric_history_buffers = getattr(window, "_metric_history_buffers", None)
+        if isinstance(metric_history_buffers, dict) and metric_history_buffers:
             converted_buffers: dict[str, MetricHistoryBuffer] = {}
             max_points = int(getattr(window, "_metric_history_max_points", getattr(window, "_trace_history_max_points", 6000)))
-            for metric_name, buffer in peak_history_buffers.items():
+            for metric_name, buffer in metric_history_buffers.items():
                 times, values = buffer.to_arrays()
                 if len(times) == 0:
                     continue
-                converted_full_buffer = AppendOnlyMetricHistoryBuffer(max(max_points, len(times)))
                 converted_live_buffer = MetricHistoryBuffer(max_points)
                 for elapsed_s, value in zip(times.tolist(), values.tolist(), strict=False):
                     local_timestamp = (started_at + timedelta(seconds=float(elapsed_s))).astimezone().timestamp()
                     local_timestamp = float(local_timestamp)
                     value = float(value)
-                    converted_full_buffer.append(local_timestamp, value)
                     converted_live_buffer.append(local_timestamp, value)
-                if len(converted_full_buffer) > 0:
-                    converted_history[metric_name] = converted_full_buffer
+                if len(converted_live_buffer) > 0:
                     converted_buffers[metric_name] = converted_live_buffer
-            window._peak_history = converted_history
-            window._peak_history_buffers = converted_buffers
+            window._metric_history_buffers = converted_buffers
     if started_at is not None and getattr(window, "_sensorgram_heatmap_history", None):
         converted_heatmap_history: list[tuple[float, np.ndarray]] = []
         for elapsed_s, values in window._sensorgram_heatmap_history:
@@ -1299,9 +1325,9 @@ def stop_measurement_run(window) -> None:
     window._trace_view_locked = False
     window._trace_display_cursor_s = 0.0
     window._live_trace_started_at = None
-    window._peak_reference_processed = None
+    window._metric_reference_processed = None
     window._refresh_session_statistics(force=True)
-    window._refresh_trace_plot("Peak position (nm)")
+    window._refresh_trace_plot("Metric position (nm)")
     window._request_trace_autoscale()
     set_measurement_buttons_enabled(window, True)
     if measurement_path is not None and bool(getattr(window, "measurement_hdf5_compression_enabled", lambda: True)()):
@@ -1339,33 +1365,33 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
         value = metrics.get(metric_name)
         if not isinstance(value, (int, float)) or not np.isfinite(float(value)):
             continue
-        peak_history = getattr(window, "_peak_history", None)
-        if not isinstance(peak_history, dict):
-            peak_history = {}
-            window._peak_history = peak_history
-        full_buffer = peak_history.get(metric_name)
-        full_capacity = int(getattr(window, "_metric_history_max_points", getattr(window, "_trace_history_max_points", 6000)))
-        if full_buffer is None:
-            full_buffer = AppendOnlyMetricHistoryBuffer(full_capacity)
-        peak_history[metric_name] = full_buffer
-        full_buffer.append(elapsed_s, float(value))
-
-        peak_history_buffers = getattr(window, "_peak_history_buffers", None)
-        if not isinstance(peak_history_buffers, dict):
-            peak_history_buffers = {}
-            window._peak_history_buffers = peak_history_buffers
-        buffer = peak_history_buffers.get(metric_name)
+        metric_history_buffers = getattr(window, "_metric_history_buffers", None)
+        if not isinstance(metric_history_buffers, dict):
+            metric_history_buffers = {}
+            window._metric_history_buffers = metric_history_buffers
+        buffer = metric_history_buffers.get(metric_name)
         max_points = int(getattr(window, "_metric_live_buffer_max_points", getattr(window, "_metric_history_max_points", getattr(window, "_trace_history_max_points", 6000))))
         if buffer is None or buffer.capacity != max_points:
             buffer = MetricHistoryBuffer(max_points)
-        peak_history_buffers[metric_name] = buffer
+        metric_history_buffers[metric_name] = buffer
         buffer.append(elapsed_s, float(value))
+        plot_view_cache = getattr(window, "_plot_view_cache", None)
+        if plot_view_cache is not None and hasattr(plot_view_cache, "append_live_absolute_metric_point"):
+            try:
+                plot_view_cache.append_live_absolute_metric_point(
+                    metric_name,
+                    float(elapsed_s),
+                    float(value),
+                    target_points=max(int(getattr(window, "_plot_display_points", 512)), 1),
+                )
+            except Exception:
+                pass
         updated = True
 
     window._trace_display_cursor_s = elapsed_s + display_step_s
 
     if updated:
-        if window._measurement_writer is not None and measurement_active:
+        if measurement_active:
             # Store the derived metric with its absolute UTC timestamp so it can be joined later without ambiguity.
             acquired_at_unix_ms = int(round(processed.acquired_at.astimezone(timezone.utc).timestamp() * 1000.0))
             metric_row = {
@@ -1380,14 +1406,21 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
                 "mse": fit.metadata.get("mse", np.nan) if fit is not None else np.nan,
                 "snr": metrics.get("snr", np.nan),
             }
-            window._measurement_writer.append_metrics([metric_row])
-        window._request_deferred_ui_refresh(trace_plot=True, stats=True, trace_label="Peak position (nm)")
+            from lspr_app.storage.measurement_archive import ensure_temp_measurement_writer
+
+            writer = window._measurement_writer
+            if writer is None:
+                writer = getattr(window, "_metric_archive_writer", None)
+            if writer is None:
+                writer = ensure_temp_measurement_writer(window)
+            writer.append_metrics([metric_row])
+        window._request_deferred_ui_refresh(trace_plot=True, trace_label="Metric position (nm)")
         window._request_trace_autoscale()
         window._log_throttled(
             "trace_append",
             (
                 "Metric point appended | points="
-                f"{len(next(iter(getattr(window, '_peak_history_buffers', {}).values()), []))} | "
+                f"{len(next(iter(getattr(window, '_metric_history_buffers', {}).values()), []))} | "
                 f"rate={window.live_rate_spin.value():.2f} Hz"
             ),
             level=logging.DEBUG,
@@ -1502,3 +1535,39 @@ def _reserve_unique_measurement_destination(destination: Path) -> Path:
             return candidate
     raise FileExistsError(f"Unable to reserve a unique measurement file name under {destination.parent}")
 
+from lspr_app.storage.measurement_archive import close_temp_measurement_writer, ensure_temp_measurement_writer
+
+
+def _is_recording_active(window: Any) -> bool:
+    for attr in (
+        "_measurement_active",
+        "_measurement_running",
+        "_recording_active",
+        "_recording_running",
+        "_session_recording_active",
+    ):
+        if bool(getattr(window, attr, False)):
+            return True
+    return False
+
+
+_original_start_live_acquisition = start_live_acquisition
+
+
+def start_live_acquisition(*args: Any, **kwargs: Any):
+    window = args[0] if args else kwargs.get("window")
+    if window is not None:
+        ensure_temp_measurement_writer(window)
+    return _original_start_live_acquisition(*args, **kwargs)
+
+
+_original_stop_live_acquisition = stop_live_acquisition
+
+
+def stop_live_acquisition(*args: Any, **kwargs: Any):
+    window = args[0] if args else kwargs.get("window")
+    try:
+        return _original_stop_live_acquisition(*args, **kwargs)
+    finally:
+        if window is not None and not _is_recording_active(window):
+            close_temp_measurement_writer(window)

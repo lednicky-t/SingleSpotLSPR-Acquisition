@@ -82,7 +82,7 @@ from lspr_app.storage.app_config import (
     save_window_ui_state,
 )
 from lspr_app.storage.csv_export import export_spectrum_to_csv
-from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter
+from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter, load_processed_metric_history
 from lspr_core import (
     DEFAULT_LAUNCH_PROFILE,
     LAUNCH_PROFILE_CONTROL_EDITOR,
@@ -119,6 +119,7 @@ from lspr_app.gui.main_window_panels import (
     build_spectrometer_page,
     configure_processing_group_controls,
 )
+from lspr_app.gui.main_window_plot_settings import show_sensorgram_plot_settings_dialog_for
 from lspr_app.gui.main_window_runtime import (
     build_runtime_drift_lines as build_runtime_drift_lines_for_runtime,
     drain_gui_housekeeping_tasks as drain_gui_housekeeping_tasks_for,
@@ -169,7 +170,7 @@ from lspr_app.gui.main_window_state import (
     save_ui_state,
     schedule_acquisition_state_persist,
 )
-from lspr_app.gui.trace_history_buffer import AppendOnlyMetricHistoryBuffer, MetricHistoryBuffer
+from lspr_app.gui.trace_history_buffer import MetricHistoryBuffer
 from lspr_app.gui.main_window_processing import (
     apply_processing_settings_to_widgets,
     populate_analysis_resolution_combo,
@@ -588,9 +589,11 @@ class MainWindow(QMainWindow):
         self._measurement_experiment_name = ""
         self._measurement_flush_interval_s = 5.0
         self._measurement_axis_lock: np.ndarray | None = None
-        self._peak_history: dict[str, AppendOnlyMetricHistoryBuffer] = {}
+        self._metric_archive_writer: AsyncHDF5MeasurementWriter | None = None
+        self._metric_archive_path: Path | None = None
+        self._metric_archive_started_at: datetime | None = None
         self._plot_view_cache = PlotViewCache()
-        self._peak_reference_processed: Spectrum | None = None
+        self._metric_reference_processed: Spectrum | None = None
         self._live_trace_started_at: datetime | None = None
         self._pending_manual_kind: str | None = None
         self._pending_source_mode: str | None = None
@@ -625,20 +628,27 @@ class MainWindow(QMainWindow):
         self._last_spectrum_marker_update_ms: float | None = None
         self._last_spectrum_residual_update_ms: float | None = None
         self._last_sensorgram_render_ms: float | None = None
+        self._last_live_trace_stats_ms: float | None = None
         self._last_sensorgram_heatmap_render_ms: float | None = None
         self._last_sensorgram_heatmap_arrays_ms: float | None = None
         self._last_sensorgram_heatmap_image_ms: float | None = None
         self._last_sensorgram_heatmap_axes_ms: float | None = None
         self._last_metric_autoscale_ms: float | None = None
         self._metric_autoscale_min_interval_s = 1.0
+        self._metric_autoscale_throttle_mode = "Medium"
+        self._metric_autoscale_skip_tiny_changes_enabled = True
         self._metric_autoscale_x_change_fraction = 0.01
         self._metric_autoscale_y_change_fraction = 0.02
+        self._metric_autoscale_follow_latest_cadence_multiplier = 1.5
+        self._metric_autoscale_follow_latest_min_buffer_s = 0.25
+        self._metric_autoscale_follow_latest_buffer_fraction = 0.05
         self._last_metric_autoscale_range: tuple[float, float, float, float] | None = None
         self._last_metric_plot_disabled_fast_path = False
         self._last_metric_render_series_export_ms: float | None = None
         self._last_metric_render_setdata_calls: int | None = None
         self._last_metric_render_setdata_skips: int | None = None
         self._last_metric_view_cache_modes: dict[str, object] = {}
+        self._live_trace_stats_count = 0
         self._trace_plot_paint_count = 0
         self._trace_plot_paint_total_ms: float | None = None
         self._trace_plot_paint_max_ms: float | None = None
@@ -711,15 +721,13 @@ class MainWindow(QMainWindow):
         self._temporal_processed_history: list[Spectrum] = []
         self._temporal_history_key: tuple[object, ...] | None = None
         self._trace_display_window_s = 60.0
-        self._sensorgram_downsampling_enabled = True
         self._trace_display_cursor_s = 0.0
         # Keep the live ring buffer bounded. Absolute mode uses a separate append-only
         # history so it can show the full run without hidden truncation.
         self._metric_live_buffer_max_points = 7200
         self._metric_history_max_points = self._metric_live_buffer_max_points
         self._trace_history_max_points = self._metric_history_max_points
-        self._metric_live_display_points = 512
-        self._metric_idle_display_points = 768
+        self._plot_display_points = 512
         self._recording_blink_visible = True
         self._processing_debug_mode_enabled = bool(load_app_setting("processing_debug_mode", False))
         set_processing_debug_mode_enabled(self._processing_debug_mode_enabled)
@@ -730,9 +738,15 @@ class MainWindow(QMainWindow):
             self._hdf5_compression_enabled = bool(hdf5_compression_setting)
         self._sensorgram_view_mode = "absolute"
         self._sensorgram_content_mode = "metric"
+        self._sensorgram_line_step_mode = None
+        self._plot_antialias_enabled = False
         self.sensorgram_view_mode_button = QToolButton()
-        self.sensorgram_downsampling_button = QToolButton()
         self.sensorgram_content_mode_button = QToolButton()
+        self.sensorgram_settings_button = self._make_frameless_icon_button(
+            tint_tabler_icon(flow_tabler_icon("settings"), QColor("#f0f3f7")),
+            "Open sensorgram plot settings.",
+            size=30,
+        )
         self.sensorgram_window_button = QToolButton()
         self._sensorgram_heatmap_history: list[tuple[float, np.ndarray]] = []
         self._sensorgram_heatmap_history_revision = 0
@@ -740,14 +754,14 @@ class MainWindow(QMainWindow):
         self._sensorgram_heatmap_wavelengths: np.ndarray | None = None
         self._sensorgram_heatmap_axis_key: tuple[int, float, float] | None = None
         self._sensorgram_heatmap_levels: tuple[float, float] | None = None
-        self._peak_history_buffers: dict[str, MetricHistoryBuffer] = {}
+        self._metric_history_buffers: dict[str, MetricHistoryBuffer] = {}
         self._last_summary_text: str = ""
         self._last_summary_refresh_ts: float = 0.0
         self._last_summary_refresh_ms: float | None = None
         self._last_session_summary_refresh_total_ms: float | None = None
         self._trace_view_locked = False
         self._trace_view_autoscaling = False
-        self._ui_refresh_state = UiRefreshState(pending_metric_label="Peak position (nm)")
+        self._ui_refresh_state = UiRefreshState(pending_metric_label="Metric position (nm)")
         self._visible_processed_plot: Spectrum | None = None
         self._visible_fit_plot: Spectrum | None = None
         self._spectrum_render_cache_key: tuple[object, ...] | None = None
@@ -790,6 +804,8 @@ class MainWindow(QMainWindow):
         self._log_buffer_enqueue_events = deque(maxlen=4000)
         self._log_perf_suppressed_events = deque(maxlen=4000)
         self._log_throttle_suppressed_events = deque(maxlen=4000)
+        self._diagnostic_export_events = deque(maxlen=4000)
+        self._diagnostic_snapshot_export_events = deque(maxlen=4000)
         self._log_append_events = deque(maxlen=4000)
         self._ui_state_timer = QTimer(self)
         self._ui_state_timer.setSingleShot(True)
@@ -862,8 +878,8 @@ class MainWindow(QMainWindow):
         self.resize(1380, 920)
         _startup_mark("window flags and icon set")
 
-        # Keep live plots responsive; heavy smoothing is not worth the UI cost here.
-        pg.setConfigOptions(antialias=False)
+        # Keep live plots responsive by default; the user can enable smoothing from plot settings.
+        pg.setConfigOptions(antialias=self._plot_antialias_enabled)
         self._apply_modern_style()
         _startup_mark("application style applied")
 
@@ -1166,9 +1182,9 @@ class MainWindow(QMainWindow):
         self.analysis_resolution_spin.setToolTip(
             "Resolution used for peak and centroid analysis. Lower values improve sub-sample tracking but cost more CPU."
         )
-        self.peak_metric_combo = QComboBox()
-        self.peak_metric_combo.addItems(["smoothed_max", "poly_max", "gaussian_center", "centroid"])
-        self.peak_metric_combo.setToolTip("Choose which peak metric is shown in the metric plot and summary.")
+        self.metric_mode_combo = QComboBox()
+        self.metric_mode_combo.addItems(["smoothed_max", "poly_max", "gaussian_center", "centroid"])
+        self.metric_mode_combo.setToolTip("Choose which spectrum tracking metric is shown in the metric plot and summary.")
         self.trace_max_check = QCheckBox("Max")
         self.trace_centroid_check = QCheckBox("Centroid")
         self.trace_poly_check = QCheckBox("Poly")
@@ -1674,6 +1690,7 @@ class MainWindow(QMainWindow):
                 "button_pressed": "#303640",
                 "accent_button": "#5d6876",
                 "accent_hover": "#707d8c",
+                "checkbox_accent": "#3a86d1",
                 "danger_button": "#8f5a61",
                 "danger_hover": "#a46a72",
                 "border": "#2b3138",
@@ -1705,6 +1722,7 @@ class MainWindow(QMainWindow):
             "button_pressed": "#dde9f3",
             "accent_button": "#2f80c1",
             "accent_hover": "#3e8dcf",
+            "checkbox_accent": "#2f80c1",
             "danger_button": "#d65a63",
             "danger_hover": "#e06a73",
             "border": "#d9e0e7",
@@ -1800,7 +1818,6 @@ class MainWindow(QMainWindow):
             }
             QToolButton#sensorgramViewModeButton,
             QToolButton#sensorgramContentModeButton,
-            QToolButton#sensorgramDownsamplingButton,
             QToolButton#sensorgramWindowButton {
                 background: transparent;
                 border: none;
@@ -1811,14 +1828,12 @@ class MainWindow(QMainWindow):
             }
             QToolButton#sensorgramViewModeButton:hover,
             QToolButton#sensorgramContentModeButton:hover,
-            QToolButton#sensorgramDownsamplingButton:hover,
             QToolButton#sensorgramWindowButton:hover {
                 background: transparent;
                 border: none;
             }
             QToolButton#sensorgramViewModeButton:pressed,
             QToolButton#sensorgramContentModeButton:pressed,
-            QToolButton#sensorgramDownsamplingButton:pressed,
             QToolButton#sensorgramWindowButton:pressed {
                 background: transparent;
                 border: none;
@@ -2014,8 +2029,8 @@ class MainWindow(QMainWindow):
                 background: %(field)s;
             }
             QCheckBox::indicator:checked {
-                background: %(accent)s;
-                border-color: %(accent)s;
+                background: %(checkbox_accent)s;
+                border-color: %(checkbox_accent)s;
                 image: url(__CHECKMARK_ICON__);
             }
             QCheckBox#traceMaxCheck {
@@ -2481,8 +2496,8 @@ class MainWindow(QMainWindow):
         self._log_info(f"Sensorgram heatmap {state_text}.")
         if hasattr(self, "trace_heatmap_notice_item"):
             self.trace_heatmap_notice_item.setVisible(False)
-        self._refresh_trace_plot("Peak position (nm)")
-        self._request_deferred_ui_refresh(trace_plot=True, stats=True)
+        self._refresh_trace_plot("Metric position (nm)")
+        self._request_deferred_ui_refresh(trace_plot=True)
 
     def _set_metric_plot_enabled(self, enabled: bool) -> None:
         self._metric_plot_enabled = bool(enabled)
@@ -2492,8 +2507,8 @@ class MainWindow(QMainWindow):
         self._log_info(f"Metric plot {state_text}.")
         if hasattr(self, "trace_heatmap_notice_item"):
             self.trace_heatmap_notice_item.setVisible(False)
-        self._refresh_trace_plot("Peak position (nm)")
-        self._request_deferred_ui_refresh(trace_plot=True, stats=True)
+        self._refresh_trace_plot("Metric position (nm)")
+        self._request_deferred_ui_refresh(trace_plot=True)
 
     def _apply_acquisition_state_to_widgets(self, state: dict[str, object]) -> None:
         apply_acquisition_state_to_widgets(self, state)
@@ -2615,7 +2630,8 @@ class MainWindow(QMainWindow):
         if probe is None:
             self._discovered_pump_probe = None
             self._update_pump_status(None)
-            self._log_warning("Pump controller disconnected.")
+            if not self._closing:
+                self._log_warning("Pump controller disconnected.")
             return
         if hasattr(probe, "port"):
             self._update_pump_status(probe)
@@ -2625,7 +2641,8 @@ class MainWindow(QMainWindow):
     def _handle_valve_availability_changed(self, probe: object) -> None:
         refresh_hw_device_status_strip(self)
         if probe is None:
-            self._log_warning("Valve controller disconnected.")
+            if not self._closing:
+                self._log_warning("Valve controller disconnected.")
             return
         port_name = getattr(probe, "port", "unknown")
         model = getattr(probe, "model", "Valve controller")
@@ -2635,7 +2652,8 @@ class MainWindow(QMainWindow):
         self._mswitch_probe = probe if probe is not None else None
         refresh_hw_device_status_strip(self)
         if probe is None:
-            self._log_warning("M-Switch disconnected.")
+            if not self._closing:
+                self._log_warning("M-Switch disconnected.")
             return
         port_name = getattr(probe, "port", "unknown")
         model = getattr(probe, "model", "AMF switch")
@@ -2698,7 +2716,7 @@ class MainWindow(QMainWindow):
             self.poly_order_spin,
             self.fit_window_spin,
             self.analysis_resolution_spin,
-            self.peak_metric_combo,
+            self.metric_mode_combo,
             self.plot_selector,
             self.save_processing_button,
             self.load_processing_button,
@@ -2719,7 +2737,7 @@ class MainWindow(QMainWindow):
             self.crop_method_combo,
             self.fit_method_combo,
             self.analysis_resolution_spin,
-            self.peak_metric_combo,
+            self.metric_mode_combo,
             self.plot_selector,
         ]
         for combo in compact_combos:
@@ -2819,15 +2837,14 @@ class MainWindow(QMainWindow):
         self._effective_raw_rate_hz = None
         self._last_display_average_count = None
         self._last_display_period_ms = None
-        self._peak_history.clear()
-        self._peak_history_buffers.clear()
+        self._metric_history_buffers.clear()
         self._sensorgram_heatmap_history.clear()
         self._sensorgram_heatmap_history_revision += 1
         if hasattr(self, "_plot_view_cache"):
             self._plot_view_cache.clear()
         self._sensorgram_heatmap_wavelengths = None
         self._sensorgram_heatmap_axis_key = None
-        self._peak_reference_processed = None
+        self._metric_reference_processed = None
         self._live_trace_started_at = None
         self._reset_live_accumulator()
         if new_mode == "simulation" and self._session.state.sample is None:
@@ -2837,7 +2854,7 @@ class MainWindow(QMainWindow):
         )
         self._configure_source_tabs()
         self._refresh_plot()
-        self._request_deferred_ui_refresh(telemetry=True, live_estimate=True, summary=True)
+        self._request_deferred_ui_refresh(telemetry=True, live_estimate=True)
         self._update_simulation_controls_enabled()
         self._schedule_acquisition_state_persist()
         if restart_live:
@@ -2899,7 +2916,7 @@ class MainWindow(QMainWindow):
         self.poly_order_spin.valueChanged.connect(self._handle_processing_setting_change)
         self.fit_window_spin.valueChanged.connect(self._handle_processing_setting_change)
         self.analysis_resolution_spin.currentIndexChanged.connect(self._handle_processing_setting_change)
-        self.peak_metric_combo.currentTextChanged.connect(self._handle_processing_setting_change)
+        self.metric_mode_combo.currentTextChanged.connect(self._handle_processing_setting_change)
         self.trace_max_check.toggled.connect(self._handle_processing_setting_change)
         self.trace_centroid_check.toggled.connect(self._handle_processing_setting_change)
         self.trace_poly_check.toggled.connect(self._handle_processing_setting_change)
@@ -3579,6 +3596,9 @@ class MainWindow(QMainWindow):
             "show = last displayed frame/window summary",
         )
 
+    def _show_sensorgram_plot_settings_dialog(self) -> None:
+        show_sensorgram_plot_settings_dialog_for(self)
+
     def _show_about_dialog(self) -> None:
         QMessageBox.about(
             self,
@@ -3825,8 +3845,6 @@ class MainWindow(QMainWindow):
         self._analysis_metrics_cache_key = None
         self._analysis_metrics_cache_result = {}
         self._update_poly_warning_indicator(fit)
-        self._ui_refresh_state.plot_render_dirty = True
-        self._request_plot_refresh()
         self._log_throttled(
             "plot_refresh",
             f"Plot refreshed | mode={self.plot_selector.currentText().lower()} | fit={'on' if fit is not None else 'off'}",
@@ -3834,7 +3852,7 @@ class MainWindow(QMainWindow):
             min_interval=0.75,
         )
 
-        self._request_deferred_ui_refresh(trace_plot=True, summary=True, stats=True, trace_label="Peak position (nm)")
+        self._request_deferred_ui_refresh(trace_plot=True, trace_label="Metric position (nm)")
         if self._pending_plot_request is not None:
             pending = self._pending_plot_request
             self._pending_plot_request = None
@@ -3933,7 +3951,7 @@ class MainWindow(QMainWindow):
             view_width_px=view_width_px,
             residual_visible=residual_visible,
             show_gaussian=show_gaussian,
-            peak_tracking_mode=self._current_processing_settings().peak_tracking_mode,
+            spectrum_tracking_mode=self._current_processing_settings().spectrum_tracking_mode,
         )
         if render_key == self._spectrum_render_cache_key:
             return
@@ -3973,8 +3991,12 @@ class MainWindow(QMainWindow):
             view_x_max=view_x_max,
             view_width_px=view_width_px,
         )
+        line_step_mode = getattr(self, "_sensorgram_line_step_mode", None)
         curve_started = perf_counter()
-        self.spectrum_curve.setData(display_x, display_y, skipFiniteCheck=True)
+        if line_step_mode is None:
+            self.spectrum_curve.setData(display_x, display_y, skipFiniteCheck=True)
+        else:
+            self.spectrum_curve.setData(display_x, display_y, skipFiniteCheck=True, stepMode=line_step_mode)
         self._last_spectrum_curve_update_ms = (perf_counter() - curve_started) * 1000.0
         if fit is not None:
             fit_values = np.asarray(fit.values, dtype=np.float64)
@@ -3996,7 +4018,10 @@ class MainWindow(QMainWindow):
                 display_fit_x = np.empty(0, dtype=np.float64)
                 display_fit_y = fit_values[:0]
             fit_started = perf_counter()
-            self.fit_curve.setData(display_fit_x, display_fit_y, skipFiniteCheck=True)
+            if line_step_mode is None:
+                self.fit_curve.setData(display_fit_x, display_fit_y, skipFiniteCheck=True)
+            else:
+                self.fit_curve.setData(display_fit_x, display_fit_y, skipFiniteCheck=True, stepMode=line_step_mode)
             self._last_spectrum_fit_update_ms = (perf_counter() - fit_started) * 1000.0
             self.fit_region_item.show()
             residual_started = perf_counter()
@@ -4170,13 +4195,6 @@ class MainWindow(QMainWindow):
         normalized = str(mode or "").strip().lower()
         return normalized if normalized in {"absolute", "rolling"} else "absolute"
 
-    def _normalize_sensorgram_downsampling_enabled(self, value: object | None = None) -> bool:
-        current = self._sensorgram_downsampling_enabled if value is None else value
-        if isinstance(current, str):
-            normalized = current.strip().lower()
-            return normalized not in {"0", "false", "no", "off"}
-        return bool(current)
-
     def _normalize_sensorgram_display_window_s(self, value: object | None = None) -> float:
         allowed_values = (60.0, 600.0, 1800.0, 3600.0)
         current = self._trace_display_window_s if value is None else value
@@ -4187,6 +4205,15 @@ class MainWindow(QMainWindow):
         if not np.isfinite(seconds) or seconds <= 0:
             return allowed_values[0]
         return min(allowed_values, key=lambda candidate: abs(candidate - seconds))
+
+    def _normalize_sensorgram_line_mode(self, value: object | None = None) -> str | None:
+        current = self._sensorgram_line_step_mode if value is None else value
+        if current is None:
+            return None
+        if not isinstance(current, str):
+            return None
+        normalized = current.strip().lower()
+        return normalized if normalized in {"left", "right", "center"} else None
 
     def _sensorgram_view_mode_label(self, mode: str | None = None) -> str:
         normalized = self._normalize_sensorgram_view_mode(mode or self._sensorgram_view_mode)
@@ -4216,20 +4243,17 @@ class MainWindow(QMainWindow):
     def _update_sensorgram_header_control_visibility(self) -> None:
         if not getattr(self, "_sensorgram_header_controls_ready", False):
             return
-        view_mode = self._normalize_sensorgram_view_mode(self._sensorgram_view_mode)
-        if hasattr(self, "sensorgram_downsampling_button"):
-            self.sensorgram_downsampling_button.setVisible(view_mode == "absolute")
         if hasattr(self, "sensorgram_window_button"):
+            view_mode = self._normalize_sensorgram_view_mode(self._sensorgram_view_mode)
             self.sensorgram_window_button.setVisible(view_mode == "rolling")
 
     def _apply_sensorgram_view_mode(self, *, save: bool = False) -> None:
         self._sensorgram_view_mode = self._normalize_sensorgram_view_mode(self._sensorgram_view_mode)
         self._trace_view_locked = False
         self._update_sensorgram_view_mode_button()
-        self._update_sensorgram_downsampling_button()
         self._update_sensorgram_display_window_button()
         self._request_trace_autoscale()
-        self._request_deferred_ui_refresh(trace_plot=True, stats=True)
+        self._request_deferred_ui_refresh(trace_plot=True)
         if save:
             self._schedule_acquisition_state_persist()
 
@@ -4237,37 +4261,6 @@ class MainWindow(QMainWindow):
         current = self._normalize_sensorgram_view_mode(self._sensorgram_view_mode)
         self._sensorgram_view_mode = "rolling" if current == "absolute" else "absolute"
         self._apply_sensorgram_view_mode(save=True)
-
-    def _sensorgram_downsampling_label(self, enabled: bool | None = None) -> str:
-        return "Downsampling"
-
-    def _sensorgram_downsampling_color(self, enabled: bool | None = None) -> str:
-        current = self._normalize_sensorgram_downsampling_enabled(enabled)
-        return "#4CAF50" if current else "#8D96A3"
-
-    def _sensorgram_downsampling_tooltip(self, enabled: bool | None = None) -> str:
-        current = self._normalize_sensorgram_downsampling_enabled(enabled)
-        if current:
-            return "Current display: pyqtgraph curve downsampling is enabled. Click to disable it."
-        return "Current display: pyqtgraph curve downsampling is disabled. Click to enable it."
-
-    def _update_sensorgram_downsampling_button(self) -> None:
-        if not hasattr(self, "sensorgram_downsampling_button"):
-            return
-        label = self._sensorgram_downsampling_label()
-        self.sensorgram_downsampling_button.setText(f"[{label}]")
-        self.sensorgram_downsampling_button.setStyleSheet(
-            f"QToolButton {{ color: {self._sensorgram_downsampling_color()}; font-weight: 400; }}"
-        )
-        self.sensorgram_downsampling_button.setToolTip(self._sensorgram_downsampling_tooltip())
-        self._update_sensorgram_header_control_visibility()
-
-    def _cycle_sensorgram_downsampling_enabled(self) -> None:
-        self._sensorgram_downsampling_enabled = not self._normalize_sensorgram_downsampling_enabled()
-        self._update_sensorgram_downsampling_button()
-        self._request_trace_autoscale()
-        self._request_deferred_ui_refresh(trace_plot=True, stats=True)
-        self._schedule_acquisition_state_persist()
 
     def _sensorgram_display_window_label(self, seconds: float | None = None) -> str:
         current = self._normalize_sensorgram_display_window_s(seconds)
@@ -4310,7 +4303,7 @@ class MainWindow(QMainWindow):
         self._trace_display_window_s = window_values[(index + 1) % len(window_values)]
         self._update_sensorgram_display_window_button()
         self._request_trace_autoscale()
-        self._request_deferred_ui_refresh(trace_plot=True, stats=True)
+        self._request_deferred_ui_refresh(trace_plot=True)
         self._schedule_acquisition_state_persist()
 
     def _normalize_sensorgram_content_mode(self, mode: object) -> str:
@@ -4353,7 +4346,7 @@ class MainWindow(QMainWindow):
         self._update_sensorgram_content_mode_button()
         self._apply_sensorgram_display_style()
         self._request_trace_autoscale()
-        self._request_deferred_ui_refresh(trace_plot=True, stats=True)
+        self._request_deferred_ui_refresh(trace_plot=True)
         if save:
             self._schedule_acquisition_state_persist()
 
@@ -4392,31 +4385,28 @@ class MainWindow(QMainWindow):
         def _build_active_series() -> dict[str, tuple[np.ndarray, np.ndarray]]:
             selected_metrics = set(self._selected_trace_metrics())
             view_mode = self._normalize_sensorgram_view_mode(getattr(self, "_sensorgram_view_mode", "absolute"))
-            if view_mode == "absolute":
-                peak_history = getattr(self, "_peak_history", None)
-                if peak_history:
-                    active = {
-                        name: extract_series_arrays(buffer)
-                        for name, buffer in peak_history.items()
-                        if name in selected_metrics and len(buffer) > 0
-                    }
-                    if active:
-                        return active
-            peak_history_buffers = getattr(self, "_peak_history_buffers", None)
-            if peak_history_buffers:
+            if view_mode == "absolute" and cache is not None:
+                active = cache.live_absolute_metric_series(selected_metrics)
+                if active:
+                    return active
+                return {}
+            metric_history_buffers = getattr(self, "_metric_history_buffers", None)
+            archive_path = getattr(self, "_metric_archive_path", None)
+            if not bool(getattr(self, "_live_active", False)) and archive_path is not None:
+                try:
+                    archive_series = load_processed_metric_history(Path(archive_path), selected_metrics)
+                except Exception:
+                    archive_series = {}
+                if archive_series:
+                    return archive_series
+            if metric_history_buffers and not bool(getattr(self, "_live_active", False)):
                 active = {
                     name: extract_series_arrays(buffer)
-                    for name, buffer in peak_history_buffers.items()
+                    for name, buffer in metric_history_buffers.items()
                     if name in selected_metrics and len(buffer) > 0
                 }
                 if active:
                     return active
-            if self._peak_history:
-                return {
-                    name: extract_series_arrays(series)
-                    for name, series in self._peak_history.items()
-                    if name in selected_metrics and series
-                }
             return {}
 
         token = build_active_trace_series_token(self)
@@ -4434,7 +4424,7 @@ class MainWindow(QMainWindow):
         return compute_centroid_nm_for(self, processed, fit)
 
     def _reference_peak_nm_for_shift(self) -> float | None:
-        reference = self._peak_reference_processed
+        reference = self._metric_reference_processed
         if reference is None:
             return None
         finite = np.isfinite(reference.values)

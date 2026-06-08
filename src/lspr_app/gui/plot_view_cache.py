@@ -3,12 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from collections import OrderedDict
 from collections.abc import Callable
+from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 
 
 @dataclass(slots=True)
 class MetricDisplayCache:
+    source_revision: int = 0
     source_len: int = 0
     target_points: int = 0
     stride: int = 1
@@ -24,6 +27,19 @@ class MetricDisplayCache:
     incremental_count: int = 0
     hit_count: int = 0
     last_mode: str = "empty"
+    last_new_points_processed: int = 0
+    last_base_blocks: int = 0
+    last_levels: int = 0
+    last_tail_groups_updated: int = 0
+    last_display_level: int = -1
+    last_display_blocks: int = 0
+    last_append_ms: float | None = None
+    last_assemble_ms: float | None = None
+    last_full_rebuild_ms: float | None = None
+    last_source_used: str = "empty"
+    last_invalidation_reason: str = "unknown"
+    archive_read_count: int = 0
+    last_archive_points: int = 0
 
 
 @dataclass(slots=True)
@@ -218,14 +234,38 @@ def build_active_trace_series_token(window) -> tuple[object, ...]:
             )
         return tuple(entries)
 
-    peak_history = getattr(window, "_peak_history", None)
-    peak_history_buffers = getattr(window, "_peak_history_buffers", None)
-    if view_mode == "absolute" and isinstance(peak_history, dict) and peak_history:
-        return ("absolute", _source_entries(peak_history))
-    if isinstance(peak_history_buffers, dict) and peak_history_buffers:
-        return ("rolling", _source_entries(peak_history_buffers))
-    if isinstance(peak_history, dict) and peak_history:
-        return ("fallback", _source_entries(peak_history))
+    metric_history_buffers = getattr(window, "_metric_history_buffers", None)
+    archive_path = getattr(window, "_metric_archive_path", None)
+    archive_path = Path(archive_path).expanduser() if archive_path else None
+    plot_view_cache = getattr(window, "_plot_view_cache", None)
+    if view_mode == "absolute" and plot_view_cache is not None:
+        try:
+            live_states = tuple(
+                state
+                for metric_name in sorted(selected_metrics)
+                if (state := plot_view_cache.live_absolute_metric_state(metric_name)) is not None
+            )
+        except Exception:
+            live_states = ()
+        if live_states:
+            return ("live_absolute", view_mode, live_states, tuple(sorted(selected_metrics)))
+    if view_mode == "absolute" and bool(getattr(window, "_live_active", False)):
+        return ("live_absolute_empty", view_mode, tuple(sorted(selected_metrics)))
+    if isinstance(metric_history_buffers, dict) and metric_history_buffers:
+        source = _source_entries(metric_history_buffers)
+        return ("rolling", source)
+    if view_mode == "absolute" and archive_path is not None and archive_path.exists():
+        try:
+            mtime_ns = archive_path.stat().st_mtime_ns
+        except OSError:
+            mtime_ns = 0
+        return ("archive", str(archive_path), int(mtime_ns), view_mode, tuple(sorted(selected_metrics)))
+    if not bool(getattr(window, "_live_active", False)) and archive_path is not None and archive_path.exists():
+        try:
+            mtime_ns = archive_path.stat().st_mtime_ns
+        except OSError:
+            mtime_ns = 0
+        return ("archive", str(archive_path), int(mtime_ns), view_mode, tuple(sorted(selected_metrics)))
     return ("empty", ())
 
 
@@ -244,20 +284,26 @@ def build_heatmap_history_token(window) -> tuple[object, ...]:
 
 
 def build_metric_series_token(window, metric_name: str) -> tuple[object, ...]:
-    peak_history = getattr(window, "_peak_history", None)
-    if isinstance(peak_history, dict):
-        series = peak_history.get(metric_name)
-        if series is not None:
-            return (
-                str(metric_name),
-                "absolute",
-                id(series),
-                int(getattr(series, "revision", 0)),
-                int(len(series)),
-            )
-    peak_history_buffers = getattr(window, "_peak_history_buffers", None)
-    if isinstance(peak_history_buffers, dict):
-        series = peak_history_buffers.get(metric_name)
+    view_mode = getattr(window, "_normalize_sensorgram_view_mode", lambda value: value)(
+        getattr(window, "_sensorgram_view_mode", "absolute")
+    )
+    archive_path = getattr(window, "_metric_archive_path", None)
+    archive_path = Path(archive_path).expanduser() if archive_path else None
+    if view_mode == "absolute" and archive_path is not None and archive_path.exists():
+        try:
+            mtime_ns = archive_path.stat().st_mtime_ns
+        except OSError:
+            mtime_ns = 0
+        return (str(metric_name), "archive", str(archive_path), int(mtime_ns))
+    if not bool(getattr(window, "_live_active", False)) and archive_path is not None and archive_path.exists():
+        try:
+            mtime_ns = archive_path.stat().st_mtime_ns
+        except OSError:
+            mtime_ns = 0
+        return (str(metric_name), "archive", str(archive_path), int(mtime_ns))
+    metric_history_buffers = getattr(window, "_metric_history_buffers", None)
+    if isinstance(metric_history_buffers, dict):
+        series = metric_history_buffers.get(metric_name)
         if series is not None:
             return (
                 str(metric_name),
@@ -635,6 +681,8 @@ class PlotViewCache:
         self._heatmap_view_cache: OrderedDict[tuple[object, ...], tuple[np.ndarray, np.ndarray]] = OrderedDict()
         self._absolute_metric_view_cache: OrderedDict[tuple[object, ...], MetricDisplayCache] = OrderedDict()
         self._absolute_heatmap_view_cache: OrderedDict[tuple[object, ...], dict[str, object]] = OrderedDict()
+        self._live_absolute_metric_cache: dict[str, MetricDisplayCache] = {}
+        self._live_absolute_archive_read_count = 0
 
     def clear(self) -> None:
         self._active_trace_series_token = None
@@ -648,6 +696,7 @@ class PlotViewCache:
         self._heatmap_view_cache.clear()
         self._absolute_metric_view_cache.clear()
         self._absolute_heatmap_view_cache.clear()
+        self._live_absolute_metric_cache.clear()
 
     def cached_active_trace_series(
         self,
@@ -661,6 +710,247 @@ class PlotViewCache:
         self._active_trace_series_result = result
         return result
 
+    def clear_live_absolute_metric_cache(self) -> None:
+        self._live_absolute_metric_cache.clear()
+
+    def live_absolute_metric_series(
+        self,
+        metric_names: set[str] | frozenset[str],
+    ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        result: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for metric_name in metric_names:
+            cache = self._live_absolute_metric_cache.get(metric_name)
+            if not isinstance(cache, MetricDisplayCache):
+                continue
+            if len(cache.x_display) == 0 or len(cache.y_display) == 0:
+                continue
+            result[str(metric_name)] = (cache.x_display, cache.y_display)
+        return result
+
+    def live_absolute_metric_state(self, metric_name: str) -> tuple[object, ...] | None:
+        cache = self._live_absolute_metric_cache.get(metric_name)
+        if not isinstance(cache, MetricDisplayCache):
+            return None
+        return (
+            str(metric_name),
+            int(cache.display_output_revision),
+            int(cache.source_len),
+            int(cache.target_points),
+            int(len(cache.x_display)),
+            float(cache.x_display[0]) if len(cache.x_display) else None,
+            float(cache.x_display[-1]) if len(cache.x_display) else None,
+        )
+
+    def seed_live_absolute_metric_cache(
+        self,
+        metric_name: str,
+        x: np.ndarray,
+        y: np.ndarray,
+        *,
+        target_points: int,
+    ) -> None:
+        cache = self._live_absolute_metric_cache.get(metric_name)
+        if not isinstance(cache, MetricDisplayCache):
+            cache = MetricDisplayCache(target_points=int(target_points))
+            self._live_absolute_metric_cache[metric_name] = cache
+        cache.source_len = 0
+        cache.source_revision += 1
+        cache.target_points = int(target_points)
+        cache.last_invalidation_reason = "seed"
+        cache.levels = _build_envelope_levels(
+            np.asarray(x, dtype=np.float64),
+            np.asarray(y, dtype=np.float64),
+            raw_block_size=cache.raw_block_size,
+            combine_factor=cache.combine_factor,
+        )
+        cache.source_len = int(min(len(x), len(y)))
+        cache.last_archive_points = int(cache.source_len)
+        cache.rebuild_count += 1
+        display_level, blocks = self._select_metric_envelope_blocks(cache, target_points=int(target_points))
+        raw_len = min(len(x), len(y))
+        force_envelope_at = max(2048, int(int(target_points) * 4))
+        if raw_len <= force_envelope_at:
+            display_x, display_y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+        else:
+            display_x, display_y = _blocks_to_display_arrays(blocks)
+        cache.x_display = display_x
+        cache.y_display = display_y
+        cache.last_display_level = int(display_level)
+        cache.last_display_blocks = int(len(blocks))
+        cache.last_display_signature = _display_signature(display_x, display_y)
+        cache.display_output_revision += 1
+        cache.last_mode = "seeded"
+        cache.last_source_used = "archive_seed" if cache.last_archive_points > 0 else "seed"
+
+    def append_live_absolute_metric_point(
+        self,
+        metric_name: str,
+        x_value: float,
+        y_value: float,
+        *,
+        target_points: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        cache = self._live_absolute_metric_cache.get(metric_name)
+        if not isinstance(cache, MetricDisplayCache):
+            cache = MetricDisplayCache(target_points=int(target_points))
+            self._live_absolute_metric_cache[metric_name] = cache
+        cache.target_points = int(target_points)
+        cache.source_len += 1
+        cache.source_revision += 1
+        cache.last_invalidation_reason = "live_append"
+        block_size = max(int(cache.raw_block_size), 1)
+        if not cache.levels:
+            cache.levels = [[]]
+        current_level = cache.levels[0]
+        current_level.append(
+            _EnvelopeBlock(
+                first_x=float(x_value),
+                last_x=float(x_value),
+                y_min=float(y_value),
+                y_max=float(y_value),
+                x_at_y_min=float(x_value),
+                x_at_y_max=float(x_value),
+                count=1,
+            )
+        )
+        rebuilt_levels: list[list[_EnvelopeBlock]] = [current_level]
+        factor = max(int(cache.combine_factor), 2)
+        while len(rebuilt_levels[-1]) > factor:
+            previous = rebuilt_levels[-1]
+            next_level: list[_EnvelopeBlock] = []
+            for start in range(0, len(previous), factor):
+                combined = _combine_envelope_blocks(previous[start : start + factor])
+                if combined is not None:
+                    next_level.append(combined)
+            if not next_level:
+                break
+            rebuilt_levels.append(next_level)
+        cache.levels = rebuilt_levels
+        display_level, blocks = self._select_metric_envelope_blocks(cache, target_points=int(target_points))
+        force_envelope_at = max(2048, int(int(target_points) * 4))
+        if cache.source_len <= force_envelope_at:
+            if len(cache.x_display) == 0:
+                cache.x_display = np.asarray([float(x_value)], dtype=np.float64)
+                cache.y_display = np.asarray([float(y_value)], dtype=np.float64)
+            else:
+                cache.x_display = np.concatenate((cache.x_display, np.asarray([float(x_value)], dtype=np.float64)))
+                cache.y_display = np.concatenate((cache.y_display, np.asarray([float(y_value)], dtype=np.float64)))
+        else:
+            cache.x_display, cache.y_display = _blocks_to_display_arrays(blocks)
+        cache.last_display_level = int(display_level)
+        cache.last_display_blocks = int(len(blocks))
+        cache.last_display_signature = _display_signature(cache.x_display, cache.y_display)
+        cache.display_output_revision += 1
+        cache.last_mode = "incremental"
+        cache.last_source_used = "cache_incremental"
+        return cache.x_display, cache.y_display
+
+    def live_absolute_metric_view(
+        self,
+        metric_name: str,
+        *,
+        target_points: int,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        cache = self._live_absolute_metric_cache.get(metric_name)
+        if not isinstance(cache, MetricDisplayCache):
+            return None
+        if cache.target_points != int(target_points):
+            cache.target_points = int(target_points)
+        raw_len = int(cache.source_len)
+        if not cache.levels:
+            return None
+        force_envelope_at = max(2048, int(int(target_points) * 4))
+        if raw_len <= force_envelope_at:
+            if len(cache.x_display) == 0 or len(cache.y_display) == 0:
+                return None
+            cache.last_source_used = "cache"
+            return cache.x_display, cache.y_display
+        max_detail_points = max(int(len(cache.levels[0])) * 2, 0)
+        if int(target_points) > max_detail_points:
+            cache.last_invalidation_reason = "insufficient_detail"
+            return None
+        display_level, blocks = self._select_metric_envelope_blocks(cache, target_points=int(target_points))
+        display_x, display_y = _blocks_to_display_arrays(blocks)
+        cache.x_display = display_x
+        cache.y_display = display_y
+        cache.last_display_level = int(display_level)
+        cache.last_display_blocks = int(len(blocks))
+        signature = _display_signature(display_x, display_y)
+        if signature != cache.last_display_signature:
+            cache.display_output_revision += 1
+            cache.last_display_signature = signature
+        cache.last_mode = "live_recompute"
+        cache.last_source_used = "cache_recompute"
+        cache.last_invalidation_reason = "reuse"
+        return display_x, display_y
+
+    def refresh_live_absolute_metric_cache(
+        self,
+        metric_names: set[str] | frozenset[str],
+        *,
+        target_points: int,
+        archive_path: Path | None = None,
+    ) -> bool:
+        metric_names = frozenset(str(name) for name in metric_names)
+        needs_archive = False
+        for metric_name in metric_names:
+            cache = self._live_absolute_metric_cache.get(metric_name)
+            if not isinstance(cache, MetricDisplayCache):
+                needs_archive = True
+                self._live_absolute_metric_archive_read_count = getattr(self, "_live_absolute_metric_archive_read_count", 0) + 1
+                break
+            if not cache.levels:
+                needs_archive = True
+                self._live_absolute_metric_archive_read_count = getattr(self, "_live_absolute_metric_archive_read_count", 0) + 1
+                break
+            raw_len = int(cache.source_len)
+            force_envelope_at = max(2048, int(int(target_points) * 4))
+            if raw_len <= force_envelope_at:
+                continue
+            max_detail_points = max(int(len(cache.levels[0])) * 2, 0)
+            if int(target_points) > max_detail_points:
+                needs_archive = True
+                self._live_absolute_metric_archive_read_count = getattr(self, "_live_absolute_metric_archive_read_count", 0) + 1
+                break
+
+        if needs_archive:
+            if archive_path is None:
+                return False
+            from lspr_app.storage.hdf5_export import load_processed_metric_history
+
+            archive_series = load_processed_metric_history(Path(archive_path), set(metric_names))
+            if not archive_series:
+                return False
+            self._live_absolute_archive_read_count += 1
+            for metric_name in metric_names:
+                series = archive_series.get(metric_name)
+                if series is None:
+                    continue
+                x, y = series
+                cache = self._live_absolute_metric_cache.get(metric_name)
+                if not isinstance(cache, MetricDisplayCache):
+                    cache = MetricDisplayCache(target_points=int(target_points))
+                    self._live_absolute_metric_cache[metric_name] = cache
+                cache.archive_read_count = int(self._live_absolute_archive_read_count)
+                cache.last_archive_points = int(min(len(x), len(y)))
+                cache.last_invalidation_reason = "archive_rebuild"
+                self.seed_live_absolute_metric_cache(
+                    metric_name,
+                    x,
+                    y,
+                    target_points=int(target_points),
+                )
+            return True
+
+        refreshed = False
+        for metric_name in metric_names:
+            cache = self._live_absolute_metric_cache.get(metric_name)
+            if isinstance(cache, MetricDisplayCache):
+                cache.last_invalidation_reason = "reuse"
+            if self.live_absolute_metric_view(metric_name, target_points=int(target_points)) is not None:
+                refreshed = True
+        return refreshed
+
     def _rebuild_metric_envelope_cache(
         self,
         cache: MetricDisplayCache,
@@ -668,7 +958,8 @@ class PlotViewCache:
         y: np.ndarray,
         *,
         target_points: int,
-    ) -> None:
+    ) -> int:
+        started = perf_counter()
         cache.source_len = 0
         cache.target_points = int(target_points)
         cache.levels = _build_envelope_levels(
@@ -681,15 +972,28 @@ class PlotViewCache:
         cache.display_revision += 1
         cache.rebuild_count += 1
         cache.last_mode = "full_rebuild"
+        cache.last_new_points_processed = int(len(x))
+        cache.last_base_blocks = len(cache.levels[0]) if cache.levels else 0
+        cache.last_levels = len(cache.levels)
+        cache.last_tail_groups_updated = cache.last_base_blocks
+        cache.last_full_rebuild_ms = (perf_counter() - started) * 1000.0
+        cache.last_append_ms = None
+        return cache.last_base_blocks
 
     def _append_metric_envelope_cache(
         self,
         cache: MetricDisplayCache,
         x_new: np.ndarray,
         y_new: np.ndarray,
-    ) -> None:
+    ) -> int:
         if len(x_new) == 0 or len(y_new) == 0:
-            return
+            cache.last_new_points_processed = 0
+            cache.last_tail_groups_updated = 0
+            cache.last_append_ms = 0.0
+            return 0
+        started = perf_counter()
+        block_size = max(int(cache.raw_block_size), 1)
+        block_count = int(np.ceil(float(len(x_new)) / float(block_size)))
         cache.levels = _append_envelope_levels(
             cache.levels,
             np.asarray(x_new, dtype=np.float64),
@@ -701,14 +1005,30 @@ class PlotViewCache:
         cache.display_revision += 1
         cache.incremental_count += 1
         cache.last_mode = "incremental"
+        cache.last_new_points_processed = int(len(x_new))
+        cache.last_base_blocks = len(cache.levels[0]) if cache.levels else 0
+        cache.last_levels = len(cache.levels)
+        cache.last_tail_groups_updated = block_count
+        cache.last_append_ms = (perf_counter() - started) * 1000.0
+        return block_count
 
     def _select_metric_envelope_blocks(
         self,
         cache: MetricDisplayCache,
         *,
         target_points: int,
-    ) -> list[_EnvelopeBlock]:
-        return _select_envelope_blocks(cache.levels, target_points)
+    ) -> tuple[int, list[_EnvelopeBlock]]:
+        if not cache.levels:
+            return -1, []
+        target_bins = max(int(np.ceil(float(max(target_points, 1)) / 2.0)), 1)
+        chosen_level = 0
+        chosen_blocks = cache.levels[0]
+        for level_index, level in enumerate(cache.levels):
+            chosen_level = level_index
+            chosen_blocks = level
+            if len(level) <= target_bins:
+                break
+        return chosen_level, chosen_blocks
 
     def metric_view(
         self,
@@ -822,6 +1142,7 @@ class PlotViewCache:
             default_points=default_points,
         )
         cache_key = _absolute_metric_cache_key(token, target_points)
+        source_revision = token[3] if len(token) > 3 else None
         x = np.asarray(x, dtype=np.float64)
         y = np.asarray(y, dtype=np.float64)
         if len(x) == 0 or len(y) == 0:
@@ -829,6 +1150,7 @@ class PlotViewCache:
             cache = self._absolute_metric_view_cache.get(cache_key)
             if not isinstance(cache, MetricDisplayCache):
                 cache = MetricDisplayCache()
+            cache.source_revision = int(source_revision or 0)
             cache.source_len = 0
             cache.target_points = int(target_points)
             cache.x_display = result[0]
@@ -843,6 +1165,7 @@ class PlotViewCache:
             cache = self._absolute_metric_view_cache.get(cache_key)
             if not isinstance(cache, MetricDisplayCache):
                 cache = MetricDisplayCache()
+            cache.source_revision = int(source_revision or 0)
             cache.source_len = len(x)
             cache.target_points = int(target_points)
             cache.x_display = x
@@ -858,24 +1181,38 @@ class PlotViewCache:
         if not isinstance(cached, MetricDisplayCache):
             cached = MetricDisplayCache(target_points=int(target_points))
             self._absolute_metric_view_cache[cache_key] = cached
-        if cached.source_len == len(x) and cached.target_points == int(target_points):
+        if (
+            cached.source_len == len(x)
+            and cached.target_points == int(target_points)
+            and cached.source_revision == int(source_revision or 0)
+        ):
             cached.hit_count += 1
             cached.last_mode = "hit"
             self._absolute_metric_view_cache.move_to_end(cache_key)
             return cached.x_display, cached.y_display
-        if cached.source_len > len(x) or cached.source_len < 0 or not cached.levels:
+        if (
+            cached.source_len > len(x)
+            or cached.source_len < 0
+            or cached.source_revision > int(source_revision or 0)
+            or not cached.levels
+        ):
             self._rebuild_metric_envelope_cache(cached, x, y, target_points=target_points)
         else:
             old_len = int(cached.source_len)
             self._append_metric_envelope_cache(cached, x[old_len:], y[old_len:])
             cached.target_points = int(target_points)
-        blocks = self._select_metric_envelope_blocks(cached, target_points=int(target_points))
+            cached.source_revision = int(source_revision or 0)
+        display_level, blocks = self._select_metric_envelope_blocks(cached, target_points=int(target_points))
         raw_len = min(len(x), len(y))
-        force_envelope_at = max(256, int(int(target_points) * 0.75))
+        force_envelope_at = max(2048, int(int(target_points) * 4))
+        assemble_started = perf_counter()
         if raw_len <= force_envelope_at:
             display_x, display_y = x, y
         else:
             display_x, display_y = _blocks_to_display_arrays(blocks)
+        cached.last_assemble_ms = (perf_counter() - assemble_started) * 1000.0
+        cached.last_display_level = int(display_level)
+        cached.last_display_blocks = int(len(blocks))
         signature = _display_signature(display_x, display_y)
         if signature != cached.last_display_signature:
             cached.display_output_revision += 1
@@ -883,6 +1220,7 @@ class PlotViewCache:
         cached.x_display = display_x
         cached.y_display = display_y
         cached.target_points = int(target_points)
+        cached.source_revision = int(source_revision or 0)
         self._absolute_metric_view_cache.move_to_end(cache_key)
         while len(self._absolute_metric_view_cache) > self._max_view_entries:
             self._absolute_metric_view_cache.popitem(last=False)
@@ -914,10 +1252,23 @@ class PlotViewCache:
                     "target_points": int(cached.target_points),
                     "display_len": int(len(cached.x_display)),
                     "last_mode": str(cached.last_mode),
+                    "last_source_used": str(cached.last_source_used),
+                    "last_invalidation_reason": str(cached.last_invalidation_reason),
+                    "archive_read_count": int(cached.archive_read_count),
+                    "last_archive_points": int(cached.last_archive_points),
                     "hits": int(cached.hit_count),
                     "incremental": int(cached.incremental_count),
                     "rebuilds": int(cached.rebuild_count),
                     "levels": [len(level) for level in cached.levels],
+                    "new_points": int(cached.last_new_points_processed),
+                    "base_blocks": int(cached.last_base_blocks),
+                    "level_count": int(cached.last_levels),
+                    "tail_groups_updated": int(cached.last_tail_groups_updated),
+                    "display_level": int(cached.last_display_level),
+                    "display_blocks": int(cached.last_display_blocks),
+                    "append_ms": cached.last_append_ms,
+                    "assemble_ms": cached.last_assemble_ms,
+                    "full_rebuild_ms": cached.last_full_rebuild_ms,
                 }
         return modes
 
@@ -1016,6 +1367,28 @@ class PlotViewCache:
         while len(self._absolute_heatmap_view_cache) > self._max_view_entries:
             self._absolute_heatmap_view_cache.popitem(last=False)
         return result
+
+    def refresh_live_absolute_heatmap_cache(
+        self,
+        token: tuple[object, ...],
+        history: list[tuple[float, np.ndarray]],
+        *,
+        max_rows: int,
+        view_height_px: float | None,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        times, matrix = self.heatmap_arrays_from_history(token, history, build_heatmap_arrays)
+        if len(times) == 0 or len(matrix) == 0:
+            return None
+        return self.absolute_heatmap_view(
+            token,
+            times,
+            matrix,
+            view_height_px=view_height_px,
+            enabled=True,
+            max_rows=max_rows,
+            minimum_rows=256,
+            oversample=2.0,
+        )
 
     def heatmap_view(
         self,

@@ -208,7 +208,7 @@ def request_deferred_ui_refresh(
     display_dirty = summary or telemetry or live_estimate
     metric_dirty = trace_plot or trace_label is not None
     stats_dirty = bool(stats)
-    live_visual_dirty = bool(window._live_active and (display_dirty or metric_dirty) and not stats_dirty)
+    live_visual_dirty = bool(window._live_active and (metric_dirty or telemetry or live_estimate) and not stats_dirty and not summary)
     if live_visual_dirty:
         if not getattr(window, "_live_visual_refresh_in_progress", False):
             request_live_visual_refresh(window, 0.0)
@@ -286,17 +286,25 @@ def flush_live_visual_state(window) -> None:
     refresh_state = getattr(window, "_ui_refresh_state", None)
     if refresh_state is None:
         return
-    if bool(getattr(refresh_state, "metric_plot_dirty", False)) or getattr(refresh_state, "pending_metric_label", None) is not None:
-        label = getattr(refresh_state, "pending_metric_label", None) or "Peak position (nm)"
-        window._refresh_trace_plot(label)
+    metric_dirty = bool(getattr(refresh_state, "metric_plot_dirty", False)) or getattr(refresh_state, "pending_metric_label", None) is not None
+    if metric_dirty and not bool(getattr(window, "_sensorgram_frozen", False)):
+        label = getattr(refresh_state, "pending_metric_label", None) or "Metric position (nm)"
+        try:
+            window._refresh_trace_plot(label)
+            started = perf_counter()
+            window._update_trace_stats()
+            window._last_live_trace_stats_ms = (perf_counter() - started) * 1000.0
+            window._live_trace_stats_count = int(getattr(window, "_live_trace_stats_count", 0)) + 1
+            refresh_state.metric_plot_dirty = False
+            refresh_state.pending_metric_label = None
+        except Exception as exc:
+            window._log_error(f"Live trace refresh failed: {exc}")
     if bool(getattr(refresh_state, "live_estimate_dirty", False)):
         window._update_live_estimate()
+        refresh_state.live_estimate_dirty = False
     if bool(getattr(refresh_state, "telemetry_dirty", False)):
         window._refresh_telemetry()
-    if bool(getattr(refresh_state, "summary_dirty", False)):
-        window._refresh_session_summary(force=True)
-    if bool(getattr(refresh_state, "plot_render_dirty", False)):
-        window._refresh_plot()
+        refresh_state.telemetry_dirty = False
 
 
 def flush_deferred_ui_refreshes(window) -> None:

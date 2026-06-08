@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
 import logging
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from html import escape, unescape
@@ -208,6 +210,108 @@ def build_recording_experiment_log_path(
     started_local = started_at.astimezone()
     base_dir.mkdir(parents=True, exist_ok=True)
     return base_dir / f"{prefix}_{started_local.strftime('%Y%m%d_%H%M%S')}{suffix}"
+
+
+def build_diagnostic_export_path_for(window) -> Path:
+    base_dir = _recording_experiment_base_dir_for(window)
+    started_at = getattr(window, "_startup_started_at", None) or datetime.now(timezone.utc)
+    started_local = started_at.astimezone()
+    base_dir.mkdir(parents=True, exist_ok=True)
+    return base_dir / f"perf_diagnostics_{started_local.strftime('%Y%m%d_%H%M%S')}.jsonl"
+
+
+def _diagnostic_export_path_for(window) -> Path | None:
+    if not bool(getattr(window, "_export_diagnostic_events", True)):
+        return None
+    path = getattr(window, "_diagnostic_export_path", None)
+    if path is None:
+        try:
+            path = build_diagnostic_export_path_for(window)
+        except Exception:
+            return None
+        window._diagnostic_export_path = path
+    return path
+
+
+def _append_diagnostic_export_event(window, levelno: int, source: str, text: str, *, suppressed: bool) -> None:
+    if not bool(getattr(window, "_export_diagnostic_events", True)):
+        return
+    buffer = getattr(window, "_diagnostic_export_buffer", None)
+    if buffer is None:
+        return
+    buffer.append(
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "levelno": int(levelno),
+            "source": str(source),
+            "text": str(text),
+            "suppressed": bool(suppressed),
+        }
+    )
+    events = getattr(window, "_diagnostic_export_events", None)
+    if events is not None:
+        events.append((perf_counter(), int(levelno), str(source), str(text)))
+    buffer_timer = getattr(window, "_log_buffer_timer", None)
+    if buffer_timer is not None and not buffer_timer.isActive():
+        window._log_buffer_requested_at = perf_counter()
+        buffer_timer.start()
+
+
+def _flush_diagnostic_export_buffer(window) -> None:
+    buffer = getattr(window, "_diagnostic_export_buffer", None)
+    if not buffer:
+        return
+    path = _diagnostic_export_path_for(window)
+    if path is None:
+        return
+    started = perf_counter()
+    batch = list(buffer)
+    buffer.clear()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            for record in batch:
+                handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+                handle.write("\n")
+        events = getattr(window, "_diagnostic_export_events", None)
+        if events is not None:
+            events.append((perf_counter(), "diagnostic_export", str(len(batch))))
+    except Exception:
+        buffer[:0] = batch
+        return
+    window._last_diagnostic_export_flush_ms = (perf_counter() - started) * 1000.0
+
+
+def _append_diagnostic_snapshot_export(window) -> None:
+    if not bool(getattr(window, "_export_diagnostic_events", True)):
+        return
+    now = perf_counter()
+    last_at = float(getattr(window, "_diagnostic_snapshot_export_last_ts", 0.0) or 0.0)
+    interval_s = float(getattr(window, "_diagnostic_snapshot_export_interval_s", 2.5) or 2.5)
+    if (now - last_at) < max(interval_s, 0.5):
+        return
+    path = _diagnostic_export_path_for(window)
+    if path is None:
+        return
+    started = perf_counter()
+    snapshot = SessionDiagnosticsSnapshot.from_window(window)
+    record = {
+        "record_type": "diagnostic_snapshot",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "snapshot": asdict(snapshot),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+            handle.write("\n")
+    except Exception:
+        return
+    window._diagnostic_snapshot_export_last_ts = now
+    window._last_diagnostic_snapshot_export_ms = (perf_counter() - started) * 1000.0
+    export_events = getattr(window, "_diagnostic_snapshot_export_events", None)
+    if export_events is not None:
+        export_events.append((perf_counter(), "diagnostic_snapshot", str(len(asdict(snapshot)))))
 
 
 def build_pipeline_timing_breakdown_for(window) -> dict[str, float | None]:
@@ -446,6 +550,8 @@ def flush_log_buffer(window) -> None:
             buffer.clear()
             for levelno, source, text in collapse_log_batch(batch):
                 append_log_record_now(window, levelno, source, text)
+        if getattr(window, "_diagnostic_export_buffer", None):
+            _flush_diagnostic_export_buffer(window)
         buffer_timer = getattr(window, "_log_buffer_timer", None)
         if buffer_timer is not None:
             buffer_timer.stop()
@@ -453,27 +559,23 @@ def flush_log_buffer(window) -> None:
         window._log_buffer_requested_at = None
         return
     buffer = getattr(window, "_log_buffer", None)
-    if not buffer:
-        buffer_timer = getattr(window, "_log_buffer_timer", None)
-        if buffer_timer is not None:
-            buffer_timer.stop()
-        window._last_log_buffer_flush_ms = (perf_counter() - started) * 1000.0
-        window._log_buffer_requested_at = None
-        return
-    batch = list(buffer[:max_records_per_flush])
-    del buffer[: len(batch)]
-    cursor = window.log_terminal.textCursor()
-    cursor.movePosition(QTextCursor.MoveOperation.End)
-    cursor.beginEditBlock()
-    try:
-        for levelno, source, text in collapse_log_batch(batch):
-            _append_log_history(window, levelno, source, text)
-            insert_log_record(window, cursor, levelno, source, text)
-    finally:
-        cursor.endEditBlock()
-        window.log_terminal.setTextCursor(cursor)
+    batch = list(buffer[:max_records_per_flush]) if buffer else []
+    if batch:
+        del buffer[: len(batch)]
+        cursor = window.log_terminal.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.beginEditBlock()
+        try:
+            for levelno, source, text in collapse_log_batch(batch):
+                _append_log_history(window, levelno, source, text)
+                insert_log_record(window, cursor, levelno, source, text)
+        finally:
+            cursor.endEditBlock()
+            window.log_terminal.setTextCursor(cursor)
+    if getattr(window, "_diagnostic_export_buffer", None):
+        _flush_diagnostic_export_buffer(window)
     buffer_timer = getattr(window, "_log_buffer_timer", None)
-    if buffer_timer is not None and not buffer:
+    if buffer_timer is not None and not buffer and not getattr(window, "_diagnostic_export_buffer", None):
         buffer_timer.stop()
     if buffer:
         window._log_buffer_requested_at = perf_counter()
@@ -581,12 +683,14 @@ def insert_log_record(window, cursor: QTextCursor, levelno: int, source: str, te
 
 
 def append_log_record_now(window, levelno: int, source: str, text: str) -> None:
-    if not hasattr(window, "log_terminal"):
-        return
     if _is_performance_diagnostic(source, text) and int(levelno) < logging.ERROR:
         suppressed_events = getattr(window, "_log_perf_suppressed_events", None)
         if suppressed_events is not None:
             suppressed_events.append((perf_counter(), int(levelno), str(source), str(text)))
+        _append_diagnostic_export_event(window, levelno, source, text, suppressed=True)
+        if not hasattr(window, "log_terminal"):
+            return
+    if not hasattr(window, "log_terminal"):
         return
     started = perf_counter()
     _append_log_history(window, levelno, source, text)
@@ -701,6 +805,7 @@ def refresh_session_statistics_for(window, force: bool = False) -> None:
             target_value = int(round((old_value / old_max) * max(scrollbar.maximum(), 0)))
             scrollbar.setValue(max(0, min(target_value, scrollbar.maximum())))
         append_session_stats_log_snapshot_for(window, text)
+        _append_diagnostic_snapshot_export(window)
     window._last_session_stats_refresh_ms = (perf_counter() - started) * 1000.0
     window._last_session_stats_refresh_ts = now
 
