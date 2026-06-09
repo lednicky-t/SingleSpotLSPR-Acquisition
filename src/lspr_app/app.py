@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from lspr_ui import app_icon, apply_base_app_theme
+from lspr_app.resources import app_icon_path
 from lspr_app.storage.app_config import load_app_setting, save_app_setting
 
 from lspr_app import __version__
@@ -40,7 +41,7 @@ from lspr_core import (
 
 
 def _brand_logo_path() -> Path:
-    return Path(__file__).resolve().parent / "resources" / "icons" / "app_icon.svg"
+    return app_icon_path()
 
 
 def _lock_file_path() -> Path:

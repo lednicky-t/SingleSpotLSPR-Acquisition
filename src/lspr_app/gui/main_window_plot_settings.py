@@ -12,18 +12,18 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFrame,
     QFormLayout,
     QHBoxLayout,
     QLineEdit,
     QLabel,
-    QTabWidget,
     QVBoxLayout,
+    QSlider,
     QSpinBox,
     QWidget,
 )
 
 from lspr_app.gui.ui_helpers import make_compact_spinbox
-from lspr_app.gui.plot_view_cache import build_heatmap_arrays, build_heatmap_history_token
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,11 @@ _LINE_MODE_OPTIONS: tuple[_LineModeOption, ...] = (
     _LineModeOption("Step left", "left"),
     _LineModeOption("Step right", "right"),
     _LineModeOption("Step center", "center"),
+)
+
+_TIME_AXIS_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("Elapsed time", "elapsed"),
+    ("Local clock time", "clock"),
 )
 
 _ROLLING_WINDOW_OPTIONS: tuple[tuple[str, float], ...] = (
@@ -78,10 +83,6 @@ class SensorgramPlotSettingsDialog(QDialog):
         self.setModal(True)
         self.setMinimumWidth(430)
 
-        tabs = QTabWidget(self)
-        tabs.addTab(self._build_common_tab(), "Common")
-        tabs.addTab(self._build_metric_tab(), "Metric")
-
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Close,
             parent=self,
@@ -96,13 +97,29 @@ class SensorgramPlotSettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout()
-        layout.addWidget(tabs)
+        layout.addWidget(self._build_single_page())
         layout.addWidget(buttons)
         self.setLayout(layout)
 
-    def _build_common_tab(self) -> QWidget:
+    def _add_section_header(self, layout: QVBoxLayout, title: str) -> None:
+        label = QLabel(title)
+        label.setProperty("class", "sectionTitle")
+        label.setStyleSheet("font-weight: 700;")
+        layout.addWidget(label)
+        separator = QFrame(self)
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(separator)
+
+    def _build_single_page(self) -> QWidget:
         page = QWidget(self)
+        outer = QVBoxLayout(page)
+        outer.setSpacing(10)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        self._add_section_header(outer, "Common")
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
         self.antialias_check = QCheckBox("Enabled")
         self.antialias_check.setChecked(bool(getattr(self._window, "_plot_antialias_enabled", False)))
@@ -110,6 +127,21 @@ class SensorgramPlotSettingsDialog(QDialog):
             "Enable anti-aliasing for sensorgram drawing."
         )
         form.addRow("Anti-aliasing", self.antialias_check)
+
+        self.time_axis_mode_combo = QComboBox()
+        current_time_axis_mode = str(getattr(self._window, "_sensorgram_time_axis_mode", "elapsed") or "elapsed").strip().lower()
+        if current_time_axis_mode not in {"elapsed", "clock"}:
+            current_time_axis_mode = "elapsed"
+        current_index = 0
+        for index, (label, mode) in enumerate(_TIME_AXIS_OPTIONS):
+            self.time_axis_mode_combo.addItem(label, mode)
+            if mode == current_time_axis_mode:
+                current_index = index
+        self.time_axis_mode_combo.setCurrentIndex(current_index)
+        self.time_axis_mode_combo.setToolTip(
+            "Choose whether the sensorgram x-axis shows elapsed time since start or local clock time. The underlying data remain elapsed seconds."
+        )
+        form.addRow("Time axis", self.time_axis_mode_combo)
 
         points_row = QHBoxLayout()
         points_row.setContentsMargins(0, 0, 0, 0)
@@ -214,13 +246,11 @@ class SensorgramPlotSettingsDialog(QDialog):
         )
         form.addRow("Autoscale gate", self.skip_tiny_changes_check)
 
-        page.setLayout(form)
-        return page
+        outer.addLayout(form)
 
-    def _build_metric_tab(self) -> QWidget:
-        page = QWidget(self)
-        form = QFormLayout()
-
+        self._add_section_header(outer, "Metric")
+        metric_form = QFormLayout()
+        metric_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.line_mode_combo = QComboBox()
         for option in _LINE_MODE_OPTIONS:
             self.line_mode_combo.addItem(option.label, option.step_mode)
@@ -234,19 +264,65 @@ class SensorgramPlotSettingsDialog(QDialog):
         self.line_mode_combo.setToolTip(
             "Choose how points are connected in the plot: straight line, or stepped between samples."
         )
-        form.addRow("Line interpolation", self.line_mode_combo)
+        metric_form.addRow("Line interpolation", self.line_mode_combo)
+
+        self.recent_tail_points_spin = QSpinBox()
+        make_compact_spinbox(self.recent_tail_points_spin)
+        self.recent_tail_points_spin.setRange(0, 10000)
+        self.recent_tail_points_spin.setSingleStep(50)
+        self.recent_tail_points_spin.setValue(
+            int(getattr(self._window, "_sensorgram_compression_recent_tail_points", 300))
+        )
+        self.recent_tail_points_spin.setToolTip(
+            "Number of newest metric points kept uncompressed in the absolute sensorgram plot. Older data is shown using compression."
+        )
+        metric_form.addRow("Recent raw tail points", self.recent_tail_points_spin)
+
+        self.envelope_overlay_check = QCheckBox("Show envelope overlay")
+        self.envelope_overlay_check.setChecked(
+            bool(getattr(self._window, "_sensorgram_metric_envelope_overlay_enabled", False))
+        )
+        self.envelope_overlay_check.setToolTip(
+            "Draw the min/max envelope as a faint secondary layer over the trend line. The main trace still uses the compression trend, not the envelope."
+        )
+        envelope_row = QHBoxLayout()
+        envelope_row.setContentsMargins(0, 0, 0, 0)
+        envelope_row.setSpacing(8)
+        envelope_row.addWidget(self.envelope_overlay_check)
+
+        self.envelope_overlay_alpha_slider = QSlider(Qt.Orientation.Horizontal)
+        self.envelope_overlay_alpha_slider.setRange(0, 100)
+        self.envelope_overlay_alpha_slider.setSingleStep(1)
+        self.envelope_overlay_alpha_slider.setPageStep(10)
+        current_alpha = int(getattr(self._window, "_sensorgram_metric_envelope_overlay_alpha", 16))
+        current_alpha = max(0, min(current_alpha, 100))
+        self.envelope_overlay_alpha_slider.setValue(current_alpha)
+        self.envelope_overlay_alpha_value = QLabel(f"{current_alpha}%")
+        self.envelope_overlay_alpha_value.setMinimumWidth(40)
+        self.envelope_overlay_alpha_slider.setToolTip(
+            "Control how visible the envelope band is. Lower values are more subtle; higher values make the band more obvious."
+        )
+        self.envelope_overlay_alpha_slider.valueChanged.connect(
+            lambda value: self.envelope_overlay_alpha_value.setText(f"{int(value)}%")
+        )
+        envelope_row.addWidget(self.envelope_overlay_alpha_slider, 1)
+        envelope_row.addWidget(self.envelope_overlay_alpha_value)
+        envelope_row_widget = QWidget(self)
+        envelope_row_widget.setLayout(envelope_row)
+        metric_form.addRow("Envelope overlay", envelope_row_widget)
 
         note = QLabel("These settings affect the sensorgram time plot and the spectrum line plot display.")
         note.setWordWrap(True)
-        form.addRow("", note)
+        metric_form.addRow("", note)
 
-        page.setLayout(form)
+        outer.addLayout(metric_form)
         return page
 
     def apply_settings(self) -> None:
         window = self._window
         window._plot_antialias_enabled = bool(self.antialias_check.isChecked())
         pg.setConfigOptions(antialias=window._plot_antialias_enabled)
+        window._sensorgram_time_axis_mode = str(self.time_axis_mode_combo.currentData() or "elapsed")
         window._plot_display_points = int(self.metric_display_points_spin.value())
         window._sensorgram_heatmap_history_max_rows = int(self.heatmap_rows_spin.value())
         window._trace_display_window_s = float(self.rolling_window_combo.currentData())
@@ -257,38 +333,37 @@ class SensorgramPlotSettingsDialog(QDialog):
         window._metric_autoscale_throttle_mode = str(self.autoscale_throttle_combo.currentText())
         window._metric_autoscale_skip_tiny_changes_enabled = bool(self.skip_tiny_changes_check.isChecked())
         window._sensorgram_line_step_mode = _normalize_line_mode(self.line_mode_combo.currentData())
+        window._sensorgram_compression_recent_tail_points = max(int(self.recent_tail_points_spin.value()), 0)
+        window._sensorgram_metric_envelope_overlay_enabled = bool(self.envelope_overlay_check.isChecked())
+        window._sensorgram_metric_envelope_overlay_alpha = max(int(self.envelope_overlay_alpha_slider.value()), 0)
         window._spectrum_render_cache_key = None
         if hasattr(window, "_plot_view_cache") and hasattr(window._plot_view_cache, "refresh_live_absolute_metric_cache"):
             try:
                 if bool(getattr(window, "_live_active", False)) and getattr(window, "_normalize_sensorgram_view_mode", lambda value: value)(getattr(window, "_sensorgram_view_mode", "absolute")) == "absolute":
                     selected_metrics = set(getattr(window, "_selected_trace_metrics", lambda: [])())
                     archive_path = getattr(window, "_metric_archive_path", None)
+                    if hasattr(window._plot_view_cache, "set_live_absolute_metric_tail_size"):
+                        window._plot_view_cache.set_live_absolute_metric_tail_size(
+                            selected_metrics,
+                            recent_tail_points=int(window._sensorgram_compression_recent_tail_points),
+                        )
                     window._plot_view_cache.refresh_live_absolute_metric_cache(
                         selected_metrics,
                         target_points=int(window._plot_display_points),
                         archive_path=Path(archive_path) if archive_path else None,
                     )
-                    heatmap_history = getattr(window, "_sensorgram_heatmap_history", None)
-                    heatmap_cache = getattr(window, "_plot_view_cache", None)
-                    if (
-                        heatmap_cache is not None
-                        and hasattr(heatmap_cache, "refresh_live_absolute_heatmap_cache")
-                        and isinstance(heatmap_history, list)
-                        and heatmap_history
-                    ):
-                        try:
-                            heatmap_cache.refresh_live_absolute_heatmap_cache(
-                                build_heatmap_history_token(window),
-                                heatmap_history,
-                                max_rows=int(window._sensorgram_heatmap_history_max_rows),
-                                view_height_px=None,
-                            )
-                        except Exception:
-                            pass
             except Exception:
                 pass
-        if hasattr(window, "_update_sensorgram_display_window_button"):
-            window._update_sensorgram_display_window_button()
+        if hasattr(window, "_apply_sensorgram_display_style"):
+            try:
+                window._apply_sensorgram_display_style()
+            except Exception:
+                pass
+        if hasattr(window, "_apply_sensorgram_time_axis_mode"):
+            try:
+                window._apply_sensorgram_time_axis_mode(redraw=False)
+            except Exception:
+                pass
         if hasattr(window, "_schedule_ui_state_persist"):
             window._schedule_ui_state_persist()
         if hasattr(window, "_request_deferred_ui_refresh"):

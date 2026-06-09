@@ -39,7 +39,7 @@ class FlexibleTimeAxis(pg.AxisItem):
     def __init__(self, orientation: str = "bottom") -> None:
         super().__init__(orientation=orientation)
         self._mode = "elapsed"
-        self._reference_value = 0.0
+        self._start_datetime: datetime | None = None
         self._diagnostics_owner = None
         self._diagnostics_prefix = ""
 
@@ -72,15 +72,16 @@ class FlexibleTimeAxis(pg.AxisItem):
         except Exception:
             return
 
-    def set_mode(self, mode: str) -> None:
-        normalized = mode if mode in {"elapsed", "clock", "relative"} else "elapsed"
+    def set_time_mode(self, mode: str, *, start_datetime: datetime | None = None) -> None:
+        normalized = mode if mode in {"elapsed", "clock"} else "elapsed"
         if self._mode != normalized:
             self._mode = normalized
-            self.picture = None
-            self.update()
+        self._start_datetime = start_datetime if normalized == "clock" else None
+        self.picture = None
+        self.update()
 
-    def set_reference_value(self, value: float) -> None:
-        self._reference_value = float(value)
+    def set_mode(self, mode: str) -> None:
+        self.set_time_mode(mode)
 
     def mouseDoubleClickEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
         self.doubleClicked.emit()
@@ -88,27 +89,25 @@ class FlexibleTimeAxis(pg.AxisItem):
             event.accept()
         super().mouseDoubleClickEvent(event)
 
-    def _format_relative_value(self, value: float) -> str:
-        elapsed_s = max(float(value) - float(self._reference_value), 0.0)
-        total_seconds = max(int(round(elapsed_s)), 0)
+    def _format_elapsed_value(self, value: float) -> str:
+        total_seconds = max(int(round(float(value))), 0)
         hours, remainder = divmod(total_seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def tickStrings(self, values, scale, spacing):  # type: ignore[override]
         started = perf_counter()
-        if self._mode == "clock":
+        if self._mode == "clock" and self._start_datetime is not None:
             labels = []
             for value in values:
                 try:
-                    labels.append(datetime.fromtimestamp(float(value)).strftime("%H:%M:%S"))
+                    clock_dt = self._start_datetime + timedelta(seconds=float(value))
+                    labels.append(clock_dt.astimezone().strftime("%H:%M:%S"))
                 except (OverflowError, OSError, ValueError):
                     labels.append("")
             result = labels
-        elif self._mode == "relative":
-            result = [self._format_relative_value(float(value)) for value in values]
         else:
-            result = [f"{float(value):.0f}" if abs(float(value)) >= 10 else f"{float(value):.1f}" for value in values]
+            result = [self._format_elapsed_value(float(value)) for value in values]
         elapsed_ms = (perf_counter() - started) * 1000.0
         self._record_tickstrings(len(values), elapsed_ms)
         if elapsed_ms > 5.0:

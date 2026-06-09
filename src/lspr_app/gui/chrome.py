@@ -136,14 +136,6 @@ def build_menu_bar(window) -> QMenuBar:
     )
     gui_housekeeping_action.toggled.connect(window._set_gui_housekeeping_enabled)
 
-    sensorgram_heatmap_action = performance_menu.addAction("Sensorgram heatmap")
-    sensorgram_heatmap_action.setCheckable(True)
-    sensorgram_heatmap_action.setChecked(bool(getattr(window, "_sensorgram_heatmap_enabled", True)))
-    sensorgram_heatmap_action.setToolTip(
-        "Enable the heatmap layer in the sensorgram plot. Turn it off to isolate metric plot performance."
-    )
-    sensorgram_heatmap_action.toggled.connect(window._set_sensorgram_heatmap_enabled)
-
     metric_plot_action = performance_menu.addAction("Metric plot")
     metric_plot_action.setCheckable(True)
     metric_plot_action.setChecked(bool(getattr(window, "_metric_plot_enabled", True)))

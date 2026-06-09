@@ -72,21 +72,92 @@ def _metric_absolute_cache_modes_text(window: Any) -> str:
         return f"hit={total_hit} incremental={total_incremental} rebuild={total_rebuild}"
     latest_parts = [
         f"key={latest_key}",
+        f"raw={_int_field(latest_entry, 'raw_block_size', 1)}",
+        f"factor={_int_field(latest_entry, 'combine_factor', 2)}",
+        f"tail_cfg={_int_field(latest_entry, 'recent_tail_points_configured', 0)}",
+        f"tail_cur={_int_field(latest_entry, 'recent_tail_points_current', 0)}",
         f"src={_int_field(latest_entry, 'source_len')}",
+        f"src_pts={_int_field(latest_entry, 'source_points')}",
         f"target={_int_field(latest_entry, 'target_points')}",
         f"display={_int_field(latest_entry, 'display_len')}",
+        f"display_pts={_int_field(latest_entry, 'display_points')}",
         f"mode={latest_entry.get('last_mode', '-')}",
+        f"line={latest_entry.get('trend_method', '-')}",
         f"new={_int_field(latest_entry, 'new_points')}",
         f"base={_int_field(latest_entry, 'base_blocks')}",
         f"levels={_int_field(latest_entry, 'level_count')}",
+        f"weights={latest_entry.get('level_weights', '-')}",
         f"tail={_int_field(latest_entry, 'tail_groups_updated')}",
         f"disp_level={_int_field(latest_entry, 'display_level', -1)}",
+        f"disp_weight={_int_field(latest_entry, 'selected_level_raw_weight', 0)}",
         f"disp_blocks={_int_field(latest_entry, 'display_blocks')}",
+        f"old_blocks={_int_field(latest_entry, 'display_old_blocks')}",
+        f"old_pts={_int_field(latest_entry, 'display_old_points')}",
+        f"tail_pts={_int_field(latest_entry, 'display_tail_points')}",
+        f"total_pts={_int_field(latest_entry, 'display_total_points')}",
+        f"overlap_skip={_int_field(latest_entry, 'display_overlap_blocks_skipped')}",
+        f"overlay={'yes' if bool(getattr(window, '_sensorgram_metric_envelope_overlay_enabled', False)) else 'no'}",
         f"append={_float_text(latest_entry, 'append_ms')}",
-        f"assemble={_float_text(latest_entry, 'assemble_ms')}",
+        f"assemble={_float_text(latest_entry, 'display_assembly_ms')}",
         f"rebuild={_float_text(latest_entry, 'full_rebuild_ms')}",
     ]
     return f"hit={total_hit} incremental={total_incremental} rebuild={total_rebuild} | latest " + " ".join(latest_parts)
+
+
+def _sensorgram_x_domain_text(window: Any) -> str:
+    axis_mode = str(getattr(window, "_sensorgram_time_axis_mode", "elapsed") or "elapsed").strip().lower()
+    if axis_mode not in {"elapsed", "clock"}:
+        axis_mode = "elapsed"
+    started_at = getattr(window, "_sensorgram_axis_started_at", None)
+    if isinstance(started_at, datetime):
+        start_text = started_at.astimezone().isoformat(timespec="seconds")
+    else:
+        start_text = "-"
+    active_series = getattr(window, "_active_trace_series", None)
+    if not callable(active_series):
+        return f"mode={axis_mode} start={start_text} x=-"
+    try:
+        series = active_series()
+    except Exception:
+        return f"mode={axis_mode} start={start_text} x=-"
+    if not isinstance(series, dict) or not series:
+        return f"mode={axis_mode} start={start_text} x=-"
+    x_values_list: list[np.ndarray] = []
+    for values in series.values():
+        try:
+            x_values = np.asarray(values[0], dtype=np.float64)
+        except Exception:
+            continue
+        if len(x_values) == 0:
+            continue
+        finite = x_values[np.isfinite(x_values)]
+        if len(finite) > 0:
+            x_values_list.append(finite)
+    if not x_values_list:
+        return f"mode={axis_mode} start={start_text} x=-"
+    x = np.concatenate(x_values_list)
+    if len(x) < 2:
+        latest = float(np.max(x))
+        return f"mode={axis_mode} start={start_text} x_min={float(np.min(x)):.3f} x_max={float(np.max(x)):.3f} latest={latest:.3f} dx=-"
+    dx = np.diff(x)
+    if len(dx) == 0:
+        dx_median = dx_min = dx_max = 0.0
+        non_monotonic = 0
+        huge_jumps = 0
+    else:
+        dx_median = float(np.median(dx))
+        dx_min = float(np.min(dx))
+        dx_max = float(np.max(dx))
+        non_monotonic = int(np.sum(dx <= 0.0))
+        threshold = max(3600.0, abs(dx_median) * 100.0)
+        huge_jumps = int(np.sum(np.abs(dx) > threshold))
+    unix_like_count = int(np.sum(x > 1_000_000_000.0))
+    return (
+        f"mode={axis_mode} start={start_text} "
+        f"x_min={float(np.min(x)):.3f} x_max={float(np.max(x)):.3f} latest={float(np.max(x)):.3f} "
+        f"dx_med={dx_median:.3f} dx_min={dx_min:.3f} dx_max={dx_max:.3f} "
+        f"non_monotonic={non_monotonic} huge_jumps={huge_jumps} unix_like={unix_like_count}"
+    )
 
 
 def _scheduler_visual_coalescing_text(window: Any) -> str:
@@ -403,6 +474,7 @@ class SessionDiagnosticsSnapshot:
     metric_absolute_hdf5_reads_text: str
     metric_absolute_archive_points_text: str
     metric_absolute_display_points_text: str
+    metric_absolute_append_text: str
     metric_absolute_view_prep_text: str
     scheduler_visual_coalescing_text: str
     metric_autoscale_text: str
@@ -415,10 +487,15 @@ class SessionDiagnosticsSnapshot:
     trace_time_axis_tick_text: str
     spectrum_left_axis_tick_text: str
     trace_left_axis_tick_text: str
+    sensorgram_x_domain_text: str
     sensorgram_heatmap_arrays_text: str
     sensorgram_heatmap_image_text: str
     sensorgram_heatmap_axes_text: str
     heatmap_rows_text: str
+    heatmap_archive_rows_text: str
+    heatmap_archive_load_text: str
+    heatmap_archive_build_text: str
+    heatmap_archive_loading_text: str
     live_result_queue_text: str
     live_result_queue_max_text: str
     live_processed_queue_text: str
@@ -477,6 +554,11 @@ class SessionDiagnosticsSnapshot:
         sensorgram_heatmap_arrays_text = "-"
         sensorgram_heatmap_image_text = "-"
         sensorgram_heatmap_axes_text = "-"
+        heatmap_rows_text = "-"
+        heatmap_archive_rows_text = "-"
+        heatmap_archive_load_text = "-"
+        heatmap_archive_build_text = "-"
+        heatmap_archive_loading_text = "-"
         raw_acquired_text = str(max(int(getattr(window, "_raw_acquired_count", 0)), 0))
         raw_recording_enqueued_text = str(max(int(getattr(window, "_raw_recording_enqueued_count", 0)), 0))
         raw_recording_written_text = str(max(int(getattr(window, "_raw_recording_written_count", 0)), 0))
@@ -577,9 +659,23 @@ class SessionDiagnosticsSnapshot:
         metric_absolute_hdf5_reads_text = str(getattr(window, "_last_metric_absolute_hdf5_read_count_text", "-"))
         metric_absolute_archive_points_text = str(getattr(window, "_last_metric_absolute_archive_points_text", "-"))
         metric_absolute_display_points_text = str(getattr(window, "_last_metric_absolute_display_points_text", "-"))
+        metric_absolute_append_text = str(getattr(window, "_last_metric_absolute_append_text", "-"))
         metric_absolute_view_prep_text = str(getattr(window, "_last_metric_absolute_view_prep_text", "-"))
         scheduler_visual_coalescing_text = _scheduler_visual_coalescing_text(window)
-        metric_autoscale_text = _timing_plain_text(getattr(window, "_last_metric_autoscale_ms", None))
+        autoscale_range = getattr(window, "_last_metric_autoscale_range", None)
+        if isinstance(autoscale_range, tuple) and len(autoscale_range) == 4:
+            try:
+                metric_autoscale_text = (
+                    f"{_timing_plain_text(getattr(window, '_last_metric_autoscale_ms', None))} | "
+                    f"mode={getattr(window, '_sensorgram_view_mode', '-')}"
+                    f" | x={float(autoscale_range[0]):.3f}..{float(autoscale_range[1]):.3f}"
+                    f" | y={float(autoscale_range[2]):.3f}..{float(autoscale_range[3]):.3f}"
+                    f" | follow_latest={float(getattr(window, '_metric_autoscale_follow_latest_buffer_fraction', 0.0)):.3f}"
+                )
+            except Exception:
+                metric_autoscale_text = _timing_plain_text(getattr(window, "_last_metric_autoscale_ms", None))
+        else:
+            metric_autoscale_text = _timing_plain_text(getattr(window, "_last_metric_autoscale_ms", None))
         spectrum_plot_paint_summary_text = _paint_summary_text(window, "spectrum_plot")
         trace_plot_paint_summary_text = _paint_summary_text(window, "trace_plot")
         spectrum_plot_paint_recent_text = _recent_paint_summary_text(window, "spectrum_plot")
@@ -589,10 +685,15 @@ class SessionDiagnosticsSnapshot:
         trace_time_axis_tick_text = _axis_tick_summary_text(window, "trace_time_axis")
         spectrum_left_axis_tick_text = _axis_tick_summary_text(window, "spectrum_left_axis")
         trace_left_axis_tick_text = _axis_tick_summary_text(window, "trace_left_axis")
+        sensorgram_x_domain_text = _sensorgram_x_domain_text(window)
         sensorgram_heatmap_arrays_text = _timing_plain_text(getattr(window, "_last_sensorgram_heatmap_arrays_ms", None))
         sensorgram_heatmap_image_text = _timing_plain_text(getattr(window, "_last_sensorgram_heatmap_image_ms", None))
         sensorgram_heatmap_axes_text = _timing_plain_text(getattr(window, "_last_sensorgram_heatmap_axes_ms", None))
         heatmap_rows_text = str(len(getattr(window, "_sensorgram_heatmap_history", []) or []))
+        heatmap_archive_rows_text = str(max(int(getattr(window, "_sensorgram_heatmap_archive_rows", 0)), 0))
+        heatmap_archive_load_text = _timing_plain_text(getattr(window, "_sensorgram_heatmap_archive_load_ms", None))
+        heatmap_archive_build_text = _timing_plain_text(getattr(window, "_sensorgram_heatmap_archive_build_ms", None))
+        heatmap_archive_loading_text = "yes" if bool(getattr(window, "_sensorgram_heatmap_archive_loading", False)) else "no"
         reference_ms = None
         spacing_ms = getattr(window, "_last_spacing_ms", None)
         if spacing_ms is not None and spacing_ms > 0:
@@ -800,6 +901,7 @@ class SessionDiagnosticsSnapshot:
             metric_absolute_hdf5_reads_text=metric_absolute_hdf5_reads_text,
             metric_absolute_archive_points_text=metric_absolute_archive_points_text,
             metric_absolute_display_points_text=metric_absolute_display_points_text,
+            metric_absolute_append_text=metric_absolute_append_text,
             metric_absolute_view_prep_text=metric_absolute_view_prep_text,
             scheduler_visual_coalescing_text=scheduler_visual_coalescing_text,
             metric_autoscale_text=metric_autoscale_text,
@@ -812,10 +914,15 @@ class SessionDiagnosticsSnapshot:
             trace_time_axis_tick_text=trace_time_axis_tick_text,
             spectrum_left_axis_tick_text=spectrum_left_axis_tick_text,
             trace_left_axis_tick_text=trace_left_axis_tick_text,
+            sensorgram_x_domain_text=sensorgram_x_domain_text,
             sensorgram_heatmap_arrays_text=sensorgram_heatmap_arrays_text,
             sensorgram_heatmap_image_text=sensorgram_heatmap_image_text,
             sensorgram_heatmap_axes_text=sensorgram_heatmap_axes_text,
             heatmap_rows_text=heatmap_rows_text,
+            heatmap_archive_rows_text=heatmap_archive_rows_text,
+            heatmap_archive_load_text=heatmap_archive_load_text,
+            heatmap_archive_build_text=heatmap_archive_build_text,
+            heatmap_archive_loading_text=heatmap_archive_loading_text,
             live_result_queue_text=_queue_depth_text(window, "_live_result_queue"),
             live_result_queue_max_text=_queue_depth_max_text(getattr(window, "_live_result_queue_max_depth", None)),
             live_processed_queue_text=_queue_depth_text(window, "_live_processed_queue"),
@@ -939,6 +1046,7 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         f"  Live absolute HDF5 reads: {snapshot.metric_absolute_hdf5_reads_text}",
         f"  Live absolute archive points: {snapshot.metric_absolute_archive_points_text}",
         f"  Live absolute display points: {snapshot.metric_absolute_display_points_text}",
+        f"  Live absolute append: {snapshot.metric_absolute_append_text}",
         f"  Live absolute view prep: {snapshot.metric_absolute_view_prep_text}",
         f"  Scheduler visual coalescing: {snapshot.scheduler_visual_coalescing_text}",
         f"  Metric autoscale: {snapshot.metric_autoscale_text}",
@@ -951,10 +1059,15 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         f"  Trace time axis tickStrings: {snapshot.trace_time_axis_tick_text}",
         f"  Spectrum left axis tickStrings: {snapshot.spectrum_left_axis_tick_text}",
         f"  Trace left axis tickStrings: {snapshot.trace_left_axis_tick_text}",
+        f"  Sensorgram x-domain: {snapshot.sensorgram_x_domain_text}",
         f"  Sensorgram heatmap arrays: {snapshot.sensorgram_heatmap_arrays_text}",
         f"  Sensorgram heatmap image: {snapshot.sensorgram_heatmap_image_text}",
         f"  Sensorgram heatmap axes: {snapshot.sensorgram_heatmap_axes_text}",
         f"  Heatmap rows: {snapshot.heatmap_rows_text}",
+        f"  Heatmap archive rows: {snapshot.heatmap_archive_rows_text}",
+        f"  Heatmap archive load: {snapshot.heatmap_archive_load_text}",
+        f"  Heatmap archive build: {snapshot.heatmap_archive_build_text}",
+        f"  Heatmap archive loading: {snapshot.heatmap_archive_loading_text}",
         f"  Live result queue: {snapshot.live_result_queue_text} | max: {snapshot.live_result_queue_max_text}",
         f"  Live processed queue: {snapshot.live_processed_queue_text} | max: {snapshot.live_processed_queue_max_text}",
         f"  Live recording queue: {snapshot.live_recording_queue_text} | max: {snapshot.live_recording_queue_max_text}",

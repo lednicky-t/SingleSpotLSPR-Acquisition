@@ -103,7 +103,9 @@ from lspr_app.gui.main_window_headers import (
 from lspr_app.gui.main_window_runtime_state import UiRefreshState
 from lspr_app.gui.icon_helpers import (
     dark_icon,
+    heatmap_icon,
     reference_icon,
+    reload_icon,
     residual_icon,
     flow_tabler_icon,
     snowflake_icon,
@@ -239,6 +241,7 @@ from lspr_app.gui.plot_view_cache import (
     expand_heatmap_levels,
 )
 from lspr_app.gui.update_scheduler import GuiTaskScheduler
+from lspr_app.resources import app_icon_path
 from lspr_app.gui.main_window_logging import (
     append_log_record,
     append_log_record_now,
@@ -328,6 +331,12 @@ from lspr_app.gui.hardware_initializer import (
 from lspr_app.gui.hardware_inventory_dialog import show_hardware_inventory_dialog
 from lspr_app.gui.workers import (
     AcquisitionResult,
+    HeatmapArchiveLoadRequest,
+    HeatmapArchiveLoadResult,
+    HeatmapArchiveLoadTask,
+    MetricArchiveReloadRequest,
+    MetricArchiveReloadResult,
+    MetricArchiveReloadTask,
     LiveAcquisitionEvent,
     LiveAcquisitionWorker,
     LiveProcessedEvent,
@@ -701,6 +710,8 @@ class MainWindow(QMainWindow):
         self._log_buffering_enabled = bool(load_app_setting("log_buffering_enabled", True))
         self._gui_housekeeping_enabled = bool(load_app_setting("gui_housekeeping_enabled", True))
         self._sensorgram_heatmap_enabled = bool(load_app_setting("sensorgram_heatmap_enabled", True))
+        self._sensorgram_metric_envelope_overlay_enabled = False
+        self._sensorgram_metric_envelope_overlay_alpha = 16
         self._metric_plot_enabled = bool(load_app_setting("metric_plot_enabled", True))
         self._last_processed_plot: Spectrum | None = None
         self._last_fit_plot: Spectrum | None = None
@@ -728,6 +739,7 @@ class MainWindow(QMainWindow):
         self._metric_history_max_points = self._metric_live_buffer_max_points
         self._trace_history_max_points = self._metric_history_max_points
         self._plot_display_points = 512
+        self._sensorgram_compression_recent_tail_points = 300
         self._recording_blink_visible = True
         self._processing_debug_mode_enabled = bool(load_app_setting("processing_debug_mode", False))
         set_processing_debug_mode_enabled(self._processing_debug_mode_enabled)
@@ -738,22 +750,41 @@ class MainWindow(QMainWindow):
             self._hdf5_compression_enabled = bool(hdf5_compression_setting)
         self._sensorgram_view_mode = "absolute"
         self._sensorgram_content_mode = "metric"
+        self._sensorgram_time_axis_mode = "elapsed"
+        self._sensorgram_axis_started_at: datetime | None = None
         self._sensorgram_line_step_mode = None
         self._plot_antialias_enabled = False
         self.sensorgram_view_mode_button = QToolButton()
-        self.sensorgram_content_mode_button = QToolButton()
+        self.sensorgram_content_mode_button = self._make_frameless_icon_button(
+            heatmap_icon(),
+            "Toggle the sensorgram between Metric time plot and Heatmap.",
+            size=30,
+        )
+        self.sensorgram_content_mode_button.setCheckable(True)
         self.sensorgram_settings_button = self._make_frameless_icon_button(
             tint_tabler_icon(flow_tabler_icon("settings"), QColor("#f0f3f7")),
             "Open sensorgram plot settings.",
             size=30,
         )
-        self.sensorgram_window_button = QToolButton()
         self._sensorgram_heatmap_history: list[tuple[float, np.ndarray]] = []
         self._sensorgram_heatmap_history_revision = 0
         self._sensorgram_heatmap_history_max_rows = 800
         self._sensorgram_heatmap_wavelengths: np.ndarray | None = None
         self._sensorgram_heatmap_axis_key: tuple[int, float, float] | None = None
         self._sensorgram_heatmap_levels: tuple[float, float] | None = None
+        self._sensorgram_heatmap_archive_task: HeatmapArchiveLoadTask | None = None
+        self._sensorgram_heatmap_archive_loading = False
+        self._sensorgram_heatmap_archive_request_token: tuple[object, ...] | None = None
+        self._sensorgram_heatmap_archive_pending_token: tuple[object, ...] | None = None
+        self._sensorgram_heatmap_archive_times: np.ndarray | None = None
+        self._sensorgram_heatmap_archive_matrix: np.ndarray | None = None
+        self._sensorgram_heatmap_archive_rows = 0
+        self._sensorgram_heatmap_archive_load_ms: float | None = None
+        self._sensorgram_heatmap_archive_build_ms: float | None = None
+        self._sensorgram_metric_archive_reload_task: MetricArchiveReloadTask | None = None
+        self._sensorgram_metric_archive_reload_loading = False
+        self._sensorgram_metric_archive_reload_request_token: tuple[object, ...] | None = None
+        self._sensorgram_metric_archive_reload_pending_token: tuple[object, ...] | None = None
         self._metric_history_buffers: dict[str, MetricHistoryBuffer] = {}
         self._last_summary_text: str = ""
         self._last_summary_refresh_ts: float = 0.0
@@ -771,7 +802,6 @@ class MainWindow(QMainWindow):
         self._visible_trace_x: np.ndarray | None = None
         self._visible_trace_y: np.ndarray | None = None
         self._visible_trace_mode = "elapsed"
-        self._trace_time_axis_relative_labels_enabled = False
         self._metric_render_display_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._metric_render_state_cache: dict[str, tuple[object, ...]] = {}
         self._plots_frozen = False
@@ -856,7 +886,7 @@ class MainWindow(QMainWindow):
         self._title_bar_drag_active = False
         self._title_bar_drag_offset = QPoint(0, 0)
         self._sensorgram_header_controls_ready = False
-        self._brand_icon_path = Path(__file__).resolve().parent.parent / "resources" / "icons" / "app_icon.svg"
+        self._brand_icon_path = app_icon_path()
         self._prism_icon_svg = """
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
   <path stroke="none" d="M0 0h24v24H0z" fill="none"/>
@@ -1090,6 +1120,12 @@ class MainWindow(QMainWindow):
             "QToolButton#flowStepActionButton:pressed { background: rgba(127, 127, 127, 0.18); border: none; }"
         )
         self.clear_trace_button.clicked.connect(self._clear_trace_history)
+        self.sensorgram_reload_button = self._make_frameless_icon_button(
+            reload_icon(),
+            "Reload sensorgram history from the temp measurement file into the live display cache.",
+            size=30,
+        )
+        self.sensorgram_reload_button.clicked.connect(self._reload_sensorgram_history)
         self.trace_record_button = self._make_icon_button(
             transport_icon(self._theme_mode, "record"),
             "Start recording sensorgram data",
@@ -1255,7 +1291,8 @@ class MainWindow(QMainWindow):
         self.trace_time_axis = FlexibleTimeAxis("bottom")
         self.trace_time_axis._diagnostics_owner = self
         self.trace_time_axis._diagnostics_prefix = "trace_time_axis"
-        self.trace_time_axis.doubleClicked.connect(self._toggle_trace_time_axis_relative_labels)
+        self.trace_time_axis.doubleClicked.connect(self._toggle_sensorgram_time_axis_mode)
+        self._apply_sensorgram_time_axis_mode(redraw=False)
         _startup_mark("building spectrum and metric plots")
         self.spectrum_left_axis = ScientificAxis("left")
         self.spectrum_left_axis._diagnostics_owner = self
@@ -1358,7 +1395,7 @@ class MainWindow(QMainWindow):
             paint_prefix="trace_plot",
         )
         if hasattr(self.trace_plot, "setMenuEnabled"):
-            self.trace_plot.setMenuEnabled(False)
+            self.trace_plot.setMenuEnabled(True)
         self.trace_plot.showGrid(x=True, y=True, alpha=0.18)
         self.trace_plot.setMouseEnabled(x=True, y=True)
         self.trace_curves = {
@@ -1374,6 +1411,27 @@ class MainWindow(QMainWindow):
             curve.setClipToView(True)
             curve.setDownsampling(auto=False, ds=1)
             curve.setSkipFiniteCheck(True)
+        self.trace_metric_envelope_bands = {}
+        self.trace_metric_envelope_curves = {}
+        for metric_name in self.TRACE_METRIC_LABELS:
+            min_curve = pg.PlotDataItem()
+            max_curve = pg.PlotDataItem()
+            band = pg.FillBetweenItem(min_curve, max_curve)
+            for curve in (min_curve, max_curve):
+                curve._diagnostics_owner = self
+                curve._diagnostics_prefix = "trace_plot"
+                curve.setClipToView(True)
+                curve.setDownsampling(auto=False, ds=1)
+                curve.setSkipFiniteCheck(True)
+                curve.setVisible(False)
+                self.trace_plot.addItem(curve)
+            band._diagnostics_owner = self
+            band._diagnostics_prefix = "trace_plot"
+            band.setVisible(False)
+            band.setZValue(-2)
+            self.trace_plot.addItem(band)
+            self.trace_metric_envelope_bands[metric_name] = band
+            self.trace_metric_envelope_curves[metric_name] = (min_curve, max_curve)
         self.trace_heatmap_image = pg.ImageItem(axisOrder="row-major")
         self.trace_heatmap_image._diagnostics_owner = self
         self.trace_heatmap_image._diagnostics_prefix = "trace_plot"
@@ -2275,6 +2333,12 @@ class MainWindow(QMainWindow):
 
         for metric_name, curve in self.trace_curves.items():
             curve.setPen(pg.mkPen(self.SENSORGRAM_TIME_PLOT_COLORS.get(metric_name, "#1F77B4"), width=2.2))
+        for metric_name, band in getattr(self, "trace_metric_envelope_bands", {}).items():
+            base_color = QColor(self.SENSORGRAM_TIME_PLOT_COLORS.get(metric_name, "#1F77B4"))
+            band_color = QColor(base_color)
+            band_alpha = int(round(max(min(float(getattr(self, "_sensorgram_metric_envelope_overlay_alpha", 16)), 100.0), 0.0) * 2.55))
+            band_color.setAlpha(max(min(band_alpha, 255), 0))
+            band.setBrush(pg.mkBrush(band_color))
 
     def _set_log_following(self, enabled: bool) -> None:
         set_log_following(self, enabled)
@@ -3858,6 +3922,303 @@ class MainWindow(QMainWindow):
             self._pending_plot_request = None
             self._start_plot_processing_task(pending)
 
+    def _sensorgram_heatmap_archive_request_signature(self) -> tuple[object, ...] | None:
+        archive_path = getattr(self, "_metric_archive_path", None)
+        if archive_path is None:
+            return None
+        path = Path(archive_path).expanduser()
+        if not path.exists():
+            return None
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            mtime_ns = 0
+        time_range = getattr(self, "_sensorgram_heatmap_requested_time_range_s", None)
+        wavelength_range = getattr(self, "_sensorgram_heatmap_requested_wavelength_range_nm", None)
+        if wavelength_range is not None:
+            try:
+                wavelength_range = tuple(float(value) for value in list(wavelength_range)[:2])
+                if len(wavelength_range) != 2:
+                    wavelength_range = None
+            except (TypeError, ValueError):
+                wavelength_range = None
+        if time_range is not None:
+            try:
+                time_range = float(time_range)
+            except (TypeError, ValueError):
+                time_range = None
+        return (
+            str(path),
+            int(mtime_ns),
+            int(getattr(self, "_sensorgram_heatmap_history_max_rows", 800)),
+            time_range,
+            wavelength_range,
+            "sample",
+        )
+
+    def _set_sensorgram_heatmap_notice(self, title: str, detail: str) -> None:
+        if not hasattr(self, "trace_heatmap_notice_item"):
+            return
+        notice = self.trace_heatmap_notice_item
+        if hasattr(notice, "setText"):
+            notice.setText(f"{title}\n{detail}")
+        notice.setVisible(True)
+        sync_overlay = getattr(self, "_sync_trace_heatmap_notice_overlay", None)
+        if callable(sync_overlay):
+            sync_overlay()
+
+    def _start_sensorgram_heatmap_archive_task(self, request_token: tuple[object, ...]) -> None:
+        archive_path = getattr(self, "_metric_archive_path", None)
+        if archive_path is None:
+            return
+        archive_path = Path(archive_path).expanduser()
+        self._sensorgram_heatmap_archive_request_token = request_token
+        self._sensorgram_heatmap_archive_loading = True
+        self._sensorgram_heatmap_archive_times = None
+        self._sensorgram_heatmap_archive_matrix = None
+        self._sensorgram_heatmap_archive_rows = 0
+        self._sensorgram_heatmap_archive_load_ms = None
+        self._sensorgram_heatmap_archive_build_ms = None
+        self._set_sensorgram_heatmap_notice(
+            "Heatmap loading",
+            "Preparing heatmap from the saved measurement file in the background.",
+        )
+        task = HeatmapArchiveLoadTask(
+            HeatmapArchiveLoadRequest(
+                path=archive_path,
+                source_epoch=self._source_epoch,
+                request_token=request_token,
+                max_rows=int(getattr(self, "_sensorgram_heatmap_history_max_rows", 800)),
+                time_range_s=getattr(self, "_sensorgram_heatmap_requested_time_range_s", None),
+                wavelength_range_nm=getattr(self, "_sensorgram_heatmap_requested_wavelength_range_nm", None),
+                spectrum_group_name="sample",
+            )
+        )
+        self._sensorgram_heatmap_archive_task = task
+        task.signals.finished.connect(self._handle_sensorgram_heatmap_archive_result)
+        task.signals.failed.connect(self._handle_sensorgram_heatmap_archive_failed)
+        self._thread_pool.start(task)
+
+    def _request_sensorgram_heatmap_archive(self) -> None:
+        if self._closing or bool(getattr(self, "_live_active", False)):
+            return
+        request_token = self._sensorgram_heatmap_archive_request_signature()
+        if request_token is None:
+            return
+        self._sensorgram_heatmap_archive_pending_token = request_token
+        if self._sensorgram_heatmap_archive_loading:
+            return
+        self._start_sensorgram_heatmap_archive_task(request_token)
+
+    def _handle_sensorgram_heatmap_archive_result(self, result: HeatmapArchiveLoadResult) -> None:
+        self._sensorgram_heatmap_archive_loading = False
+        self._sensorgram_heatmap_archive_task = None
+        if self._closing:
+            self._sensorgram_heatmap_archive_pending_token = None
+            return
+        if result.request_token != self._sensorgram_heatmap_archive_request_token:
+            next_token = self._sensorgram_heatmap_archive_pending_token
+            if next_token is not None and next_token != result.request_token:
+                self._sensorgram_heatmap_archive_pending_token = None
+                self._start_sensorgram_heatmap_archive_task(next_token)
+            return
+
+        self._sensorgram_heatmap_wavelengths = np.asarray(result.wavelengths, dtype=np.float64)
+        self._sensorgram_heatmap_archive_times = np.asarray(result.times, dtype=np.float64)
+        self._sensorgram_heatmap_archive_matrix = np.asarray(result.matrix, dtype=np.float64)
+        self._sensorgram_heatmap_archive_rows = int(result.row_count)
+        self._sensorgram_heatmap_archive_load_ms = float(result.load_ms)
+        self._sensorgram_heatmap_archive_build_ms = float(result.build_ms)
+        self._sensorgram_heatmap_history.clear()
+        self._sensorgram_heatmap_history_revision += 1
+        if hasattr(self, "_plot_view_cache"):
+            try:
+                self._plot_view_cache.clear()
+            except Exception:
+                pass
+        self._set_sensorgram_heatmap_notice(
+            "Heatmap ready",
+            "Use Freeze/Review to inspect the saved-file heatmap.",
+        )
+        self._request_deferred_ui_refresh(trace_plot=True, trace_label="Metric position (nm)")
+        next_token = self._sensorgram_heatmap_archive_pending_token
+        self._sensorgram_heatmap_archive_pending_token = None
+        if next_token is not None and next_token != result.request_token:
+            self._start_sensorgram_heatmap_archive_task(next_token)
+
+    def _handle_sensorgram_heatmap_archive_failed(self, message: str) -> None:
+        self._sensorgram_heatmap_archive_loading = False
+        self._sensorgram_heatmap_archive_task = None
+        self._sensorgram_heatmap_archive_pending_token = None
+        self._set_sensorgram_heatmap_notice(
+            "Heatmap unavailable",
+            f"Saved-file heatmap load failed: {message}",
+        )
+        self._log_error(f"Heatmap saved-file load failed: {message}")
+
+    def _sensorgram_metric_archive_reload_request_signature(self) -> tuple[object, ...] | None:
+        archive_path = getattr(self, "_metric_archive_path", None)
+        if archive_path is None:
+            return None
+        try:
+            archive_path = str(Path(archive_path).expanduser())
+        except Exception:
+            archive_path = str(archive_path)
+        selected_metrics = tuple(sorted(str(name) for name in self._selected_trace_metrics()))
+        view_mode = self._normalize_sensorgram_view_mode(getattr(self, "_sensorgram_view_mode", "absolute"))
+        return (
+            archive_path,
+            int(self._source_epoch),
+            view_mode,
+            selected_metrics,
+            int(getattr(self, "_plot_display_points", 0)),
+        )
+
+    def _start_sensorgram_metric_archive_reload_task(self, request_token: tuple[object, ...]) -> None:
+        archive_path = getattr(self, "_metric_archive_path", None)
+        if archive_path is None:
+            return
+        archive_path = Path(archive_path).expanduser()
+        self._sensorgram_metric_archive_reload_request_token = request_token
+        self._sensorgram_metric_archive_reload_loading = True
+        self._sensorgram_metric_archive_reload_pending_token = None
+        self._set_sensorgram_heatmap_notice(
+            "Sensorgram reload",
+            "Rebuilding the live sensorgram from the saved measurement file in the background.",
+        )
+        task = MetricArchiveReloadTask(
+            MetricArchiveReloadRequest(
+                path=archive_path,
+                source_epoch=self._source_epoch,
+                request_token=request_token,
+                metric_names=None,
+            )
+        )
+        self._sensorgram_metric_archive_reload_task = task
+        task.signals.finished.connect(self._handle_sensorgram_metric_archive_reload_result)
+        task.signals.failed.connect(self._handle_sensorgram_metric_archive_reload_failed)
+        self._thread_pool.start(task)
+
+    def _request_sensorgram_metric_archive_reload(self) -> None:
+        if self._closing:
+            return
+        request_token = self._sensorgram_metric_archive_reload_request_signature()
+        if request_token is None:
+            self.status_label.setText("No saved measurement file is available to reload.")
+            return
+        archive_path = Path(request_token[0])
+        if not archive_path.exists():
+            self.status_label.setText("Sensorgram measurement file is missing.")
+            self._log_warning(f"Sensorgram measurement file not found: {archive_path}")
+            return
+        self._sensorgram_metric_archive_reload_pending_token = request_token
+        if self._sensorgram_metric_archive_reload_loading:
+            return
+        self._start_sensorgram_metric_archive_reload_task(request_token)
+
+    def _handle_sensorgram_metric_archive_reload_result(self, result: MetricArchiveReloadResult) -> None:
+        self._sensorgram_metric_archive_reload_loading = False
+        self._sensorgram_metric_archive_reload_task = None
+        if self._closing:
+            self._sensorgram_metric_archive_reload_pending_token = None
+            return
+        if result.request_token != self._sensorgram_metric_archive_reload_request_token:
+            next_token = self._sensorgram_metric_archive_reload_pending_token
+            if next_token is not None and next_token != result.request_token:
+                self._sensorgram_metric_archive_reload_pending_token = None
+                self._start_sensorgram_metric_archive_reload_task(next_token)
+            return
+
+        metric_history_buffers: dict[str, MetricHistoryBuffer] = {}
+        max_points = int(
+            getattr(
+                self,
+                "_metric_live_buffer_max_points",
+                getattr(self, "_metric_history_max_points", getattr(self, "_trace_history_max_points", 6000)),
+            )
+        )
+        display_points = max(int(getattr(self, "_plot_display_points", 512)), 1)
+        plot_view_cache = getattr(self, "_plot_view_cache", None)
+        if plot_view_cache is not None and hasattr(plot_view_cache, "clear_live_absolute_metric_cache"):
+            try:
+                plot_view_cache.clear_live_absolute_metric_cache()
+            except Exception:
+                pass
+        if plot_view_cache is not None and hasattr(plot_view_cache, "clear_active_trace_series_cache"):
+            try:
+                plot_view_cache.clear_active_trace_series_cache()
+            except Exception:
+                pass
+        total_points = 0
+        for metric_name, (times, values) in result.series.items():
+            x_values = np.asarray(times, dtype=np.float64)
+            y_values = np.asarray(values, dtype=np.float64)
+            if len(x_values) == 0 or len(y_values) == 0:
+                continue
+            buffer = MetricHistoryBuffer(max_points)
+            for time_s, value in zip(x_values, y_values, strict=False):
+                buffer.append(float(time_s), float(value))
+            metric_history_buffers[metric_name] = buffer
+            total_points += int(min(len(x_values), len(y_values)))
+            if plot_view_cache is not None and hasattr(plot_view_cache, "seed_live_absolute_metric_cache"):
+                try:
+                    plot_view_cache.seed_live_absolute_metric_cache(
+                        metric_name,
+                        x_values,
+                        y_values,
+                        target_points=display_points,
+                        recent_tail_points=max(int(getattr(self, "_sensorgram_compression_recent_tail_points", 300)), 0),
+                    )
+                except Exception:
+                    pass
+
+        self._metric_history_buffers = metric_history_buffers
+        if hasattr(self, "_metric_render_display_cache"):
+            self._metric_render_display_cache.clear()
+        if hasattr(self, "_metric_render_state_cache"):
+            self._metric_render_state_cache.clear()
+        self._last_metric_absolute_source_text = "saved_file_reload"
+        self._last_metric_absolute_cache_invalidation_text = "reload"
+        self._last_metric_absolute_cache_rebuild_count_text = str(int(result.metric_count))
+        self._last_metric_absolute_hdf5_read_count_text = "1"
+        self._last_metric_absolute_archive_points_text = str(int(result.point_count))
+        self._last_metric_absolute_display_points_text = str(int(total_points))
+        self._last_metric_absolute_view_prep_text = f"{float(result.load_ms):.2f} ms"
+        self._last_metric_absolute_append_text = "-"
+        self.status_label.setText(
+            f"Reloaded sensorgram measurement file ({result.metric_count} metrics, {result.point_count} points)."
+        )
+        self._log_success(
+            f"Sensorgram measurement file reloaded | metrics={result.metric_count} | points={result.point_count} | load_ms={float(result.load_ms):.2f}"
+        )
+        self._refresh_trace_plot("Metric position (nm)")
+        self._request_trace_autoscale()
+        self._update_trace_stats()
+        next_token = self._sensorgram_metric_archive_reload_pending_token
+        self._sensorgram_metric_archive_reload_pending_token = None
+        if next_token is not None and next_token != result.request_token:
+            self._start_sensorgram_metric_archive_reload_task(next_token)
+
+    def _handle_sensorgram_metric_archive_reload_failed(self, message: str) -> None:
+        self._sensorgram_metric_archive_reload_loading = False
+        self._sensorgram_metric_archive_reload_task = None
+        self._sensorgram_metric_archive_reload_pending_token = None
+        self.status_label.setText(f"Sensorgram reload failed: {message}")
+        self._log_error(f"Sensorgram measurement-file reload failed: {message}")
+
+    def _reload_sensorgram_history(self) -> None:
+        content_mode = self._normalize_sensorgram_content_mode(getattr(self, "_sensorgram_content_mode", "metric"))
+        if content_mode == "heatmap":
+            if bool(getattr(self, "_live_active", False)):
+                self._set_sensorgram_heatmap_notice(
+                    "Heatmap reload",
+                    "Live heatmap is disabled for performance. Use Freeze/Review to generate heatmap from the saved measurement file.",
+                )
+                return
+            self._request_sensorgram_heatmap_archive()
+            return
+        self._request_sensorgram_metric_archive_reload()
+
     def _flush_deferred_ui_refreshes(self) -> None:
         flush_deferred_ui_refreshes_for_runtime(self)
 
@@ -4241,17 +4602,12 @@ class MainWindow(QMainWindow):
         self._update_sensorgram_header_control_visibility()
 
     def _update_sensorgram_header_control_visibility(self) -> None:
-        if not getattr(self, "_sensorgram_header_controls_ready", False):
-            return
-        if hasattr(self, "sensorgram_window_button"):
-            view_mode = self._normalize_sensorgram_view_mode(self._sensorgram_view_mode)
-            self.sensorgram_window_button.setVisible(view_mode == "rolling")
+        return
 
     def _apply_sensorgram_view_mode(self, *, save: bool = False) -> None:
         self._sensorgram_view_mode = self._normalize_sensorgram_view_mode(self._sensorgram_view_mode)
         self._trace_view_locked = False
         self._update_sensorgram_view_mode_button()
-        self._update_sensorgram_display_window_button()
         self._request_trace_autoscale()
         self._request_deferred_ui_refresh(trace_plot=True)
         if save:
@@ -4262,61 +4618,9 @@ class MainWindow(QMainWindow):
         self._sensorgram_view_mode = "rolling" if current == "absolute" else "absolute"
         self._apply_sensorgram_view_mode(save=True)
 
-    def _sensorgram_display_window_label(self, seconds: float | None = None) -> str:
-        current = self._normalize_sensorgram_display_window_s(seconds)
-        if current >= 3600.0:
-            return "1 h"
-        if current >= 1800.0:
-            return "30 min"
-        if current >= 600.0:
-            return "10 min"
-        return "1 min"
-
-    def _sensorgram_display_window_tooltip(self, seconds: float | None = None) -> str:
-        current = self._normalize_sensorgram_display_window_s(seconds)
-        current_label = self._sensorgram_display_window_label(current).replace("Window: ", "")
-        if current >= 3600.0:
-            next_label = "1 min"
-        elif current >= 1800.0:
-            next_label = "1 h"
-        elif current >= 600.0:
-            next_label = "30 min"
-        else:
-            next_label = "10 min"
-        return f"Current rolling window: {current_label}. Click to cycle to {next_label}."
-
-    def _update_sensorgram_display_window_button(self) -> None:
-        if not hasattr(self, "sensorgram_window_button"):
-            return
-        label = self._sensorgram_display_window_label()
-        self.sensorgram_window_button.setText(f"[{label}]")
-        self.sensorgram_window_button.setToolTip(self._sensorgram_display_window_tooltip())
-        self._update_sensorgram_header_control_visibility()
-
-    def _cycle_sensorgram_display_window(self) -> None:
-        current = self._normalize_sensorgram_display_window_s()
-        window_values = (60.0, 600.0, 1800.0, 3600.0)
-        try:
-            index = window_values.index(current)
-        except ValueError:
-            index = 0
-        self._trace_display_window_s = window_values[(index + 1) % len(window_values)]
-        self._update_sensorgram_display_window_button()
-        self._request_trace_autoscale()
-        self._request_deferred_ui_refresh(trace_plot=True)
-        self._schedule_acquisition_state_persist()
-
     def _normalize_sensorgram_content_mode(self, mode: object) -> str:
         normalized = str(mode or "").strip().lower()
         return normalized if normalized in {"metric", "heatmap"} else "metric"
-
-    def _sensorgram_content_mode_label(self, mode: str | None = None) -> str:
-        normalized = self._normalize_sensorgram_content_mode(mode or self._sensorgram_content_mode)
-        return "Metric time plot" if normalized == "metric" else "Heatmap"
-
-    def _sensorgram_content_mode_color(self, mode: str | None = None) -> str:
-        normalized = self._normalize_sensorgram_content_mode(mode or self._sensorgram_content_mode)
-        return "#9B6DFF" if normalized == "metric" else "#D9544D"
 
     def _sensorgram_content_mode_tooltip(self, mode: str | None = None) -> str:
         normalized = self._normalize_sensorgram_content_mode(mode or self._sensorgram_content_mode)
@@ -4333,11 +4637,9 @@ class MainWindow(QMainWindow):
     def _update_sensorgram_content_mode_button(self) -> None:
         if not hasattr(self, "sensorgram_content_mode_button"):
             return
-        label = self._sensorgram_content_mode_label()
-        self.sensorgram_content_mode_button.setText(f"[{label}]")
-        self.sensorgram_content_mode_button.setStyleSheet(
-            f"QToolButton {{ color: {self._sensorgram_content_mode_color()}; font-weight: 400; }}"
-        )
+        normalized = self._normalize_sensorgram_content_mode(self._sensorgram_content_mode)
+        self.sensorgram_content_mode_button.setChecked(normalized == "heatmap")
+        self.sensorgram_content_mode_button.setIcon(heatmap_icon())
         self.sensorgram_content_mode_button.setToolTip(self._sensorgram_content_mode_tooltip())
 
     def _apply_sensorgram_content_mode(self, *, save: bool = False) -> None:
@@ -4389,7 +4691,6 @@ class MainWindow(QMainWindow):
                 active = cache.live_absolute_metric_series(selected_metrics)
                 if active:
                     return active
-                return {}
             metric_history_buffers = getattr(self, "_metric_history_buffers", None)
             archive_path = getattr(self, "_metric_archive_path", None)
             if not bool(getattr(self, "_live_active", False)) and archive_path is not None:
@@ -4407,11 +4708,20 @@ class MainWindow(QMainWindow):
                 }
                 if active:
                     return active
+            if metric_history_buffers and bool(getattr(self, "_live_active", False)):
+                active = {
+                    name: extract_series_arrays(buffer)
+                    for name, buffer in metric_history_buffers.items()
+                    if name in selected_metrics and len(buffer) > 0
+                }
+                if active:
+                    return active
             return {}
 
-        token = build_active_trace_series_token(self)
-        if cache is None:
+        view_mode = self._normalize_sensorgram_view_mode(getattr(self, "_sensorgram_view_mode", "absolute"))
+        if cache is None or view_mode != "absolute":
             return _build_active_series()
+        token = build_active_trace_series_token(self)
         return cache.cached_active_trace_series(token, _build_active_series)
 
     def _update_spectrum_stats(self, processed: Spectrum | None, fit: Spectrum | None) -> None:
@@ -4480,16 +4790,30 @@ class MainWindow(QMainWindow):
             min_interval=1.0,
         )
 
-    def _toggle_trace_time_axis_relative_labels(self) -> None:
-        self._trace_time_axis_relative_labels_enabled = not bool(self._trace_time_axis_relative_labels_enabled)
-        mode_text = "relative" if self._trace_time_axis_relative_labels_enabled else "local"
+    def _apply_sensorgram_time_axis_mode(self, *, redraw: bool = True) -> None:
+        mode = str(getattr(self, "_sensorgram_time_axis_mode", "elapsed") or "elapsed").strip().lower()
+        if mode not in {"elapsed", "clock"}:
+            mode = "elapsed"
+        self._sensorgram_time_axis_mode = mode
+        axis = getattr(self, "trace_time_axis", None)
+        if axis is not None and hasattr(axis, "set_time_mode"):
+            axis.set_time_mode(mode, start_datetime=getattr(self, "_sensorgram_axis_started_at", None))
+        if hasattr(self, "trace_plot"):
+            self.trace_plot.setLabel("bottom", "Time (local)" if mode == "clock" else "Elapsed time")
+        if redraw:
+            self._request_plot_refresh()
+
+    def _toggle_sensorgram_time_axis_mode(self) -> None:
+        current_mode = str(getattr(self, "_sensorgram_time_axis_mode", "elapsed") or "elapsed").strip().lower()
+        self._sensorgram_time_axis_mode = "clock" if current_mode != "clock" else "elapsed"
+        mode_text = "local" if self._sensorgram_time_axis_mode == "clock" else "elapsed"
         self._log_throttled(
             "trace_time_axis_mode",
             f"Trace time axis set to {mode_text} labels.",
             level=logging.INFO,
             min_interval=0.5,
         )
-        self._request_plot_refresh()
+        self._apply_sensorgram_time_axis_mode()
 
     def _schedule_processing_refresh(self) -> None:
         schedule_processing_refresh(self)
@@ -4521,6 +4845,8 @@ class MainWindow(QMainWindow):
         button.setStyleSheet(
             "QToolButton#framelessIconButton { background: transparent; border: none; padding: 0px; }"
             "QToolButton#framelessIconButton:hover { background: rgba(127, 127, 127, 0.10); border: none; }"
+            "QToolButton#framelessIconButton:checked { background: rgba(127, 127, 127, 0.14); border: none; }"
+            "QToolButton#framelessIconButton:checked:hover { background: rgba(127, 127, 127, 0.18); border: none; }"
             "QToolButton#framelessIconButton:pressed { background: rgba(127, 127, 127, 0.18); border: none; }"
         )
         return button

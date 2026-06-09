@@ -883,3 +883,73 @@ def load_processed_metric_history(path: Path, metric_names: set[str] | None = No
             values = np.asarray(dataset[...], dtype=float)
             series[metric_name] = (times_s.copy(), values)
     return series
+
+
+def load_spectrum_heatmap_history(
+    path: Path,
+    *,
+    max_rows: int | None = None,
+    time_range_s: tuple[float, float] | None = None,
+    wavelength_range_nm: tuple[float, float] | None = None,
+    spectrum_group_name: str = "sample",
+) -> tuple[np.ndarray, list[tuple[float, np.ndarray]]]:
+    path = Path(path).expanduser()
+    if not path.exists():
+        return np.empty(0, dtype=np.float64), []
+    try:
+        with h5py.File(path, "r") as handle:
+            data_group = handle.get("data")
+            if data_group is None:
+                return np.empty(0, dtype=np.float64), []
+            wavelengths_ds = data_group.get(LSPR_MEASUREMENT_WAVELENGTHS_DATASET_NAME)
+            spectra_root = data_group.get("spectra")
+            if wavelengths_ds is None or spectra_root is None:
+                return np.empty(0, dtype=np.float64), []
+            spectrum_group = spectra_root.get(spectrum_group_name)
+            if spectrum_group is None:
+                return np.empty(0, dtype=np.float64), []
+            time_ds = spectrum_group.get("t_ms")
+            intensity_ds = spectrum_group.get("intensity")
+            if time_ds is None or intensity_ds is None:
+                return np.empty(0, dtype=np.float64), []
+
+            wavelengths = np.asarray(wavelengths_ds[...], dtype=np.float64)
+            if wavelengths.size == 0:
+                return np.empty(0, dtype=np.float64), []
+
+            if wavelength_range_nm is not None:
+                low_nm = float(min(wavelength_range_nm))
+                high_nm = float(max(wavelength_range_nm))
+                wavelength_mask = (wavelengths >= low_nm) & (wavelengths <= high_nm)
+                if np.any(wavelength_mask):
+                    wavelengths = wavelengths[wavelength_mask]
+                else:
+                    wavelength_mask = np.ones(len(wavelengths), dtype=bool)
+            else:
+                wavelength_mask = np.ones(len(wavelengths), dtype=bool)
+
+            times_s = np.asarray(time_ds[...], dtype=np.float64) / 1000.0
+            if times_s.size == 0:
+                return wavelengths, []
+
+            row_indices = np.arange(len(times_s), dtype=np.int64)
+            if time_range_s is not None:
+                start_s = float(min(time_range_s))
+                end_s = float(max(time_range_s))
+                row_mask = (times_s >= start_s) & (times_s <= end_s)
+                row_indices = row_indices[row_mask]
+            if max_rows is not None and max_rows > 0 and len(row_indices) > max_rows:
+                row_indices = row_indices[-int(max_rows) :]
+
+            if len(row_indices) == 0:
+                return wavelengths, []
+
+            selected_times = times_s[row_indices]
+            selected_intensity = np.asarray(intensity_ds[row_indices][:, wavelength_mask], dtype=np.float64)
+            history = [
+                (float(time_s), np.asarray(values, dtype=np.float64).copy())
+                for time_s, values in zip(selected_times.tolist(), selected_intensity, strict=False)
+            ]
+            return wavelengths, history
+    except Exception:
+        return np.empty(0, dtype=np.float64), []

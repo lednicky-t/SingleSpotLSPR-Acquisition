@@ -5,58 +5,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 import inspect
-import tempfile
 
 import h5py
 import numpy as np
+
+from lspr_app.storage.output_paths import recording_experiment_base_dir_for
 
 
 _WRITER_ATTR = "_metric_archive_writer"
 _WRITER_PATH_ATTR = "_metric_archive_writer_path"
 _WRITER_TEMP_ATTR = "_metric_archive_writer_is_temp"
-
-
-def _candidate_directories(window: Any) -> list[Path]:
-    candidates: list[Path] = []
-    for attr in (
-        "_project_dir",
-        "_project_path",
-        "_session_dir",
-        "_session_path",
-        "_measurement_dir",
-        "_measurement_path",
-        "_output_dir",
-        "_output_path",
-        "_save_dir",
-        "_save_path",
-    ):
-        value = getattr(window, attr, None)
-        if value:
-            try:
-                candidates.append(Path(value).expanduser())
-            except Exception:
-                pass
-
-    session = getattr(window, "_session", None)
-    if session is not None:
-        for attr in (
-            "project_dir",
-            "project_path",
-            "session_dir",
-            "session_path",
-            "output_dir",
-            "output_path",
-            "measurement_dir",
-            "measurement_path",
-        ):
-            value = getattr(session, attr, None)
-            if value:
-                try:
-                    candidates.append(Path(value).expanduser())
-                except Exception:
-                    pass
-
-    return [path for path in candidates if path.exists()]
 
 
 def ensure_temp_measurement_path(window: Any) -> Path:
@@ -68,12 +26,8 @@ def ensure_temp_measurement_path(window: Any) -> Path:
     session_name = getattr(getattr(window, "_session", None), "name", None) or "session"
     safe_session = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(session_name))
 
-    for base_dir in _candidate_directories(window):
-        candidate = base_dir / f"temp_measurement_{safe_session}_{stamp}.h5"
-        setattr(window, _WRITER_PATH_ATTR, candidate)
-        return candidate
-
-    candidate = Path(tempfile.gettempdir()) / f"temp_measurement_{safe_session}_{stamp}.h5"
+    base_dir = recording_experiment_base_dir_for(window, fallback_base=Path.cwd() / "data")
+    candidate = base_dir / f"temp_measurement_{safe_session}_{stamp}.h5"
     setattr(window, _WRITER_PATH_ATTR, candidate)
     return candidate
 

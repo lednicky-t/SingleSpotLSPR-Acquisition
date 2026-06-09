@@ -26,12 +26,16 @@ def restore_ui_state(window) -> None:
     top_view_mode = ui_state.get("top_view_mode")
     sensorgram_view_mode = ui_state.get("sensorgram_view_mode")
     sensorgram_content_mode = ui_state.get("sensorgram_content_mode")
+    sensorgram_time_axis_mode = ui_state.get("sensorgram_time_axis_mode")
     trace_display_window_s = ui_state.get("trace_display_window_s")
     metric_display_points = ui_state.get("metric_display_points")
+    sensorgram_compression_recent_tail_points = ui_state.get("sensorgram_compression_recent_tail_points")
     metric_autoscale_follow_latest_buffer_fraction = ui_state.get("metric_autoscale_follow_latest_buffer_fraction")
     metric_autoscale_min_interval_s = ui_state.get("metric_autoscale_min_interval_s")
     metric_autoscale_throttle_mode = ui_state.get("metric_autoscale_throttle_mode")
     metric_autoscale_skip_tiny_changes_enabled = ui_state.get("metric_autoscale_skip_tiny_changes_enabled")
+    sensorgram_metric_envelope_overlay_enabled = ui_state.get("sensorgram_metric_envelope_overlay_enabled")
+    sensorgram_metric_envelope_overlay_alpha = ui_state.get("sensorgram_metric_envelope_overlay_alpha")
     sensorgram_line_mode = ui_state.get("sensorgram_line_mode")
     plot_antialias_enabled = ui_state.get("plot_antialias_enabled")
     sensorgram_heatmap_history_max_rows = ui_state.get("sensorgram_heatmap_history_max_rows")
@@ -111,10 +115,19 @@ def restore_ui_state(window) -> None:
     if isinstance(sensorgram_content_mode, str):
         window._sensorgram_content_mode = window._normalize_sensorgram_content_mode(sensorgram_content_mode)
         window._apply_sensorgram_content_mode(save=False)
+    if isinstance(sensorgram_time_axis_mode, str):
+        normalized_time_axis_mode = str(sensorgram_time_axis_mode).strip().lower()
+        if normalized_time_axis_mode not in {"elapsed", "clock"}:
+            normalized_time_axis_mode = "elapsed"
+        window._sensorgram_time_axis_mode = normalized_time_axis_mode
+        if hasattr(window, "_apply_sensorgram_time_axis_mode"):
+            window._apply_sensorgram_time_axis_mode(redraw=False)
     if isinstance(trace_display_window_s, (int, float)) and float(trace_display_window_s) > 0:
         window._trace_display_window_s = window._normalize_sensorgram_display_window_s(trace_display_window_s)
     if isinstance(metric_display_points, (int, float)) and int(metric_display_points) > 0:
         window._plot_display_points = max(int(metric_display_points), 1)
+    if isinstance(sensorgram_compression_recent_tail_points, (int, float)) and int(sensorgram_compression_recent_tail_points) >= 0:
+        window._sensorgram_compression_recent_tail_points = int(sensorgram_compression_recent_tail_points)
     if isinstance(metric_autoscale_follow_latest_buffer_fraction, (int, float)):
         window._metric_autoscale_follow_latest_buffer_fraction = max(float(metric_autoscale_follow_latest_buffer_fraction), 0.0)
     if isinstance(metric_autoscale_min_interval_s, (int, float)):
@@ -131,6 +144,23 @@ def restore_ui_state(window) -> None:
                 "yes",
                 "on",
             }
+    if isinstance(sensorgram_metric_envelope_overlay_enabled, (bool, str)):
+        if isinstance(sensorgram_metric_envelope_overlay_enabled, bool):
+            window._sensorgram_metric_envelope_overlay_enabled = bool(sensorgram_metric_envelope_overlay_enabled)
+        else:
+            window._sensorgram_metric_envelope_overlay_enabled = str(sensorgram_metric_envelope_overlay_enabled).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        envelope_bands = getattr(window, "trace_metric_envelope_bands", None)
+        if isinstance(envelope_bands, dict):
+            for band in envelope_bands.values():
+                if hasattr(band, "setVisible"):
+                    band.setVisible(bool(window._sensorgram_metric_envelope_overlay_enabled))
+    if isinstance(sensorgram_metric_envelope_overlay_alpha, (int, float)):
+        window._sensorgram_metric_envelope_overlay_alpha = max(min(int(sensorgram_metric_envelope_overlay_alpha), 100), 0)
     if isinstance(sensorgram_line_mode, str):
         window._sensorgram_line_step_mode = window._normalize_sensorgram_line_mode(sensorgram_line_mode)
     if isinstance(plot_antialias_enabled, (bool, str)):
@@ -158,7 +188,6 @@ def restore_ui_state(window) -> None:
             if residual_visible and hasattr(window, "residual_view"):
                 window.residual_view.setYRange(y_min, y_max, padding=0.0)
                 window._residual_axis_autoscaled = True
-    window._update_sensorgram_display_window_button()
     window._start_maximized = bool(maximized)
     window._sync_view_actions()
 
@@ -208,8 +237,12 @@ def save_ui_state(window) -> None:
             "top_view_mode": window._top_view_mode,
             "sensorgram_view_mode": window._sensorgram_view_mode,
             "sensorgram_content_mode": window._sensorgram_content_mode,
+            "sensorgram_time_axis_mode": str(getattr(window, "_sensorgram_time_axis_mode", "elapsed")),
             "trace_display_window_s": float(window._trace_display_window_s),
             "metric_display_points": int(getattr(window, "_plot_display_points", 512)),
+            "sensorgram_compression_recent_tail_points": int(
+                getattr(window, "_sensorgram_compression_recent_tail_points", 300)
+            ),
             "metric_autoscale_follow_latest_buffer_fraction": float(
                 getattr(window, "_metric_autoscale_follow_latest_buffer_fraction", 0.05)
             ),
@@ -217,6 +250,12 @@ def save_ui_state(window) -> None:
             "metric_autoscale_throttle_mode": str(getattr(window, "_metric_autoscale_throttle_mode", "Medium")),
             "metric_autoscale_skip_tiny_changes_enabled": bool(
                 getattr(window, "_metric_autoscale_skip_tiny_changes_enabled", True)
+            ),
+            "sensorgram_metric_envelope_overlay_enabled": bool(
+                getattr(window, "_sensorgram_metric_envelope_overlay_enabled", False)
+            ),
+            "sensorgram_metric_envelope_overlay_alpha": int(
+                getattr(window, "_sensorgram_metric_envelope_overlay_alpha", 16)
             ),
             "sensorgram_line_mode": "linear" if getattr(window, "_sensorgram_line_step_mode", None) is None else str(window._sensorgram_line_step_mode),
             "plot_antialias_enabled": bool(getattr(window, "_plot_antialias_enabled", False)),

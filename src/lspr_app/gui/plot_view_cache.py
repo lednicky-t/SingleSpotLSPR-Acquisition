@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
@@ -15,11 +15,16 @@ class MetricDisplayCache:
     source_len: int = 0
     target_points: int = 0
     stride: int = 1
-    raw_block_size: int = 128
-    combine_factor: int = 4
+    raw_block_size: int = 1
+    combine_factor: int = 2
+    pending_x: list[float] = field(default_factory=list)
+    pending_y: list[float] = field(default_factory=list)
+    recent_tail_x: deque[float] = field(default_factory=deque)
+    recent_tail_y: deque[float] = field(default_factory=deque)
+    recent_tail_max_points: int = 300
     x_display: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float64))
     y_display: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float64))
-    levels: list[list["_EnvelopeBlock"]] = field(default_factory=list)
+    levels: list[list["MetricCompressionBlock"]] = field(default_factory=list)
     display_revision: int = 0
     display_output_revision: int = 0
     last_display_signature: tuple[object, ...] | None = None
@@ -33,6 +38,14 @@ class MetricDisplayCache:
     last_tail_groups_updated: int = 0
     last_display_level: int = -1
     last_display_blocks: int = 0
+    last_trend_method: str = "first_last"
+    last_recent_tail_configured: int = 300
+    last_recent_tail_current: int = 0
+    last_old_display_blocks: int = 0
+    last_overlap_blocks_skipped: int = 0
+    last_old_display_points: int = 0
+    last_tail_display_points: int = 0
+    last_total_display_points: int = 0
     last_append_ms: float | None = None
     last_assemble_ms: float | None = None
     last_full_rebuild_ms: float | None = None
@@ -42,18 +55,29 @@ class MetricDisplayCache:
     last_archive_points: int = 0
 
 
-@dataclass(slots=True)
-class _EnvelopeBlock:
+@dataclass(slots=True, frozen=True)
+class MetricCompressionBlock:
+    start_x: float
+    end_x: float
     first_x: float
+    first_y: float
     last_x: float
-    y_min: float
-    y_max: float
-    x_at_y_min: float
-    x_at_y_max: float
+    last_y: float
+    min_x: float
+    min_y: float
+    max_x: float
+    max_y: float
+    mean_y: float
     count: int
 
 
-def _make_envelope_block(x: np.ndarray, y: np.ndarray) -> _EnvelopeBlock | None:
+def level_raw_weight(cache: MetricDisplayCache, level: int) -> int:
+    raw_block_size = max(int(getattr(cache, "raw_block_size", 1)), 1)
+    combine_factor = max(int(getattr(cache, "combine_factor", 2)), 2)
+    return int(raw_block_size * (combine_factor ** max(int(level), 0)))
+
+
+def _make_metric_compression_block(x: np.ndarray, y: np.ndarray) -> MetricCompressionBlock | None:
     if len(x) == 0 or len(y) == 0:
         return None
     finite = np.isfinite(x) & np.isfinite(y)
@@ -65,67 +89,254 @@ def _make_envelope_block(x: np.ndarray, y: np.ndarray) -> _EnvelopeBlock | None:
         return None
     min_i = int(np.argmin(yf))
     max_i = int(np.argmax(yf))
-    return _EnvelopeBlock(
+    return MetricCompressionBlock(
+        start_x=float(xf[0]),
+        end_x=float(xf[-1]),
         first_x=float(xf[0]),
+        first_y=float(yf[0]),
         last_x=float(xf[-1]),
-        y_min=float(yf[min_i]),
-        y_max=float(yf[max_i]),
-        x_at_y_min=float(xf[min_i]),
-        x_at_y_max=float(xf[max_i]),
+        last_y=float(yf[-1]),
+        min_x=float(xf[min_i]),
+        min_y=float(yf[min_i]),
+        max_x=float(xf[max_i]),
+        max_y=float(yf[max_i]),
+        mean_y=float(np.mean(yf)),
         count=int(len(xf)),
     )
 
 
-def _combine_envelope_blocks(blocks: list[_EnvelopeBlock]) -> _EnvelopeBlock | None:
+def _combine_metric_compression_blocks(blocks: list[MetricCompressionBlock]) -> MetricCompressionBlock | None:
+    blocks = [block for block in blocks if block is not None and block.count > 0]
     if not blocks:
         return None
-    first_x = float(blocks[0].first_x)
-    last_x = float(blocks[-1].last_x)
-    count = int(sum(block.count for block in blocks))
-    min_block = min(blocks, key=lambda block: block.y_min)
-    max_block = max(blocks, key=lambda block: block.y_max)
-    return _EnvelopeBlock(
-        first_x=first_x,
-        last_x=last_x,
-        y_min=float(min_block.y_min),
-        y_max=float(max_block.y_max),
-        x_at_y_min=float(min_block.x_at_y_min),
-        x_at_y_max=float(max_block.x_at_y_max),
-        count=count,
+    first = blocks[0]
+    last = blocks[-1]
+    min_block = min(blocks, key=lambda block: block.min_y)
+    max_block = max(blocks, key=lambda block: block.max_y)
+    total_count = int(sum(block.count for block in blocks))
+    weighted_mean = sum(block.mean_y * block.count for block in blocks) / max(total_count, 1)
+    return MetricCompressionBlock(
+        start_x=float(first.start_x),
+        end_x=float(last.end_x),
+        first_x=float(first.first_x),
+        first_y=float(first.first_y),
+        last_x=float(last.last_x),
+        last_y=float(last.last_y),
+        min_x=float(min_block.min_x),
+        min_y=float(min_block.min_y),
+        max_x=float(max_block.max_x),
+        max_y=float(max_block.max_y),
+        mean_y=float(weighted_mean),
+        count=total_count,
     )
 
 
-def _blocks_to_display_arrays(blocks: list[_EnvelopeBlock]) -> tuple[np.ndarray, np.ndarray]:
+def _blocks_to_trend_arrays(
+    blocks: list[MetricCompressionBlock],
+    *,
+    method: str = "first_last",
+) -> tuple[np.ndarray, np.ndarray]:
     if not blocks:
         empty = np.empty(0, dtype=np.float64)
         return empty, empty
     xs: list[float] = []
     ys: list[float] = []
-    for block in blocks:
-        if block.x_at_y_min <= block.x_at_y_max:
-            xs.extend([block.x_at_y_min, block.x_at_y_max])
-            ys.extend([block.y_min, block.y_max])
-        else:
-            xs.extend([block.x_at_y_max, block.x_at_y_min])
-            ys.extend([block.y_max, block.y_min])
+    method = str(method or "first_last").lower()
+    if method == "weighted_mean":
+        for block in blocks:
+            xs.append(0.5 * float(block.start_x + block.end_x))
+            ys.append(float(block.mean_y))
+    else:
+        for block in blocks:
+            xs.extend([float(block.first_x), float(block.last_x)])
+            ys.extend([float(block.first_y), float(block.last_y)])
     return np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64)
 
 
-def _build_envelope_levels(x: np.ndarray, y: np.ndarray, *, raw_block_size: int, combine_factor: int) -> list[list[_EnvelopeBlock]]:
-    blocks: list[_EnvelopeBlock] = []
+def _blocks_to_envelope_line_arrays(
+    blocks: list[MetricCompressionBlock],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if not blocks:
+        empty = np.empty(0, dtype=np.float64)
+        return empty, empty, empty, empty
+    min_x: list[float] = []
+    min_y: list[float] = []
+    max_x: list[float] = []
+    max_y: list[float] = []
+    for block in blocks:
+        start_x = float(min(block.start_x, block.end_x))
+        end_x = float(max(block.start_x, block.end_x))
+        min_x.extend([start_x, end_x])
+        min_y.extend([float(block.min_y), float(block.min_y)])
+        max_x.extend([start_x, end_x])
+        max_y.extend([float(block.max_y), float(block.max_y)])
+    return (
+        np.asarray(min_x, dtype=np.float64),
+        np.asarray(min_y, dtype=np.float64),
+        np.asarray(max_x, dtype=np.float64),
+        np.asarray(max_y, dtype=np.float64),
+    )
+
+
+def _recent_tail_arrays(cache: MetricDisplayCache) -> tuple[np.ndarray, np.ndarray]:
+    if not cache.recent_tail_x or not cache.recent_tail_y:
+        empty = np.empty(0, dtype=np.float64)
+        return empty, empty
+    return (
+        np.asarray(list(cache.recent_tail_x), dtype=np.float64),
+        np.asarray(list(cache.recent_tail_y), dtype=np.float64),
+    )
+
+
+def _trim_recent_tail(cache: MetricDisplayCache) -> None:
+    max_points = max(int(getattr(cache, "recent_tail_max_points", 0)), 0)
+    while len(cache.recent_tail_x) > max_points:
+        cache.recent_tail_x.popleft()
+        cache.recent_tail_y.popleft()
+
+
+def _set_recent_tail_from_arrays(
+    cache: MetricDisplayCache,
+    x: np.ndarray,
+    y: np.ndarray,
+) -> None:
+    cache.recent_tail_x.clear()
+    cache.recent_tail_y.clear()
+    if len(x) == 0 or len(y) == 0:
+        return
+    finite = np.isfinite(x) & np.isfinite(y)
+    if not np.any(finite):
+        return
+    tail_x = np.asarray(x[finite], dtype=np.float64)
+    tail_y = np.asarray(y[finite], dtype=np.float64)
+    if len(tail_x) == 0 or len(tail_y) == 0:
+        return
+    tail_len = min(int(max(getattr(cache, "recent_tail_max_points", 0), 0)), len(tail_x))
+    if tail_len <= 0:
+        return
+    tail_x = tail_x[-tail_len:]
+    tail_y = tail_y[-tail_len:]
+    cache.recent_tail_x.extend(float(value) for value in tail_x)
+    cache.recent_tail_y.extend(float(value) for value in tail_y)
+
+
+def _append_recent_tail_point(cache: MetricDisplayCache, x_value: float, y_value: float) -> None:
+    if not np.isfinite(x_value) or not np.isfinite(y_value):
+        return
+    max_points = max(int(getattr(cache, "recent_tail_max_points", 0)), 0)
+    if max_points <= 0:
+        cache.recent_tail_x.clear()
+        cache.recent_tail_y.clear()
+        return
+    cache.recent_tail_x.append(float(x_value))
+    cache.recent_tail_y.append(float(y_value))
+    _trim_recent_tail(cache)
+
+
+def _build_absolute_metric_display_arrays(
+    cache: MetricDisplayCache,
+    *,
+    target_points: int,
+) -> tuple[np.ndarray, np.ndarray, int, int, int]:
+    if not cache.levels:
+        empty = np.empty(0, dtype=np.float64)
+        return empty, empty, -1, 0, 0
+    tail_x, tail_y = _recent_tail_arrays(cache)
+    tail_points = int(len(tail_x))
+    tail_start_x = float(tail_x[0]) if tail_points > 0 else None
+    old_target_points = max(int(target_points) - tail_points, 1)
+    blocks = _select_metric_compression_blocks(cache.levels, target_points=old_target_points, points_per_block=1)
+    display_level = next((index for index, level in enumerate(cache.levels) if level is blocks), -1)
+    old_blocks: list[MetricCompressionBlock] = []
+    overlap_blocks = 0
+    for block in blocks:
+        if tail_start_x is not None and float(block.end_x) >= float(tail_start_x):
+            overlap_blocks += 1
+            continue
+        old_blocks.append(block)
+    x_old, y_old = _blocks_to_trend_arrays(old_blocks, method="weighted_mean")
+    if len(x_old) == 0:
+        display_x = tail_x
+        display_y = tail_y
+    elif tail_points == 0:
+        display_x = x_old
+        display_y = y_old
+    else:
+        display_x = np.concatenate((x_old, tail_x))
+        display_y = np.concatenate((y_old, tail_y))
+    return display_x, display_y, int(display_level), int(len(old_blocks)), int(overlap_blocks)
+
+
+def _build_absolute_metric_envelope_arrays(
+    cache: MetricDisplayCache,
+    *,
+    target_points: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+    if not cache.levels:
+        empty = np.empty(0, dtype=np.float64)
+        return empty, empty, empty, empty, 0
+    tail_x, tail_y = _recent_tail_arrays(cache)
+    tail_points = int(len(tail_x))
+    tail_start_x = float(tail_x[0]) if tail_points > 0 else None
+    old_target_points = max(int(target_points) - tail_points, 1)
+    blocks = _select_metric_compression_blocks(cache.levels, target_points=old_target_points, points_per_block=1)
+    old_blocks: list[MetricCompressionBlock] = []
+    overlap_blocks = 0
+    for block in blocks:
+        if tail_start_x is not None and float(block.end_x) >= float(tail_start_x):
+            overlap_blocks += 1
+            continue
+        old_blocks.append(block)
+    min_x, min_y, max_x, max_y = _blocks_to_envelope_line_arrays(old_blocks)
+    if tail_points > 0:
+        if len(min_x) == 0:
+            min_x = tail_x
+            min_y = tail_y
+            max_x = tail_x
+            max_y = tail_y
+        else:
+            min_x = np.concatenate((min_x, tail_x))
+            min_y = np.concatenate((min_y, tail_y))
+            max_x = np.concatenate((max_x, tail_x))
+            max_y = np.concatenate((max_y, tail_y))
+    return min_x, min_y, max_x, max_y, int(overlap_blocks)
+
+
+def _tail_to_trend_arrays(
+    x: np.ndarray,
+    y: np.ndarray,
+    *,
+    method: str = "weighted_mean",
+) -> tuple[np.ndarray, np.ndarray]:
+    if len(x) == 0 or len(y) == 0:
+        empty = np.empty(0, dtype=np.float64)
+        return empty, empty
+    finite = np.isfinite(x) & np.isfinite(y)
+    if not np.any(finite):
+        empty = np.empty(0, dtype=np.float64)
+        return empty, empty
+    xf = np.asarray(x[finite], dtype=np.float64)
+    yf = np.asarray(y[finite], dtype=np.float64)
+    if method == "first_last" and len(xf) >= 2:
+        return np.asarray([float(xf[0]), float(xf[-1])], dtype=np.float64), np.asarray([float(yf[0]), float(yf[-1])], dtype=np.float64)
+    return np.asarray([float(np.mean(xf))], dtype=np.float64), np.asarray([float(np.mean(yf))], dtype=np.float64)
+
+
+def _build_metric_compression_levels(x: np.ndarray, y: np.ndarray, *, raw_block_size: int, combine_factor: int) -> list[list[MetricCompressionBlock]]:
+    blocks: list[MetricCompressionBlock] = []
     block_size = max(int(raw_block_size), 1)
     for start in range(0, len(x), block_size):
         stop = min(start + block_size, len(x))
-        block = _make_envelope_block(x[start:stop], y[start:stop])
+        block = _make_metric_compression_block(x[start:stop], y[start:stop])
         if block is not None:
             blocks.append(block)
-    levels: list[list[_EnvelopeBlock]] = [blocks]
+    levels: list[list[MetricCompressionBlock]] = [blocks]
     factor = max(int(combine_factor), 2)
     while len(levels[-1]) > factor:
         previous = levels[-1]
-        next_level: list[_EnvelopeBlock] = []
+        next_level: list[MetricCompressionBlock] = []
         for start in range(0, len(previous), factor):
-            combined = _combine_envelope_blocks(previous[start : start + factor])
+            combined = _combine_metric_compression_blocks(previous[start : start + factor])
             if combined is not None:
                 next_level.append(combined)
         if not next_level:
@@ -134,48 +345,72 @@ def _build_envelope_levels(x: np.ndarray, y: np.ndarray, *, raw_block_size: int,
     return levels
 
 
-def _append_envelope_levels(
-    levels: list[list[_EnvelopeBlock]],
+def _append_metric_compression_levels(
+    levels: list[list[MetricCompressionBlock]],
     x_new: np.ndarray,
     y_new: np.ndarray,
     *,
     raw_block_size: int,
     combine_factor: int,
-) -> list[list[_EnvelopeBlock]]:
+) -> list[list[MetricCompressionBlock]]:
     if not levels:
         levels = [[]]
     block_size = max(int(raw_block_size), 1)
     for start in range(0, len(x_new), block_size):
         stop = min(start + block_size, len(x_new))
-        block = _make_envelope_block(x_new[start:stop], y_new[start:stop])
+        block = _make_metric_compression_block(x_new[start:stop], y_new[start:stop])
         if block is not None:
-            levels[0].append(block)
+            _append_metric_compression_block(levels, block, combine_factor=combine_factor)
+    return levels
+
+
+def _append_metric_compression_block(
+    levels: list[list[MetricCompressionBlock]],
+    block: MetricCompressionBlock,
+    *,
+    combine_factor: int,
+    level: int = 0,
+) -> list[list[MetricCompressionBlock]]:
+    while len(levels) <= level:
+        levels.append([])
+    levels[level].append(block)
     factor = max(int(combine_factor), 2)
-    current = levels[0]
-    rebuilt_levels: list[list[_EnvelopeBlock]] = [current]
-    while len(rebuilt_levels[-1]) > factor:
-        previous = rebuilt_levels[-1]
-        next_level: list[_EnvelopeBlock] = []
-        for start in range(0, len(previous), factor):
-            combined = _combine_envelope_blocks(previous[start : start + factor])
-            if combined is not None:
-                next_level.append(combined)
-        if not next_level:
-            break
-        rebuilt_levels.append(next_level)
-    return rebuilt_levels
+    if len(levels[level]) % factor != 0:
+        return levels
+    parent = _combine_metric_compression_blocks(levels[level][-factor:])
+    if parent is None:
+        return levels
+    return _append_metric_compression_block(levels, parent, combine_factor=combine_factor, level=level + 1)
 
 
-def _select_envelope_blocks(levels: list[list[_EnvelopeBlock]], target_points: int) -> list[_EnvelopeBlock]:
+def _select_metric_compression_blocks(
+    levels: list[list[MetricCompressionBlock]],
+    target_points: int,
+    *,
+    points_per_block: int = 2,
+) -> list[MetricCompressionBlock]:
     if not levels:
         return []
-    target_bins = max(int(np.ceil(float(max(target_points, 1)) / 2.0)), 1)
-    chosen = levels[0]
+    target_points = max(int(target_points), 1)
+    points_per_block = max(int(points_per_block), 1)
+    target_output_points = int(target_points)
+    target_bins = max(int(np.ceil(float(target_points) / float(points_per_block))), 1)
+    best_level = levels[0]
+    best_error = float("inf")
     for level in levels:
-        chosen = level
-        if len(level) <= target_bins:
-            break
-    return chosen
+        if not level:
+            continue
+        estimated_points = int(len(level) * points_per_block)
+        error = abs(float(estimated_points - target_output_points))
+        if error < best_error:
+            best_error = error
+            best_level = level
+            continue
+        if error == best_error and len(level) > len(best_level):
+            best_level = level
+        if len(level) <= target_bins and error <= best_error:
+            best_level = level
+    return best_level
 
 
 def _display_signature(x: np.ndarray, y: np.ndarray) -> tuple[object, ...]:
@@ -270,6 +505,23 @@ def build_active_trace_series_token(window) -> tuple[object, ...]:
 
 
 def build_heatmap_history_token(window) -> tuple[object, ...]:
+    archive_times = getattr(window, "_sensorgram_heatmap_archive_times", None)
+    archive_matrix = getattr(window, "_sensorgram_heatmap_archive_matrix", None)
+    archive_token = getattr(window, "_sensorgram_heatmap_archive_request_token", None)
+    archive_wavelengths = getattr(window, "_sensorgram_heatmap_wavelengths", None)
+    if isinstance(archive_times, np.ndarray) and isinstance(archive_matrix, np.ndarray) and len(archive_times) > 0 and archive_matrix.ndim == 2:
+        return (
+            "archive",
+            archive_token,
+            int(getattr(window, "_sensorgram_heatmap_archive_rows", len(archive_times))),
+            id(archive_times),
+            int(len(archive_times)),
+            id(archive_matrix),
+            int(archive_matrix.shape[0]),
+            int(archive_matrix.shape[1]),
+            id(archive_wavelengths),
+            len(archive_wavelengths) if isinstance(archive_wavelengths, np.ndarray) else 0,
+        )
     history = getattr(window, "_sensorgram_heatmap_history", None)
     wavelengths = getattr(window, "_sensorgram_heatmap_wavelengths", None)
     axis_key = getattr(window, "_sensorgram_heatmap_axis_key", None)
@@ -713,6 +965,48 @@ class PlotViewCache:
     def clear_live_absolute_metric_cache(self) -> None:
         self._live_absolute_metric_cache.clear()
 
+    def clear_active_trace_series_cache(self) -> None:
+        self._active_trace_series_token = None
+        self._active_trace_series_result = {}
+
+    def set_live_absolute_metric_tail_size(
+        self,
+        metric_names: set[str] | frozenset[str],
+        *,
+        recent_tail_points: int,
+    ) -> bool:
+        metric_names = frozenset(str(name) for name in metric_names)
+        tail_points = max(int(recent_tail_points), 0)
+        updated = False
+        for metric_name in metric_names:
+            cache = self._live_absolute_metric_cache.get(metric_name)
+            if not isinstance(cache, MetricDisplayCache):
+                continue
+            cache.recent_tail_max_points = tail_points
+            cache.last_recent_tail_configured = tail_points
+            _trim_recent_tail(cache)
+            cache.last_recent_tail_current = int(len(cache.recent_tail_x))
+            cache.last_invalidation_reason = "tail_resize"
+            cache.display_output_revision += 1
+            if cache.levels:
+                display_x, display_y, display_level, old_blocks, overlap_blocks = _build_absolute_metric_display_arrays(
+                    cache,
+                    target_points=int(cache.target_points or tail_points or 1),
+                )
+                cache.x_display = display_x
+                cache.y_display = display_y
+                cache.last_display_level = int(display_level)
+                cache.last_display_blocks = int(old_blocks)
+                cache.last_old_display_blocks = int(old_blocks)
+                cache.last_overlap_blocks_skipped = int(overlap_blocks)
+                cache.last_old_display_points = int(max(len(display_x) - len(cache.recent_tail_x), 0))
+                cache.last_tail_display_points = int(len(cache.recent_tail_x))
+                cache.last_total_display_points = int(len(display_x))
+                cache.last_trend_method = "weighted_mean"
+                cache.last_display_signature = _display_signature(display_x, display_y)
+            updated = True
+        return updated
+
     def live_absolute_metric_series(
         self,
         metric_names: set[str] | frozenset[str],
@@ -748,35 +1042,46 @@ class PlotViewCache:
         y: np.ndarray,
         *,
         target_points: int,
+        recent_tail_points: int | None = None,
     ) -> None:
         cache = self._live_absolute_metric_cache.get(metric_name)
         if not isinstance(cache, MetricDisplayCache):
             cache = MetricDisplayCache(target_points=int(target_points))
             self._live_absolute_metric_cache[metric_name] = cache
+        if recent_tail_points is not None:
+            cache.recent_tail_max_points = max(int(recent_tail_points), 0)
         cache.source_len = 0
         cache.source_revision += 1
         cache.target_points = int(target_points)
         cache.last_invalidation_reason = "seed"
-        cache.levels = _build_envelope_levels(
+        cache.last_recent_tail_configured = int(max(getattr(cache, "recent_tail_max_points", 0), 0))
+        cache.levels = _build_metric_compression_levels(
             np.asarray(x, dtype=np.float64),
             np.asarray(y, dtype=np.float64),
             raw_block_size=cache.raw_block_size,
             combine_factor=cache.combine_factor,
         )
         cache.source_len = int(min(len(x), len(y)))
+        cache.pending_x.clear()
+        cache.pending_y.clear()
+        _set_recent_tail_from_arrays(cache, np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64))
+        cache.last_recent_tail_current = int(len(cache.recent_tail_x))
         cache.last_archive_points = int(cache.source_len)
         cache.rebuild_count += 1
-        display_level, blocks = self._select_metric_envelope_blocks(cache, target_points=int(target_points))
-        raw_len = min(len(x), len(y))
-        force_envelope_at = max(2048, int(int(target_points) * 4))
-        if raw_len <= force_envelope_at:
-            display_x, display_y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
-        else:
-            display_x, display_y = _blocks_to_display_arrays(blocks)
+        display_x, display_y, display_level, old_blocks, overlap_blocks = _build_absolute_metric_display_arrays(
+            cache,
+            target_points=int(target_points),
+        )
         cache.x_display = display_x
         cache.y_display = display_y
         cache.last_display_level = int(display_level)
-        cache.last_display_blocks = int(len(blocks))
+        cache.last_display_blocks = int(old_blocks)
+        cache.last_old_display_blocks = int(old_blocks)
+        cache.last_overlap_blocks_skipped = int(overlap_blocks)
+        cache.last_old_display_points = int(max(len(display_x) - len(cache.recent_tail_x), 0))
+        cache.last_tail_display_points = int(len(cache.recent_tail_x))
+        cache.last_total_display_points = int(len(display_x))
+        cache.last_trend_method = "weighted_mean"
         cache.last_display_signature = _display_signature(display_x, display_y)
         cache.display_output_revision += 1
         cache.last_mode = "seeded"
@@ -789,60 +1094,61 @@ class PlotViewCache:
         y_value: float,
         *,
         target_points: int,
+        recent_tail_points: int | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         cache = self._live_absolute_metric_cache.get(metric_name)
         if not isinstance(cache, MetricDisplayCache):
             cache = MetricDisplayCache(target_points=int(target_points))
             self._live_absolute_metric_cache[metric_name] = cache
+        if recent_tail_points is not None:
+            cache.recent_tail_max_points = max(int(recent_tail_points), 0)
+        started = perf_counter()
         cache.target_points = int(target_points)
         cache.source_len += 1
         cache.source_revision += 1
         cache.last_invalidation_reason = "live_append"
-        block_size = max(int(cache.raw_block_size), 1)
         if not cache.levels:
             cache.levels = [[]]
-        current_level = cache.levels[0]
-        current_level.append(
-            _EnvelopeBlock(
-                first_x=float(x_value),
-                last_x=float(x_value),
-                y_min=float(y_value),
-                y_max=float(y_value),
-                x_at_y_min=float(x_value),
-                x_at_y_max=float(x_value),
-                count=1,
+        cache.pending_x.append(float(x_value))
+        cache.pending_y.append(float(y_value))
+        _append_recent_tail_point(cache, float(x_value), float(y_value))
+        cache.last_recent_tail_configured = int(max(getattr(cache, "recent_tail_max_points", 0), 0))
+        cache.last_recent_tail_current = int(len(cache.recent_tail_x))
+        block_size = max(int(cache.raw_block_size), 1)
+        appended_blocks = 0
+        if len(cache.pending_x) >= block_size:
+            pending_x = np.asarray(cache.pending_x, dtype=np.float64)
+            pending_y = np.asarray(cache.pending_y, dtype=np.float64)
+            cache.pending_x.clear()
+            cache.pending_y.clear()
+            cache.levels = _append_metric_compression_levels(
+                cache.levels,
+                pending_x,
+                pending_y,
+                raw_block_size=cache.raw_block_size,
+                combine_factor=cache.combine_factor,
             )
+            appended_blocks = int(np.ceil(float(len(pending_x)) / float(block_size)))
+        display_x, display_y, display_level, old_blocks, overlap_blocks = _build_absolute_metric_display_arrays(
+            cache,
+            target_points=int(target_points),
         )
-        rebuilt_levels: list[list[_EnvelopeBlock]] = [current_level]
-        factor = max(int(cache.combine_factor), 2)
-        while len(rebuilt_levels[-1]) > factor:
-            previous = rebuilt_levels[-1]
-            next_level: list[_EnvelopeBlock] = []
-            for start in range(0, len(previous), factor):
-                combined = _combine_envelope_blocks(previous[start : start + factor])
-                if combined is not None:
-                    next_level.append(combined)
-            if not next_level:
-                break
-            rebuilt_levels.append(next_level)
-        cache.levels = rebuilt_levels
-        display_level, blocks = self._select_metric_envelope_blocks(cache, target_points=int(target_points))
-        force_envelope_at = max(2048, int(int(target_points) * 4))
-        if cache.source_len <= force_envelope_at:
-            if len(cache.x_display) == 0:
-                cache.x_display = np.asarray([float(x_value)], dtype=np.float64)
-                cache.y_display = np.asarray([float(y_value)], dtype=np.float64)
-            else:
-                cache.x_display = np.concatenate((cache.x_display, np.asarray([float(x_value)], dtype=np.float64)))
-                cache.y_display = np.concatenate((cache.y_display, np.asarray([float(y_value)], dtype=np.float64)))
-        else:
-            cache.x_display, cache.y_display = _blocks_to_display_arrays(blocks)
+        cache.x_display, cache.y_display = display_x, display_y
         cache.last_display_level = int(display_level)
-        cache.last_display_blocks = int(len(blocks))
+        cache.last_display_blocks = int(old_blocks)
+        cache.last_old_display_blocks = int(old_blocks)
+        cache.last_overlap_blocks_skipped = int(overlap_blocks)
+        cache.last_old_display_points = int(max(len(display_x) - len(cache.recent_tail_x), 0))
+        cache.last_tail_display_points = int(len(cache.recent_tail_x))
+        cache.last_total_display_points = int(len(display_x))
+        cache.last_trend_method = "weighted_mean"
         cache.last_display_signature = _display_signature(cache.x_display, cache.y_display)
         cache.display_output_revision += 1
         cache.last_mode = "incremental"
         cache.last_source_used = "cache_incremental"
+        cache.last_new_points_processed = 1
+        cache.last_tail_groups_updated = appended_blocks
+        cache.last_append_ms = (perf_counter() - started) * 1000.0
         return cache.x_display, cache.y_display
 
     def live_absolute_metric_view(
@@ -850,31 +1156,36 @@ class PlotViewCache:
         metric_name: str,
         *,
         target_points: int,
+        recent_tail_points: int | None = None,
     ) -> tuple[np.ndarray, np.ndarray] | None:
         cache = self._live_absolute_metric_cache.get(metric_name)
         if not isinstance(cache, MetricDisplayCache):
             return None
+        requested_recent_tail_points = max(
+            int(recent_tail_points) if recent_tail_points is not None else int(cache.recent_tail_max_points),
+            0,
+        )
+        cache.recent_tail_max_points = requested_recent_tail_points
+        cache.last_recent_tail_configured = requested_recent_tail_points
+        cache.last_recent_tail_current = int(len(cache.recent_tail_x))
         if cache.target_points != int(target_points):
             cache.target_points = int(target_points)
-        raw_len = int(cache.source_len)
         if not cache.levels:
             return None
-        force_envelope_at = max(2048, int(int(target_points) * 4))
-        if raw_len <= force_envelope_at:
-            if len(cache.x_display) == 0 or len(cache.y_display) == 0:
-                return None
-            cache.last_source_used = "cache"
-            return cache.x_display, cache.y_display
-        max_detail_points = max(int(len(cache.levels[0])) * 2, 0)
-        if int(target_points) > max_detail_points:
-            cache.last_invalidation_reason = "insufficient_detail"
-            return None
-        display_level, blocks = self._select_metric_envelope_blocks(cache, target_points=int(target_points))
-        display_x, display_y = _blocks_to_display_arrays(blocks)
+        display_x, display_y, display_level, old_blocks, overlap_blocks = _build_absolute_metric_display_arrays(
+            cache,
+            target_points=int(target_points),
+        )
         cache.x_display = display_x
         cache.y_display = display_y
         cache.last_display_level = int(display_level)
-        cache.last_display_blocks = int(len(blocks))
+        cache.last_display_blocks = int(old_blocks)
+        cache.last_old_display_blocks = int(old_blocks)
+        cache.last_overlap_blocks_skipped = int(overlap_blocks)
+        cache.last_old_display_points = int(max(len(display_x) - len(cache.recent_tail_x), 0))
+        cache.last_tail_display_points = int(len(cache.recent_tail_x))
+        cache.last_total_display_points = int(len(display_x))
+        cache.last_trend_method = "weighted_mean"
         signature = _display_signature(display_x, display_y)
         if signature != cache.last_display_signature:
             cache.display_output_revision += 1
@@ -884,6 +1195,32 @@ class PlotViewCache:
         cache.last_invalidation_reason = "reuse"
         return display_x, display_y
 
+    def live_absolute_metric_envelope_view(
+        self,
+        metric_name: str,
+        *,
+        target_points: int,
+        recent_tail_points: int | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+        cache = self._live_absolute_metric_cache.get(metric_name)
+        if not isinstance(cache, MetricDisplayCache) or not cache.levels:
+            return None
+        requested_recent_tail_points = max(
+            int(recent_tail_points) if recent_tail_points is not None else int(cache.recent_tail_max_points),
+            0,
+        )
+        cache.recent_tail_max_points = requested_recent_tail_points
+        cache.last_recent_tail_configured = requested_recent_tail_points
+        cache.last_recent_tail_current = int(len(cache.recent_tail_x))
+        min_x, min_y, max_x, max_y, overlap_blocks = _build_absolute_metric_envelope_arrays(
+            cache,
+            target_points=int(target_points),
+        )
+        cache.last_overlap_blocks_skipped = int(overlap_blocks)
+        cache.last_tail_display_points = int(len(cache.recent_tail_x))
+        cache.last_total_display_points = int(len(min_x))
+        return min_x, min_y, max_x, max_y
+
     def refresh_live_absolute_metric_cache(
         self,
         metric_names: set[str] | frozenset[str],
@@ -892,66 +1229,17 @@ class PlotViewCache:
         archive_path: Path | None = None,
     ) -> bool:
         metric_names = frozenset(str(name) for name in metric_names)
-        needs_archive = False
-        for metric_name in metric_names:
-            cache = self._live_absolute_metric_cache.get(metric_name)
-            if not isinstance(cache, MetricDisplayCache):
-                needs_archive = True
-                self._live_absolute_metric_archive_read_count = getattr(self, "_live_absolute_metric_archive_read_count", 0) + 1
-                break
-            if not cache.levels:
-                needs_archive = True
-                self._live_absolute_metric_archive_read_count = getattr(self, "_live_absolute_metric_archive_read_count", 0) + 1
-                break
-            raw_len = int(cache.source_len)
-            force_envelope_at = max(2048, int(int(target_points) * 4))
-            if raw_len <= force_envelope_at:
-                continue
-            max_detail_points = max(int(len(cache.levels[0])) * 2, 0)
-            if int(target_points) > max_detail_points:
-                needs_archive = True
-                self._live_absolute_metric_archive_read_count = getattr(self, "_live_absolute_metric_archive_read_count", 0) + 1
-                break
-
-        if needs_archive:
-            if archive_path is None:
-                return False
-            from lspr_app.storage.hdf5_export import load_processed_metric_history
-
-            archive_series = load_processed_metric_history(Path(archive_path), set(metric_names))
-            if not archive_series:
-                return False
-            self._live_absolute_archive_read_count += 1
-            for metric_name in metric_names:
-                series = archive_series.get(metric_name)
-                if series is None:
-                    continue
-                x, y = series
-                cache = self._live_absolute_metric_cache.get(metric_name)
-                if not isinstance(cache, MetricDisplayCache):
-                    cache = MetricDisplayCache(target_points=int(target_points))
-                    self._live_absolute_metric_cache[metric_name] = cache
-                cache.archive_read_count = int(self._live_absolute_archive_read_count)
-                cache.last_archive_points = int(min(len(x), len(y)))
-                cache.last_invalidation_reason = "archive_rebuild"
-                self.seed_live_absolute_metric_cache(
-                    metric_name,
-                    x,
-                    y,
-                    target_points=int(target_points),
-                )
-            return True
-
         refreshed = False
         for metric_name in metric_names:
             cache = self._live_absolute_metric_cache.get(metric_name)
             if isinstance(cache, MetricDisplayCache):
                 cache.last_invalidation_reason = "reuse"
+                cache.target_points = int(target_points)
             if self.live_absolute_metric_view(metric_name, target_points=int(target_points)) is not None:
                 refreshed = True
         return refreshed
 
-    def _rebuild_metric_envelope_cache(
+    def _rebuild_metric_compression_cache(
         self,
         cache: MetricDisplayCache,
         x: np.ndarray,
@@ -962,13 +1250,15 @@ class PlotViewCache:
         started = perf_counter()
         cache.source_len = 0
         cache.target_points = int(target_points)
-        cache.levels = _build_envelope_levels(
+        cache.levels = _build_metric_compression_levels(
             np.asarray(x, dtype=np.float64),
             np.asarray(y, dtype=np.float64),
             raw_block_size=cache.raw_block_size,
             combine_factor=cache.combine_factor,
         )
         cache.source_len = int(len(x))
+        cache.pending_x.clear()
+        cache.pending_y.clear()
         cache.display_revision += 1
         cache.rebuild_count += 1
         cache.last_mode = "full_rebuild"
@@ -980,7 +1270,7 @@ class PlotViewCache:
         cache.last_append_ms = None
         return cache.last_base_blocks
 
-    def _append_metric_envelope_cache(
+    def _append_metric_compression_cache(
         self,
         cache: MetricDisplayCache,
         x_new: np.ndarray,
@@ -994,7 +1284,7 @@ class PlotViewCache:
         started = perf_counter()
         block_size = max(int(cache.raw_block_size), 1)
         block_count = int(np.ceil(float(len(x_new)) / float(block_size)))
-        cache.levels = _append_envelope_levels(
+        cache.levels = _append_metric_compression_levels(
             cache.levels,
             np.asarray(x_new, dtype=np.float64),
             np.asarray(y_new, dtype=np.float64),
@@ -1012,12 +1302,12 @@ class PlotViewCache:
         cache.last_append_ms = (perf_counter() - started) * 1000.0
         return block_count
 
-    def _select_metric_envelope_blocks(
+    def _select_metric_compression_blocks(
         self,
         cache: MetricDisplayCache,
         *,
         target_points: int,
-    ) -> tuple[int, list[_EnvelopeBlock]]:
+    ) -> tuple[int, list[MetricCompressionBlock]]:
         if not cache.levels:
             return -1, []
         target_bins = max(int(np.ceil(float(max(target_points, 1)) / 2.0)), 1)
@@ -1133,6 +1423,7 @@ class PlotViewCache:
         minimum_points: int = 128,
         oversample: float = 1.0,
         default_points: int = 2048,
+        recent_tail_points: int | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         target_points = _target_points_from_width(
             view_width_px,
@@ -1181,38 +1472,55 @@ class PlotViewCache:
         if not isinstance(cached, MetricDisplayCache):
             cached = MetricDisplayCache(target_points=int(target_points))
             self._absolute_metric_view_cache[cache_key] = cached
+        requested_recent_tail_points = max(
+            int(recent_tail_points) if recent_tail_points is not None else int(getattr(cached, "recent_tail_max_points", 300)),
+            0,
+        )
         if (
             cached.source_len == len(x)
             and cached.target_points == int(target_points)
             and cached.source_revision == int(source_revision or 0)
+            and cached.last_recent_tail_configured == int(requested_recent_tail_points)
         ):
             cached.hit_count += 1
             cached.last_mode = "hit"
             self._absolute_metric_view_cache.move_to_end(cache_key)
             return cached.x_display, cached.y_display
+        cached.recent_tail_max_points = int(requested_recent_tail_points)
+        cached.last_recent_tail_configured = int(requested_recent_tail_points)
         if (
             cached.source_len > len(x)
             or cached.source_len < 0
             or cached.source_revision > int(source_revision or 0)
             or not cached.levels
         ):
-            self._rebuild_metric_envelope_cache(cached, x, y, target_points=target_points)
+            self._rebuild_metric_compression_cache(cached, x, y, target_points=target_points)
+            _set_recent_tail_from_arrays(cached, x, y)
         else:
             old_len = int(cached.source_len)
-            self._append_metric_envelope_cache(cached, x[old_len:], y[old_len:])
+            self._append_metric_compression_cache(cached, x[old_len:], y[old_len:])
             cached.target_points = int(target_points)
             cached.source_revision = int(source_revision or 0)
-        display_level, blocks = self._select_metric_envelope_blocks(cached, target_points=int(target_points))
-        raw_len = min(len(x), len(y))
-        force_envelope_at = max(2048, int(int(target_points) * 4))
+            if len(x) > old_len:
+                tail_x = x[old_len:]
+                tail_y = y[old_len:]
+                for tail_x_value, tail_y_value in zip(tail_x, tail_y, strict=False):
+                    _append_recent_tail_point(cached, float(tail_x_value), float(tail_y_value))
+        cached.last_recent_tail_current = int(len(cached.recent_tail_x))
         assemble_started = perf_counter()
-        if raw_len <= force_envelope_at:
-            display_x, display_y = x, y
-        else:
-            display_x, display_y = _blocks_to_display_arrays(blocks)
+        display_x, display_y, display_level, old_blocks, overlap_blocks = _build_absolute_metric_display_arrays(
+            cached,
+            target_points=int(target_points),
+        )
         cached.last_assemble_ms = (perf_counter() - assemble_started) * 1000.0
         cached.last_display_level = int(display_level)
-        cached.last_display_blocks = int(len(blocks))
+        cached.last_display_blocks = int(old_blocks)
+        cached.last_old_display_blocks = int(old_blocks)
+        cached.last_overlap_blocks_skipped = int(overlap_blocks)
+        cached.last_old_display_points = int(max(len(display_x) - len(cached.recent_tail_x), 0))
+        cached.last_tail_display_points = int(len(cached.recent_tail_x))
+        cached.last_total_display_points = int(len(display_x))
+        cached.last_trend_method = "weighted_mean"
         signature = _display_signature(display_x, display_y)
         if signature != cached.last_display_signature:
             cached.display_output_revision += 1
@@ -1225,6 +1533,45 @@ class PlotViewCache:
         while len(self._absolute_metric_view_cache) > self._max_view_entries:
             self._absolute_metric_view_cache.popitem(last=False)
         return display_x, display_y
+
+    def absolute_metric_envelope_view(
+        self,
+        token: tuple[object, ...],
+        x: np.ndarray,
+        y: np.ndarray,
+        *,
+        view_width_px: float | None = None,
+        enabled: bool = True,
+        minimum_points: int = 128,
+        oversample: float = 1.0,
+        default_points: int = 2048,
+        recent_tail_points: int | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        target_points = _target_points_from_width(
+            view_width_px,
+            enabled=enabled,
+            minimum_points=minimum_points,
+            oversample=oversample,
+            default_points=default_points,
+        )
+        cache_key = _absolute_metric_cache_key(token, target_points)
+        cached = self._absolute_metric_view_cache.get(cache_key)
+        if not isinstance(cached, MetricDisplayCache):
+            return (np.empty(0, dtype=np.float64),) * 4
+        if not cached.levels:
+            return (np.empty(0, dtype=np.float64),) * 4
+        if recent_tail_points is not None:
+            cached.recent_tail_max_points = max(int(recent_tail_points), 0)
+        cached.last_recent_tail_configured = int(max(cached.recent_tail_max_points, 0))
+        cached.last_recent_tail_current = int(len(cached.recent_tail_x))
+        min_x, min_y, max_x, max_y, overlap_blocks = _build_absolute_metric_envelope_arrays(
+            cached,
+            target_points=int(target_points),
+        )
+        cached.last_overlap_blocks_skipped = int(overlap_blocks)
+        cached.last_tail_display_points = int(len(cached.recent_tail_x))
+        cached.last_total_display_points = int(len(min_x))
+        return min_x, min_y, max_x, max_y
 
     def absolute_metric_display_state(self, token: tuple[object, ...]) -> tuple[object, ...] | None:
         for cache_key, cached in reversed(list(self._absolute_metric_view_cache.items())):
@@ -1247,11 +1594,19 @@ class PlotViewCache:
         modes: dict[str, object] = {}
         for key, cached in self._absolute_metric_view_cache.items():
             if isinstance(cached, MetricDisplayCache):
+                level_counts = [len(level) for level in cached.levels]
                 modes[str(key)] = {
+                    "raw_block_size": int(cached.raw_block_size),
+                    "combine_factor": int(cached.combine_factor),
+                    "recent_tail_points_configured": int(cached.recent_tail_max_points),
+                    "recent_tail_points_current": int(len(cached.recent_tail_x)),
                     "source_len": int(cached.source_len),
+                    "source_points": int(cached.source_len),
                     "target_points": int(cached.target_points),
                     "display_len": int(len(cached.x_display)),
+                    "display_points": int(len(cached.x_display)),
                     "last_mode": str(cached.last_mode),
+                    "trend_method": str(cached.last_trend_method),
                     "last_source_used": str(cached.last_source_used),
                     "last_invalidation_reason": str(cached.last_invalidation_reason),
                     "archive_read_count": int(cached.archive_read_count),
@@ -1259,14 +1614,24 @@ class PlotViewCache:
                     "hits": int(cached.hit_count),
                     "incremental": int(cached.incremental_count),
                     "rebuilds": int(cached.rebuild_count),
-                    "levels": [len(level) for level in cached.levels],
+                    "levels": level_counts,
+                    "level_counts": level_counts,
+                    "level_weights": [level_raw_weight(cached, level_index) for level_index in range(len(cached.levels))],
                     "new_points": int(cached.last_new_points_processed),
                     "base_blocks": int(cached.last_base_blocks),
                     "level_count": int(cached.last_levels),
                     "tail_groups_updated": int(cached.last_tail_groups_updated),
                     "display_level": int(cached.last_display_level),
+                    "selected_level": int(cached.last_display_level),
+                    "selected_level_raw_weight": level_raw_weight(cached, cached.last_display_level) if cached.last_display_level >= 0 else 0,
                     "display_blocks": int(cached.last_display_blocks),
+                    "display_old_blocks": int(cached.last_old_display_blocks),
+                    "display_overlap_blocks_skipped": int(cached.last_overlap_blocks_skipped),
+                    "display_old_points": int(cached.last_old_display_points),
+                    "display_tail_points": int(cached.last_tail_display_points),
+                    "display_total_points": int(cached.last_total_display_points),
                     "append_ms": cached.last_append_ms,
+                    "display_assembly_ms": cached.last_assemble_ms,
                     "assemble_ms": cached.last_assemble_ms,
                     "full_rebuild_ms": cached.last_full_rebuild_ms,
                 }

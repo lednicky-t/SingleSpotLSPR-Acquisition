@@ -4,7 +4,7 @@ import multiprocessing as mp
 import queue
 import logging
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 
@@ -683,7 +683,6 @@ def flush_live_processed_results(window) -> None:
     refresh_state.live_estimate_dirty = True
     refresh_state.telemetry_dirty = True
     window._append_processed_trace_history(processed, fit)
-    window._append_sensorgram_heatmap_history(processed)
     window._log_throttled(
         "live_display",
         f"Live display updated | dropped={dropped_events}",
@@ -818,7 +817,9 @@ def start_live_acquisition(window) -> None:
     window._processing_completed_count = 0
     window._processing_displayed_count = 0
     window._live_display_started_at = perf_counter()
-    window._live_trace_started_at = None
+    window._live_trace_started_at = datetime.now(timezone.utc)
+    window._metric_archive_started_at = window._live_trace_started_at
+    window._sensorgram_axis_started_at = window._live_trace_started_at
     window._last_live_processing_perf = None
     if hasattr(window, "_metric_history_buffers"):
         window._metric_history_buffers.clear()
@@ -1218,6 +1219,8 @@ def start_measurement_run(window) -> None:
     window._measurement_signal_mode = signal_mode
     window._measurement_path = destination
     window._measurement_started_at = started_at
+    window._metric_archive_started_at = started_at
+    window._sensorgram_axis_started_at = started_at
     window._measurement_experiment_name = experiment_name
     window._session_stats_log.clear()
     window._session_stats_log_last_text = ""
@@ -1294,34 +1297,6 @@ def stop_measurement_run(window) -> None:
     if hasattr(window, "_set_recording_blink_indicator"):
         window._set_recording_blink_indicator(False)
     window._sync_simulation_backend_from_controls()
-    if started_at is not None:
-        metric_history_buffers = getattr(window, "_metric_history_buffers", None)
-        if isinstance(metric_history_buffers, dict) and metric_history_buffers:
-            converted_buffers: dict[str, MetricHistoryBuffer] = {}
-            max_points = int(getattr(window, "_metric_history_max_points", getattr(window, "_trace_history_max_points", 6000)))
-            for metric_name, buffer in metric_history_buffers.items():
-                times, values = buffer.to_arrays()
-                if len(times) == 0:
-                    continue
-                converted_live_buffer = MetricHistoryBuffer(max_points)
-                for elapsed_s, value in zip(times.tolist(), values.tolist(), strict=False):
-                    local_timestamp = (started_at + timedelta(seconds=float(elapsed_s))).astimezone().timestamp()
-                    local_timestamp = float(local_timestamp)
-                    value = float(value)
-                    converted_live_buffer.append(local_timestamp, value)
-                if len(converted_live_buffer) > 0:
-                    converted_buffers[metric_name] = converted_live_buffer
-            window._metric_history_buffers = converted_buffers
-    if started_at is not None and getattr(window, "_sensorgram_heatmap_history", None):
-        converted_heatmap_history: list[tuple[float, np.ndarray]] = []
-        for elapsed_s, values in window._sensorgram_heatmap_history:
-            local_timestamp = (started_at + timedelta(seconds=float(elapsed_s))).astimezone().timestamp()
-            converted_heatmap_history.append((float(local_timestamp), np.asarray(values, dtype=np.float64).copy()))
-        window._sensorgram_heatmap_history = converted_heatmap_history
-        if hasattr(window, "_sensorgram_heatmap_history_revision"):
-            window._sensorgram_heatmap_history_revision += 1
-        if hasattr(window, "_plot_view_cache"):
-            window._plot_view_cache.clear()
     window._trace_view_locked = False
     window._trace_display_cursor_s = 0.0
     window._live_trace_started_at = None
@@ -1356,7 +1331,11 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
         else:
             elapsed_s = 0.0
     else:
-        elapsed_s = float(processed.acquired_at.timestamp())
+        started_at = window._live_trace_started_at
+        if started_at is not None:
+            elapsed_s = max((processed.acquired_at - started_at).total_seconds(), 0.0)
+        else:
+            elapsed_s = float(processed.acquired_at.timestamp())
 
     display_step_s = max(1.0 / max(window.live_rate_spin.value(), 1e-9), 1e-3)
     metrics = window._get_analysis_metrics(processed, fit)
@@ -1383,6 +1362,7 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
                     float(elapsed_s),
                     float(value),
                     target_points=max(int(getattr(window, "_plot_display_points", 512)), 1),
+                    recent_tail_points=max(int(getattr(window, "_sensorgram_compression_recent_tail_points", 300)), 0),
                 )
             except Exception:
                 pass
@@ -1391,29 +1371,28 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
     window._trace_display_cursor_s = elapsed_s + display_step_s
 
     if updated:
-        if measurement_active:
-            # Store the derived metric with its absolute UTC timestamp so it can be joined later without ambiguity.
-            acquired_at_unix_ms = int(round(processed.acquired_at.astimezone(timezone.utc).timestamp() * 1000.0))
-            metric_row = {
-                "acquired_at_unix_ms": acquired_at_unix_ms,
-                "t_ms": int(round(elapsed_s * 1000.0)),
-                "sample_index": -1,
-                "centroid_nm": metrics.get("centroid", np.nan),
-                "smoothed_max_nm": metrics.get("smoothed_max", np.nan),
-                "poly_max_nm": metrics.get("poly_max", np.nan),
-                "gaussian_center_nm": metrics.get("gaussian_center", np.nan),
-                "fwhm_nm": fit.metadata.get("fwhm_nm", np.nan) if fit is not None else processed.metadata.get("fwhm_nm", np.nan),
-                "mse": fit.metadata.get("mse", np.nan) if fit is not None else np.nan,
-                "snr": metrics.get("snr", np.nan),
-            }
-            from lspr_app.storage.measurement_archive import ensure_temp_measurement_writer
+        # Store the derived metric so the live archive and the recording file share the same format.
+        acquired_at_unix_ms = int(round(processed.acquired_at.astimezone(timezone.utc).timestamp() * 1000.0))
+        metric_row = {
+            "acquired_at_unix_ms": acquired_at_unix_ms,
+            "t_ms": int(round(elapsed_s * 1000.0)),
+            "sample_index": -1,
+            "centroid_nm": metrics.get("centroid", np.nan),
+            "smoothed_max_nm": metrics.get("smoothed_max", np.nan),
+            "poly_max_nm": metrics.get("poly_max", np.nan),
+            "gaussian_center_nm": metrics.get("gaussian_center", np.nan),
+            "fwhm_nm": fit.metadata.get("fwhm_nm", np.nan) if fit is not None else processed.metadata.get("fwhm_nm", np.nan),
+            "mse": fit.metadata.get("mse", np.nan) if fit is not None else np.nan,
+            "snr": metrics.get("snr", np.nan),
+        }
+        from lspr_app.storage.measurement_archive import ensure_temp_measurement_writer
 
-            writer = window._measurement_writer
-            if writer is None:
-                writer = getattr(window, "_metric_archive_writer", None)
-            if writer is None:
-                writer = ensure_temp_measurement_writer(window)
-            writer.append_metrics([metric_row])
+        writer = window._measurement_writer
+        if writer is None:
+            writer = getattr(window, "_metric_archive_writer", None)
+        if writer is None:
+            writer = ensure_temp_measurement_writer(window)
+        writer.append_metrics([metric_row])
         window._request_deferred_ui_refresh(trace_plot=True, trace_label="Metric position (nm)")
         window._request_trace_autoscale()
         window._log_throttled(

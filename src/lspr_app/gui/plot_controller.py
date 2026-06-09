@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 from time import perf_counter
 
@@ -19,6 +19,7 @@ from lspr_app.gui.plot_view_cache import (
     derive_heatmap_levels_from_matrix,
     downsample_metric_series_for_view as _downsample_metric_series_for_view,
     expand_heatmap_levels,
+    level_raw_weight,
     sample_absolute_metric_series_for_view,
     sample_absolute_heatmap_rows_for_view,
     select_heatmap_rows_for_view,
@@ -47,28 +48,55 @@ def _current_metric_view_state(window) -> tuple[float | None, float | None, floa
         return None, None, None
 
 
-def _set_trace_time_axis_mode(window, x_values: np.ndarray | None, *, clock_mode: bool) -> str:
+def _sensorgram_time_axis_mode(window) -> str:
+    mode = str(getattr(window, "_sensorgram_time_axis_mode", "elapsed") or "elapsed").strip().lower()
+    return mode if mode in {"elapsed", "clock"} else "elapsed"
+
+
+def _sensorgram_axis_start_datetime(window):
+    for attr in ("_sensorgram_axis_started_at", "_measurement_started_at", "_live_trace_started_at", "_metric_archive_started_at"):
+        started_at = getattr(window, attr, None)
+        if started_at is None:
+            continue
+        if isinstance(started_at, datetime):
+            return started_at
+    return None
+
+
+def _sensorgram_time_axis_clock_mode(window) -> bool:
+    return _sensorgram_time_axis_mode(window) == "clock"
+
+
+def _sensorgram_format_elapsed(seconds: float) -> str:
+    total_seconds = max(int(round(float(seconds))), 0)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _sensorgram_format_clock(window, elapsed_seconds: float) -> str:
+    start_datetime = _sensorgram_axis_start_datetime(window)
+    if start_datetime is None:
+        return _sensorgram_format_elapsed(elapsed_seconds)
+    try:
+        clock_dt = start_datetime + timedelta(seconds=float(elapsed_seconds))
+        return clock_dt.astimezone().strftime("%H:%M:%S")
+    except Exception:
+        return _sensorgram_format_elapsed(elapsed_seconds)
+
+
+def _sensorgram_display_x_values(window, x_values: np.ndarray, *, clock_mode: bool) -> tuple[np.ndarray, bool]:
+    return np.asarray(x_values, dtype=np.float64), bool(clock_mode)
+
+
+def _set_trace_time_axis_mode(window, *, axis_mode: str) -> str:
+    axis_mode = axis_mode if axis_mode in {"elapsed", "clock"} else "elapsed"
     axis = getattr(window, "trace_time_axis", None)
-    relative_enabled = bool(getattr(window, "_trace_time_axis_relative_labels_enabled", False))
-    mode = "relative" if relative_enabled else ("clock" if clock_mode else "elapsed")
-    if axis is not None:
-        if mode == "relative":
-            reference_value = 0.0
-            if x_values is not None and len(x_values) > 0:
-                try:
-                    reference_value = float(x_values[0])
-                except (TypeError, ValueError):
-                    reference_value = 0.0
-            if hasattr(axis, "set_reference_value"):
-                axis.set_reference_value(reference_value)
-        elif hasattr(axis, "set_reference_value"):
-            axis.set_reference_value(0.0)
-        axis.set_mode(mode)
-    if mode == "relative":
-        window.trace_plot.setLabel("bottom", "Time (relative)")
-    else:
-        window.trace_plot.setLabel("bottom", "Time (local)" if clock_mode else "Time (s)")
-    return mode
+    if axis is not None and hasattr(axis, "set_time_mode"):
+        axis.set_time_mode(axis_mode, start_datetime=_sensorgram_axis_start_datetime(window))
+    if hasattr(window, "trace_plot"):
+        window.trace_plot.setLabel("bottom", "Time (local)" if axis_mode == "clock" else "Elapsed time")
+    return axis_mode
 
 
 def _nearest_sorted_index(values: np.ndarray, target: float) -> int:
@@ -163,6 +191,66 @@ def _format_hhmmss(seconds: float) -> str:
     hours, remainder = divmod(total_seconds, 3600)
     minutes, secs = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _metric_compression_level_text(window, metric_name: str) -> str:
+    plot_cache = getattr(window, "_plot_view_cache", None)
+    if plot_cache is not None and bool(getattr(window, "_live_active", False)) and getattr(window, "_sensorgram_view_mode", "absolute") == "absolute":
+        live_cache_map = getattr(plot_cache, "_live_absolute_metric_cache", None)
+        if isinstance(live_cache_map, dict):
+            live_cache = live_cache_map.get(str(metric_name or "").strip())
+            if live_cache is not None:
+                try:
+                    selected_level = int(getattr(live_cache, "last_display_level", -1))
+                except (TypeError, ValueError):
+                    selected_level = -1
+                if selected_level >= 0:
+                    try:
+                        selected_weight = int(level_raw_weight(live_cache, selected_level))
+                    except (TypeError, ValueError, Exception):
+                        selected_weight = 0
+                    if selected_weight > 0:
+                        return f"L{selected_level} ({selected_weight} pts)"
+                    return f"L{selected_level}"
+    cache_modes = getattr(window, "_last_metric_view_cache_modes", None)
+    if not isinstance(cache_modes, dict) or not cache_modes:
+        return "-"
+    metric_name = str(metric_name or "").strip()
+    best_entry: dict[str, object] | None = None
+    best_key: str | None = None
+    for key, entry in cache_modes.items():
+        if not isinstance(entry, dict):
+            continue
+        key_text = str(key)
+        if metric_name and metric_name not in key_text:
+            continue
+        if best_entry is None:
+            best_key = key_text
+            best_entry = entry
+            continue
+        try:
+            current_src = int(entry.get("source_points", entry.get("source_len", 0)) or 0)
+            best_src = int(best_entry.get("source_points", best_entry.get("source_len", 0)) or 0)
+        except (TypeError, ValueError):
+            current_src = best_src = 0
+        if current_src >= best_src:
+            best_key = key_text
+            best_entry = entry
+    if best_entry is None:
+        return "-"
+    try:
+        selected_level = int(best_entry.get("selected_level", best_entry.get("display_level", -1)) or -1)
+    except (TypeError, ValueError):
+        selected_level = -1
+    if selected_level < 0:
+        return "-"
+    try:
+        selected_weight = int(best_entry.get("selected_level_raw_weight", 0) or 0)
+    except (TypeError, ValueError):
+        selected_weight = 0
+    if selected_weight > 0:
+        return f"L{selected_level} ({selected_weight} pts)"
+    return f"L{selected_level}"
 
 
 def _metric_plot_refresh_min_interval_ms(window) -> float:
@@ -616,10 +704,20 @@ def apply_processing_range_to_spectrum_plot(window) -> None:
 def autoscale_metric_plot(window, *, force: bool = True) -> None:
     started = perf_counter()
     content_mode = getattr(window, "_sensorgram_content_mode", "metric")
+    axis_mode = _sensorgram_time_axis_mode(window)
+    clock_mode = axis_mode == "clock"
     if content_mode == "heatmap":
+        if bool(getattr(window, "_live_active", False)):
+            _show_sensorgram_heatmap_unavailable(
+                window,
+                clock_mode=clock_mode,
+            )
+            window._metric_autoscale_pending = False
+            window._last_metric_autoscale_ms = (perf_counter() - started) * 1000.0
+            return
         window._trace_view_autoscaling = True
         try:
-            render_sensorgram_heatmap(window, window._sensorgram_heatmap_history, clock_mode=not bool(window._measurement_active))
+            render_sensorgram_heatmap(window, window._sensorgram_heatmap_history, clock_mode=clock_mode)
         finally:
             window._trace_view_autoscaling = False
             window._last_metric_autoscale_at = perf_counter()
@@ -638,8 +736,53 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
         window.trace_plot.autoRange()
         window._metric_autoscale_pending = False
         return
-    x = np.concatenate([item[0] for item in visible_series])
+    display_series: list[tuple[np.ndarray, np.ndarray]] = []
+    for x_values, y_values in visible_series:
+        display_x_values, _ = _sensorgram_display_x_values(window, x_values, clock_mode=clock_mode)
+        display_series.append((display_x_values, y_values))
+    x = np.concatenate([item[0] for item in display_series])
     y = np.concatenate([item[1] for item in visible_series])
+    if bool(getattr(window, "_sensorgram_metric_envelope_overlay_enabled", False)):
+        overlay_min_candidates: list[np.ndarray] = []
+        overlay_max_candidates: list[np.ndarray] = []
+        cache = getattr(window, "_plot_view_cache", None)
+        if cache is not None:
+            target_points = _metric_display_target_points(window)
+            view_mode = getattr(window, "_sensorgram_view_mode", "absolute")
+            trace_view_locked = bool(getattr(window, "_trace_view_locked", False))
+            live_active = bool(getattr(window, "_live_active", False))
+            for metric_name in series.keys():
+                try:
+                    overlay_data = None
+                    if view_mode == "absolute" and not trace_view_locked and live_active and hasattr(cache, "live_absolute_metric_envelope_view"):
+                        overlay_data = cache.live_absolute_metric_envelope_view(
+                            metric_name,
+                            target_points=target_points,
+                            recent_tail_points=recent_tail_points,
+                        )
+                    elif view_mode == "absolute" and not trace_view_locked and hasattr(cache, "absolute_metric_envelope_view"):
+                        series_token = build_metric_series_token(window, metric_name)
+                    metric_series = series.get(metric_name)
+                    if metric_series is not None:
+                        mx, my = tuple(np.asarray(item, dtype=np.float64) for item in metric_series)
+                        overlay_data = cache.absolute_metric_envelope_view(
+                            series_token,
+                            mx,
+                            my,
+                            view_width_px=None,
+                            enabled=True,
+                            minimum_points=128,
+                            oversample=1.0,
+                            default_points=target_points,
+                        )
+                    if overlay_data is not None:
+                        min_x, min_y, max_x, max_y = overlay_data
+                        if len(min_y) > 0:
+                            overlay_min_candidates.append(np.asarray(min_y, dtype=np.float64))
+                        if len(max_y) > 0:
+                            overlay_max_candidates.append(np.asarray(max_y, dtype=np.float64))
+                except Exception:
+                    continue
     finite = np.isfinite(x) & np.isfinite(y)
     if not np.any(finite):
         window._metric_autoscale_pending = False
@@ -648,7 +791,29 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
     y = y[finite]
     latest_x = float(np.max(x))
     x_span = float(np.max(x) - np.min(x))
-    y_span = float(np.max(y) - np.min(y))
+    y_min = float(np.min(y))
+    y_max = float(np.max(y))
+    if bool(getattr(window, "_sensorgram_metric_envelope_overlay_enabled", False)):
+        if overlay_min_candidates:
+            overlay_min_values = np.concatenate([arr[np.isfinite(arr)] for arr in overlay_min_candidates if np.any(np.isfinite(arr))]) if any(np.any(np.isfinite(arr)) for arr in overlay_min_candidates) else np.empty(0, dtype=np.float64)
+        else:
+            overlay_min_values = np.empty(0, dtype=np.float64)
+        if overlay_max_candidates:
+            overlay_max_values = np.concatenate([arr[np.isfinite(arr)] for arr in overlay_max_candidates if np.any(np.isfinite(arr))]) if any(np.any(np.isfinite(arr)) for arr in overlay_max_candidates) else np.empty(0, dtype=np.float64)
+        else:
+            overlay_max_values = np.empty(0, dtype=np.float64)
+        if len(overlay_min_values) > 0:
+            overlay_min = float(np.min(overlay_min_values))
+            if np.isfinite(overlay_min):
+                if y_min <= 0.0:
+                    y_min = min(y_min, overlay_min)
+                elif overlay_min > 0.0:
+                    y_min = min(y_min, overlay_min)
+        if len(overlay_max_values) > 0:
+            overlay_max = float(np.max(overlay_max_values))
+            if np.isfinite(overlay_max):
+                y_max = max(y_max, overlay_max)
+    y_span = float(y_max - y_min)
     view_mode = getattr(window, "_sensorgram_view_mode", "absolute")
     clock_mode = bool(getattr(window.trace_time_axis, "_mode", "elapsed") == "clock")
     follow_latest_buffer_s = _metric_follow_latest_buffer_s(
@@ -685,8 +850,8 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
     new_range = (
         float(x_min),
         float(x_max),
-        float(np.min(y) - y_pad),
-        float(np.max(y) + y_pad),
+        float(y_min - y_pad),
+        float(y_max + y_pad),
     )
     should_apply = True
     if isinstance(last_range, tuple) and len(last_range) == 4:
@@ -787,7 +952,8 @@ def refresh_metric_plot(window, trace_label: str) -> None:
     if window._plots_frozen:
         return
     started = perf_counter()
-    clock_mode = not bool(window._measurement_active)
+    axis_mode = _sensorgram_time_axis_mode(window)
+    clock_mode = axis_mode == "clock"
     content_mode = getattr(window, "_sensorgram_content_mode", "metric")
     metric_plot_enabled = bool(getattr(window, "_metric_plot_enabled", True))
     window._last_metric_plot_disabled_fast_path = False
@@ -801,11 +967,14 @@ def refresh_metric_plot(window, trace_label: str) -> None:
         active_series = window._active_trace_series()
         if content_mode == "heatmap":
             _set_plot_label_if_changed(window.trace_plot, "left", "Wavelength (nm)", window, "_trace_left_label_text")
-            _set_trace_time_axis_mode(window, None, clock_mode=clock_mode)
+            _set_trace_time_axis_mode(window, axis_mode=axis_mode)
             for curve in window.trace_curves.values():
                 if hasattr(curve, "setData"):
                     curve.setData([], [])
                 _set_visible_if_changed(curve, False)
+            for band in getattr(window, "trace_metric_envelope_bands", {}).values():
+                if hasattr(band, "setVisible"):
+                    band.setVisible(False)
             if hasattr(window, "trace_legend"):
                 _set_visible_if_changed(window.trace_legend, False)
             render_sensorgram_heatmap(window, window._sensorgram_heatmap_history, clock_mode=clock_mode)
@@ -814,20 +983,7 @@ def refresh_metric_plot(window, trace_label: str) -> None:
         if active_series:
             _set_plot_label_if_changed(window.trace_plot, "left", trace_label, window, "_trace_left_label_text")
             previous_visible_mode = getattr(window, "_visible_trace_mode", None)
-            active_x_values = None
-            if isinstance(active_series, dict) and active_series:
-                first_series = next(iter(active_series.values()))
-                if hasattr(first_series, "to_arrays"):
-                    try:
-                        active_x_values = np.asarray(first_series.to_arrays()[0], dtype=np.float64)
-                    except Exception:
-                        active_x_values = None
-                elif isinstance(first_series, tuple) and len(first_series) == 2:
-                    try:
-                        active_x_values = np.asarray(first_series[0], dtype=np.float64)
-                    except Exception:
-                        active_x_values = None
-            visible_mode = _set_trace_time_axis_mode(window, active_x_values, clock_mode=clock_mode)
+            visible_mode = _set_trace_time_axis_mode(window, axis_mode=axis_mode)
             metric_changed = render_metric_series(window, active_series, clock_mode=clock_mode)
             window._visible_trace_mode = visible_mode
             _set_visible_if_changed(window.trace_heatmap_image, False)
@@ -845,10 +1001,13 @@ def refresh_metric_plot(window, trace_label: str) -> None:
             _set_plot_label_if_changed(window.trace_plot, "left", "Wavelength (nm)", window, "_trace_left_label_text")
         else:
             _set_plot_label_if_changed(window.trace_plot, "left", trace_label, window, "_trace_left_label_text")
-        _set_trace_time_axis_mode(window, None, clock_mode=clock_mode)
+        _set_trace_time_axis_mode(window, axis_mode=axis_mode)
         for curve in window.trace_curves.values():
             curve.setData([], [])
             _set_visible_if_changed(curve, content_mode != "heatmap")
+        for band in getattr(window, "trace_metric_envelope_bands", {}).values():
+            if hasattr(band, "setVisible"):
+                band.setVisible(False)
         if hasattr(window, "trace_heatmap_image"):
             _set_visible_if_changed(window.trace_heatmap_image, False)
         if hasattr(window, "trace_heatmap_notice_item"):
@@ -857,7 +1016,7 @@ def refresh_metric_plot(window, trace_label: str) -> None:
             _set_visible_if_changed(window.trace_legend, content_mode != "heatmap")
         window._visible_trace_x = None
         window._visible_trace_y = None
-        window._visible_trace_mode = "relative" if getattr(window, "_trace_time_axis_relative_labels_enabled", False) else ("clock" if clock_mode else "elapsed")
+        window._visible_trace_mode = axis_mode
         request_metric_autoscale(window)
         window._log_throttled(
             "trace_refresh",
@@ -931,6 +1090,50 @@ def render_metric_series(
     live_absolute_archive_points = 0
     live_absolute_rebuild_count = 0
     live_absolute_archive_reads = 0
+    live_absolute_append_ms = None
+    recent_tail_points = max(int(getattr(window, "_sensorgram_compression_recent_tail_points", 300)), 0)
+    envelope_bands = getattr(window, "trace_metric_envelope_bands", None)
+    overlay_enabled = bool(getattr(window, "_sensorgram_metric_envelope_overlay_enabled", False))
+
+    def _update_metric_envelope_overlay(
+        metric_name: str,
+        overlay_data: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None,
+    ) -> None:
+        if not isinstance(envelope_bands, dict):
+            return
+        band = envelope_bands.get(metric_name)
+        envelope_curves = getattr(window, "trace_metric_envelope_curves", None)
+        curve_pair = None
+        if isinstance(envelope_curves, dict):
+            curve_pair = envelope_curves.get(metric_name)
+        if overlay_data is None or not overlay_enabled:
+            if band is not None:
+                if hasattr(band, "setVisible"):
+                    band.setVisible(False)
+            if curve_pair is not None:
+                for curve in curve_pair:
+                    if hasattr(curve, "setData"):
+                        curve.setData([], [])
+            return
+        min_x, min_y, max_x, max_y = overlay_data
+        if len(min_x) == 0 or len(min_y) == 0 or len(max_x) == 0 or len(max_y) == 0:
+            if band is not None:
+                if hasattr(band, "setVisible"):
+                    band.setVisible(False)
+            if curve_pair is not None:
+                for curve in curve_pair:
+                    if hasattr(curve, "setData"):
+                        curve.setData([], [])
+            return
+        if curve_pair is not None:
+            min_curve, max_curve = curve_pair
+            if hasattr(min_curve, "setData"):
+                min_curve.setData(min_x, min_y)
+            if hasattr(max_curve, "setData"):
+                max_curve.setData(max_x, max_y)
+        if band is not None and hasattr(band, "setVisible"):
+            band.setVisible(True)
+
     for metric_name, curve in window.trace_curves.items():
         series = history.get(metric_name, [])
         if metric_name not in window._selected_trace_metrics() or series is None:
@@ -939,6 +1142,7 @@ def render_metric_series(
             if render_state_cache.get(metric_name) != render_state_key:
                 curve.setData([], [])
                 render_state_cache[metric_name] = render_state_key
+            _update_metric_envelope_overlay(metric_name, None)
             continue
         raw_points += _series_point_count(series)
         series_started = perf_counter()
@@ -950,16 +1154,20 @@ def render_metric_series(
             if render_state_cache.get(metric_name) != render_state_key:
                 curve.setData([], [])
                 render_state_cache[metric_name] = render_state_key
+            _update_metric_envelope_overlay(metric_name, None)
             continue
         series_token = build_metric_series_token(window, metric_name)
         curve.setDownsampling(auto=False, ds=curve_downsampling_factor)
         display_x = x
         display_y = y
+        overlay_data = None
+        clock_offset_s = None
         view_started = perf_counter()
         if cache is not None and view_mode == "absolute" and not trace_view_locked and bool(getattr(window, "_live_active", False)):
             live_display = cache.live_absolute_metric_view(
                 metric_name,
                 target_points=_metric_display_target_points(window),
+                recent_tail_points=recent_tail_points,
             )
             if live_display is None:
                 cache.seed_live_absolute_metric_cache(
@@ -967,10 +1175,12 @@ def render_metric_series(
                     x,
                     y,
                     target_points=_metric_display_target_points(window),
+                    recent_tail_points=recent_tail_points,
                 )
                 live_display = cache.live_absolute_metric_view(
                     metric_name,
                     target_points=_metric_display_target_points(window),
+                    recent_tail_points=recent_tail_points,
                 )
             if live_display is not None:
                 display_x, display_y = live_display
@@ -982,6 +1192,22 @@ def render_metric_series(
                 live_absolute_invalidation_reason = str(getattr(live_cache, "last_invalidation_reason", live_absolute_invalidation_reason))
                 live_absolute_archive_points += int(getattr(live_cache, "last_archive_points", 0))
                 live_absolute_rebuild_count += int(getattr(live_cache, "rebuild_count", 0))
+                append_ms = getattr(live_cache, "last_append_ms", None)
+                if append_ms is not None and np.isfinite(float(append_ms)):
+                        live_absolute_append_ms = (
+                            float(append_ms)
+                            if live_absolute_append_ms is None
+                            else max(float(live_absolute_append_ms), float(append_ms))
+                        )
+            if overlay_enabled and cache is not None:
+                try:
+                    overlay_data = cache.live_absolute_metric_envelope_view(
+                        metric_name,
+                        target_points=_metric_display_target_points(window),
+                        recent_tail_points=recent_tail_points,
+                    )
+                except Exception:
+                    overlay_data = None
         elif cache is not None:
             if view_mode == "absolute" and not trace_view_locked:
                 display_x, display_y = cache.absolute_metric_view(
@@ -993,7 +1219,23 @@ def render_metric_series(
                     minimum_points=128,
                     oversample=1.0,
                     default_points=_metric_display_target_points(window),
+                    recent_tail_points=recent_tail_points,
                 )
+                if overlay_enabled:
+                    try:
+                        overlay_data = cache.absolute_metric_envelope_view(
+                            series_token,
+                            x,
+                            y,
+                            view_width_px=view_width_px,
+                            enabled=downsampling_enabled,
+                            minimum_points=128,
+                            oversample=1.0,
+                            default_points=_metric_display_target_points(window),
+                            recent_tail_points=recent_tail_points,
+                        )
+                    except Exception:
+                        overlay_data = None
             else:
                 display_x, display_y = cache.metric_view(
                     series_token,
@@ -1030,6 +1272,7 @@ def render_metric_series(
                 default_points=_metric_display_target_points(window),
             )
         view_prep_ms += (perf_counter() - view_started) * 1000.0
+        display_x, _ = _sensorgram_display_x_values(window, display_x, clock_mode=clock_mode)
         display_state = None
         if cache is not None and view_mode == "absolute" and not trace_view_locked and bool(getattr(window, "_live_active", False)):
             display_state = cache.live_absolute_metric_state(metric_name)
@@ -1041,6 +1284,7 @@ def render_metric_series(
             view_mode,
             bool(trace_view_locked),
             step_mode,
+            bool(overlay_enabled),
             int(getattr(window, "_plot_display_points", 0)),
             display_state if display_state is not None else (id(display_x), id(display_y), int(len(display_x))),
         )
@@ -1048,6 +1292,7 @@ def render_metric_series(
             display_points += int(len(display_x))
             setdata_skips += 1
             active_series[metric_name] = (display_x, display_y)
+            _update_metric_envelope_overlay(metric_name, overlay_data)
             continue
         setdata_started = perf_counter()
         if step_mode is None:
@@ -1059,6 +1304,7 @@ def render_metric_series(
         display_points += int(len(display_x))
         render_state_cache[metric_name] = render_state_key
         active_series[metric_name] = (display_x, display_y)
+        _update_metric_envelope_overlay(metric_name, overlay_data)
 
     primary_name = window._primary_trace_metric()
     if primary_name in active_series:
@@ -1088,6 +1334,7 @@ def render_metric_series(
         window._last_metric_absolute_archive_points_text = str(max(live_absolute_archive_points, 0))
         window._last_metric_absolute_display_points_text = str(max(display_points, 0))
         window._last_metric_absolute_view_prep_text = f"{view_prep_ms:.2f} ms"
+        window._last_metric_absolute_append_text = "-" if live_absolute_append_ms is None else f"{float(live_absolute_append_ms):.2f} ms"
     else:
         window._last_metric_absolute_source_text = "-"
         window._last_metric_absolute_cache_invalidation_text = "-"
@@ -1096,6 +1343,7 @@ def render_metric_series(
         window._last_metric_absolute_archive_points_text = "-"
         window._last_metric_absolute_display_points_text = "-"
         window._last_metric_absolute_view_prep_text = "-"
+        window._last_metric_absolute_append_text = "-"
 
     elapsed_ms = (perf_counter() - started) * 1000.0
     window._last_metric_render_series_export_ms = series_export_ms
@@ -1136,7 +1384,33 @@ def render_sensorgram_heatmap(
     if not bool(getattr(window, "_sensorgram_heatmap_enabled", True)):
         _show_sensorgram_heatmap_unavailable(window, clock_mode)
         return
-    if not history or getattr(window, "_sensorgram_heatmap_wavelengths", None) is None:
+    if bool(getattr(window, "_live_active", False)):
+        _show_sensorgram_heatmap_unavailable(window, clock_mode)
+        return
+    request_signature_fn = getattr(window, "_sensorgram_heatmap_archive_request_signature", None)
+    request_signature = request_signature_fn() if callable(request_signature_fn) else None
+    archive_times = getattr(window, "_sensorgram_heatmap_archive_times", None)
+    archive_matrix = getattr(window, "_sensorgram_heatmap_archive_matrix", None)
+    archive_request_token = getattr(window, "_sensorgram_heatmap_archive_request_token", None)
+    archive_ready = (
+        isinstance(archive_times, np.ndarray)
+        and isinstance(archive_matrix, np.ndarray)
+        and len(archive_times) > 0
+        and archive_matrix.ndim == 2
+        and getattr(window, "_sensorgram_heatmap_wavelengths", None) is not None
+        and request_signature is not None
+        and archive_request_token == request_signature
+    )
+    if not archive_ready and getattr(window, "_metric_archive_path", None) and not bool(
+        getattr(window, "_sensorgram_heatmap_archive_loading", False)
+    ):
+        request_archive = getattr(window, "_request_sensorgram_heatmap_archive", None)
+        if callable(request_archive):
+            request_archive()
+    if not archive_ready and getattr(window, "_metric_archive_path", None):
+        _show_sensorgram_heatmap_loading(window, clock_mode)
+        return
+    if not archive_ready and (not history or getattr(window, "_sensorgram_heatmap_wavelengths", None) is None):
         _set_visible_if_changed(window.trace_heatmap_image, False)
         if hasattr(window, "trace_heatmap_notice_item"):
             _set_visible_if_changed(window.trace_heatmap_notice_item, False)
@@ -1172,8 +1446,14 @@ def render_sensorgram_heatmap(
     cache = getattr(window, "_plot_view_cache", None)
     heatmap_token = build_heatmap_history_token(window)
     arrays_started = perf_counter()
-    if cache is not None:
+    if archive_ready:
+        times = np.asarray(archive_times, dtype=np.float64)
+        matrix = np.asarray(archive_matrix, dtype=np.float64)
+    elif cache is not None:
         times, matrix = cache.heatmap_arrays_from_history(heatmap_token, history, build_heatmap_arrays)
+    else:
+        times, matrix = build_heatmap_arrays(history)
+    if cache is not None:
         if view_mode == "absolute" and not trace_view_locked:
             times, matrix = cache.absolute_heatmap_view(
                 heatmap_token,
@@ -1194,26 +1474,24 @@ def render_sensorgram_heatmap(
                 view_height_px=view_height_px,
                 enabled=True,
             )
+    elif view_mode == "absolute" and not trace_view_locked:
+        times, matrix = sample_absolute_heatmap_rows_for_view(
+            times,
+            matrix,
+            max_rows=int(getattr(window, "_sensorgram_heatmap_history_max_rows", 2000)),
+            view_height_px=view_height_px,
+            enabled=True,
+        )
     else:
-        times, matrix = build_heatmap_arrays(history)
-        if view_mode == "absolute" and not trace_view_locked:
-            times, matrix = sample_absolute_heatmap_rows_for_view(
-                times,
-                matrix,
-                max_rows=int(getattr(window, "_sensorgram_heatmap_history_max_rows", 2000)),
-                view_height_px=view_height_px,
-                enabled=True,
-            )
-        else:
-            times, matrix = select_heatmap_rows_for_view(
-                times,
-                matrix,
-                view_x_min=view_x_min,
-                view_x_max=view_x_max,
-                max_rows=int(getattr(window, "_sensorgram_heatmap_history_max_rows", 2000)),
-                view_height_px=view_height_px,
-                enabled=True,
-            )
+        times, matrix = select_heatmap_rows_for_view(
+            times,
+            matrix,
+            view_x_min=view_x_min,
+            view_x_max=view_x_max,
+            max_rows=int(getattr(window, "_sensorgram_heatmap_history_max_rows", 2000)),
+            view_height_px=view_height_px,
+            enabled=True,
+        )
     window._last_sensorgram_heatmap_arrays_ms = (perf_counter() - arrays_started) * 1000.0
     if view_mode == "rolling" and len(times) > 0:
         times = times - float(times[0])
@@ -1280,12 +1558,15 @@ def render_sensorgram_heatmap(
             window.trace_plot.setYRange(bottom, top, padding=0.0)
         finally:
             window._trace_view_autoscaling = False
-    _set_trace_time_axis_mode(window, times, clock_mode=clock_mode)
+    _set_trace_time_axis_mode(window, axis_mode="clock" if clock_mode else "elapsed")
     _set_visible_if_changed(window.trace_heatmap_image, True)
     if hasattr(window, "trace_heatmap_notice_item"):
         _set_visible_if_changed(window.trace_heatmap_notice_item, False)
     for curve in window.trace_curves.values():
         _set_visible_if_changed(curve, False)
+    for band in getattr(window, "trace_metric_envelope_bands", {}).values():
+        if hasattr(band, "setVisible"):
+            band.setVisible(False)
     if hasattr(window, "trace_legend"):
         _set_visible_if_changed(window.trace_legend, False)
     window._visible_trace_x = times
@@ -1293,7 +1574,7 @@ def render_sensorgram_heatmap(
     row_max = np.max(safe_matrix, axis=1)
     row_max[~np.isfinite(row_max)] = np.nan
     window._visible_trace_y = row_max
-    window._visible_trace_mode = "relative" if getattr(window, "_trace_time_axis_relative_labels_enabled", False) else ("clock" if clock_mode else "elapsed")
+    window._visible_trace_mode = "clock" if clock_mode else "elapsed"
     window._last_sensorgram_heatmap_axes_ms = (perf_counter() - axes_started) * 1000.0
     elapsed_ms = (perf_counter() - started) * 1000.0
     window._last_sensorgram_heatmap_render_ms = elapsed_ms
@@ -1311,10 +1592,24 @@ def render_sensorgram_heatmap(
 
 
 def _show_sensorgram_heatmap_unavailable(window, clock_mode: bool) -> None:
+    detail = (
+        "Live heatmap is disabled for performance. Use Freeze/Review to generate heatmap from recorded data."
+        if bool(getattr(window, "_live_active", False))
+        else "Enable it in Help > Performance switches."
+    )
     _show_trace_plot_unavailable(
         window,
         "Heatmap unavailable",
-        "Enable it in Help > Performance switches.",
+        detail,
+        clock_mode=clock_mode,
+    )
+
+
+def _show_sensorgram_heatmap_loading(window, clock_mode: bool) -> None:
+    _show_trace_plot_unavailable(
+        window,
+        "Heatmap loading",
+        "Preparing archive-backed heatmap in the background.",
         clock_mode=clock_mode,
     )
 
@@ -1331,7 +1626,7 @@ def _show_metric_plot_unavailable(window, clock_mode: bool) -> None:
 def _show_trace_plot_unavailable(window, title: str, detail: str, *, clock_mode: bool) -> None:
     if hasattr(window, "trace_heatmap_image"):
         _set_visible_if_changed(window.trace_heatmap_image, False)
-    _set_trace_time_axis_mode(window, None, clock_mode=clock_mode)
+    _set_trace_time_axis_mode(window, axis_mode="clock" if clock_mode else "elapsed")
     if hasattr(window, "trace_heatmap_notice_item"):
         notice = window.trace_heatmap_notice_item
         if hasattr(notice, "setText"):
@@ -1342,9 +1637,12 @@ def _show_trace_plot_unavailable(window, title: str, detail: str, *, clock_mode:
             sync_overlay()
     for curve in window.trace_curves.values():
         _set_visible_if_changed(curve, False)
+    for band in getattr(window, "trace_metric_envelope_bands", {}).values():
+        if hasattr(band, "setVisible"):
+            band.setVisible(False)
     if hasattr(window, "trace_legend"):
         _set_visible_if_changed(window.trace_legend, False)
-    window._visible_trace_mode = "relative" if getattr(window, "_trace_time_axis_relative_labels_enabled", False) else ("clock" if clock_mode else "elapsed")
+    window._visible_trace_mode = "clock" if clock_mode else "elapsed"
 
 
 def update_spectrum_stats(window, processed: Spectrum | None, fit: Spectrum | None) -> None:
@@ -1427,8 +1725,6 @@ def update_metric_stats(window) -> None:
         metric_name = selected_metrics[0] if selected_metrics else metric_name
         metric_label = window.TRACE_METRIC_LABELS.get(metric_name, metric_name)
         metric_color = window.TRACE_METRIC_COLORS.get(metric_name, "#444444")
-    clock_mode = not bool(window._measurement_active)
-
     if len(x_values) == 0 or len(y_values) == 0:
         window.trace_stats_label.setText(f"{_metric_label_span(metric_label, metric_color)}: - | min/max: - | span: - | dt -")
         window.trace_noise_summary_label.setText("noise: -")
@@ -1439,16 +1735,15 @@ def update_metric_stats(window) -> None:
     y_max = float(np.max(y_values))
     latest_y = float(y_values[-1])
     elapsed_from_start_s = max(float(x_values[-1]) - float(x_values[0]), 0.0)
-    if clock_mode:
-        try:
-            latest_time_text = datetime.fromtimestamp(float(x_values[-1])).strftime("%H:%M:%S")
-        except (OverflowError, OSError, ValueError):
-            latest_time_text = "-"
+    axis_mode = _sensorgram_time_axis_mode(window)
+    if axis_mode == "clock":
+        latest_time_text = _sensorgram_format_clock(window, float(x_values[-1]))
     else:
-        latest_time_text = f"{float(x_values[-1]):.2f} s"
+        latest_time_text = _sensorgram_format_elapsed(float(x_values[-1]))
 
     dt_values = np.diff(x_values)
     dt_text = "-" if len(dt_values) == 0 else f"{float(np.nanmean(dt_values)):.2f} s"
+    compression_level_text = _metric_compression_level_text(window, metric_name)
     window_s = window.trace_noise_window_spin.value()
     noise_chunks: list[str] = []
     for metric_name, (metric_x, metric_y) in series.items():
@@ -1468,6 +1763,7 @@ def update_metric_stats(window) -> None:
         f" | min/max: {y_min:.3f} / {y_max:.3f} nm"
         f" | span: {y_max - y_min:.3f} nm"
         f" | dt {dt_text}"
+        f" | compression: {escape(compression_level_text)}"
     )
     window.trace_noise_summary_label.setText(" | ".join(noise_chunks))
     window.trace_cursor_label.setText(window._trace_cursor_text)
@@ -1524,13 +1820,7 @@ def handle_metric_mouse_moved(window, event) -> None:
     if getattr(window, "_sensorgram_content_mode", "metric") == "heatmap":
         window.trace_vline.setPos(x)
         window.trace_hline.setPos(y)
-        if window._measurement_active:
-            cursor_x = f"{x:.3f} s"
-        else:
-            try:
-                cursor_x = datetime.fromtimestamp(float(x)).strftime("%H:%M:%S")
-            except (OverflowError, OSError, ValueError):
-                cursor_x = f"{x:.3f}"
+        cursor_x = _sensorgram_format_clock(window, float(x)) if _sensorgram_time_axis_clock_mode(window) else _sensorgram_format_elapsed(float(x))
         window._trace_cursor_text = f"cursor: {cursor_x}, {y:.3f} nm"
         window.trace_cursor_label.setText(window._trace_cursor_text)
         return
@@ -1551,13 +1841,7 @@ def handle_metric_mouse_moved(window, event) -> None:
         x, y, _ = best_match
     window.trace_vline.setPos(x)
     window.trace_hline.setPos(y)
-    if window._measurement_active:
-        cursor_x = f"{x:.3f} s"
-    else:
-        try:
-            cursor_x = datetime.fromtimestamp(float(x)).strftime("%H:%M:%S")
-        except (OverflowError, OSError, ValueError):
-            cursor_x = f"{x:.3f}"
+    cursor_x = _sensorgram_format_clock(window, float(x)) if _sensorgram_time_axis_clock_mode(window) else _sensorgram_format_elapsed(float(x))
     window._trace_cursor_text = f"cursor: {cursor_x}, {y:.3f} nm"
     window.trace_cursor_label.setText(window._trace_cursor_text)
 

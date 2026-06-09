@@ -503,6 +503,26 @@ def clear_trace_history_for(window) -> None:
         window._sensorgram_heatmap_wavelengths = None
     if hasattr(window, "_sensorgram_heatmap_axis_key"):
         window._sensorgram_heatmap_axis_key = None
+    if hasattr(window, "_sensorgram_heatmap_archive_times"):
+        window._sensorgram_heatmap_archive_times = None
+    if hasattr(window, "_sensorgram_heatmap_archive_matrix"):
+        window._sensorgram_heatmap_archive_matrix = None
+    if hasattr(window, "_sensorgram_heatmap_archive_request_token"):
+        window._sensorgram_heatmap_archive_request_token = None
+    if hasattr(window, "_sensorgram_heatmap_archive_pending_token"):
+        window._sensorgram_heatmap_archive_pending_token = None
+    if hasattr(window, "_sensorgram_heatmap_archive_loading"):
+        window._sensorgram_heatmap_archive_loading = False
+    if hasattr(window, "_sensorgram_heatmap_archive_task"):
+        window._sensorgram_heatmap_archive_task = None
+    if hasattr(window, "_sensorgram_metric_archive_reload_request_token"):
+        window._sensorgram_metric_archive_reload_request_token = None
+    if hasattr(window, "_sensorgram_metric_archive_reload_pending_token"):
+        window._sensorgram_metric_archive_reload_pending_token = None
+    if hasattr(window, "_sensorgram_metric_archive_reload_loading"):
+        window._sensorgram_metric_archive_reload_loading = False
+    if hasattr(window, "_sensorgram_metric_archive_reload_task"):
+        window._sensorgram_metric_archive_reload_task = None
     signal = window._session.state.absorbance or window._session.state.sample
     if signal is not None:
         processed, _ = window._get_analysis_processed_spectrum(signal)

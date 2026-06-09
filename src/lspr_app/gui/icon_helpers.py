@@ -19,6 +19,8 @@ from lspr_ui import (
     trash_icon,
 )
 
+from lspr_app.resources import shared_icon_path
+
 
 _PRISM_ICON_SVG = """
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -68,6 +70,18 @@ def storage_save_icon() -> QIcon:
         return tint_tabler_icon(flow_tabler_icon("device_floppy", "device_save", "floppy"), tint)
 
 
+def heatmap_icon() -> QIcon:
+    return QIcon(str(shared_icon_path("heatmap_icon_clean.svg")))
+
+
+def reload_icon() -> QIcon:
+    tint = QColor("#4da3ff")
+    try:
+        return tint_tabler_icon(tabler_icon("reload"), tint)
+    except Exception:
+        return tint_tabler_icon(tabler_icon("refresh"), tint)
+
+
 __all__ = [
     "bulb_icon",
     "dark_icon",
@@ -75,6 +89,8 @@ __all__ = [
     "flow_icon",
     "flow_tabler_icon",
     "math_function_tab_icon",
+    "heatmap_icon",
+    "reload_icon",
     "prism_tab_icon",
     "reference_icon",
     "residual_icon",

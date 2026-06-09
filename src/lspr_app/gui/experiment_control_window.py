@@ -68,6 +68,7 @@ from lspr_app.device.valve_controllers import detect_valve_controller
 from lspr_app.device.reglo_icc import PumpProbe, RegloICCClient, is_probable_reglo_port
 from lspr_app import __version__
 from lspr_app.gui.experiment_control_runtime import ExperimentRuntimeSnapshot, experiment_runtime_snapshot
+from lspr_app.resources import app_icon_path
 from lspr_app.domain.pump_plan import (
     ACTIVE_PUMP_CHANNELS,
     DEFAULT_TUBE_MM,
@@ -1669,7 +1670,7 @@ class ExperimentControlWindow(QWidget):
         _LOGGER.info("Experiment control bootstrap +%.1f ms: init state prepared", (perf_counter() - self._bootstrap_t0) * 1000.0)
 
         self.setWindowTitle(f"Experiment Control {__version__}")
-        self.setWindowIcon(QIcon(str(Path(__file__).resolve().parent.parent / "resources" / "icons" / "app_icon.svg")))
+        self.setWindowIcon(QIcon(str(app_icon_path())))
         self.resize(1220, 860)
         self._apply_style()
 

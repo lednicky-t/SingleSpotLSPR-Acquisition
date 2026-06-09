@@ -16,6 +16,10 @@ from PyQt6.QtWidgets import QApplication
 from lspr_app.diagnostics import DiagnosticsConfig
 from lspr_app.gui.runtime_diagnostics import SessionDiagnosticsSnapshot, build_session_statistics_lines
 from lspr_app.gui.logging_utils import SUCCESS_LOG_LEVEL
+from lspr_app.storage.output_paths import (
+    build_recording_experiment_base_dir,
+    recording_experiment_base_dir_for,
+)
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
@@ -149,40 +153,6 @@ def _queue_depth_max_text(value: object) -> str:
     return str(max(numeric, 0))
 
 
-def _safe_path_component(value: object, *, fallback: str = "experiment") -> str:
-    text = " ".join(str(value or "").strip().split())
-    if not text:
-        return fallback
-    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", text)
-    text = text.strip(" ._")
-    return text or fallback
-
-
-def _recording_experiment_base_dir_for(window) -> Path:
-    project_destination = ""
-    if hasattr(window, "recording_project_destination"):
-        project_destination = str(window.recording_project_destination() or "").strip()
-    base_dir = Path(project_destination).expanduser() if project_destination else Path.cwd() / "data"
-    experiment_name = ""
-    if hasattr(window, "recording_experiment_name"):
-        experiment_name = str(window.recording_experiment_name() or "").strip()
-    if experiment_name:
-        base_dir = base_dir / _safe_path_component(experiment_name)
-    return base_dir
-
-
-def build_recording_experiment_base_dir(
-    project_destination: str,
-    experiment_name: str,
-    *,
-    fallback_base: Path | None = None,
-) -> Path:
-    base_dir = Path(project_destination).expanduser() if str(project_destination or "").strip() else (fallback_base or (Path.cwd() / "data"))
-    if str(experiment_name or "").strip():
-        base_dir = base_dir / _safe_path_component(experiment_name)
-    return base_dir
-
-
 def build_recording_experiment_log_path_for(
     window,
     *,
@@ -190,7 +160,7 @@ def build_recording_experiment_log_path_for(
     suffix: str = ".log",
     timestamp: datetime | None = None,
 ) -> Path:
-    base_dir = _recording_experiment_base_dir_for(window)
+    base_dir = recording_experiment_base_dir_for(window)
     started_at = timestamp or getattr(window, "_startup_started_at", None) or datetime.now(timezone.utc)
     started_local = started_at.astimezone()
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -213,7 +183,7 @@ def build_recording_experiment_log_path(
 
 
 def build_diagnostic_export_path_for(window) -> Path:
-    base_dir = _recording_experiment_base_dir_for(window)
+    base_dir = recording_experiment_base_dir_for(window)
     started_at = getattr(window, "_startup_started_at", None) or datetime.now(timezone.utc)
     started_local = started_at.astimezone()
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -503,7 +473,7 @@ def save_session_stats_log_for(window) -> Path | None:
     if not text.strip():
         return None
 
-    base_dir = _recording_experiment_base_dir_for(window)
+    base_dir = recording_experiment_base_dir_for(window)
     started_at = getattr(window, "_session_stats_recording_started_at", None)
     if started_at is None:
         started_at = getattr(window, "_measurement_started_at", None)

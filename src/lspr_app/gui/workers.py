@@ -22,6 +22,7 @@ from lspr_app.domain.processing import (
     processing_debug_mode_enabled,
     set_processing_debug_mode_enabled,
 )
+from lspr_app.gui.plot_view_cache import build_heatmap_arrays
 from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter, repack_measurement_hdf5_file
 
 
@@ -96,6 +97,49 @@ class MeasurementCompressionResult:
     path: Path
 
 
+@dataclass(slots=True)
+class HeatmapArchiveLoadRequest:
+    path: Path
+    source_epoch: int
+    request_token: tuple[object, ...] | None = None
+    max_rows: int = 800
+    time_range_s: float | None = None
+    wavelength_range_nm: tuple[float, float] | None = None
+    spectrum_group_name: str = "sample"
+
+
+@dataclass(slots=True)
+class HeatmapArchiveLoadResult:
+    path: Path
+    source_epoch: int
+    request_token: tuple[object, ...] | None
+    wavelengths: np.ndarray
+    times: np.ndarray
+    matrix: np.ndarray
+    row_count: int
+    load_ms: float
+    build_ms: float
+
+
+@dataclass(slots=True)
+class MetricArchiveReloadRequest:
+    path: Path
+    source_epoch: int
+    request_token: tuple[object, ...] | None = None
+    metric_names: tuple[str, ...] | None = None
+
+
+@dataclass(slots=True)
+class MetricArchiveReloadResult:
+    path: Path
+    source_epoch: int
+    request_token: tuple[object, ...] | None
+    series: dict[str, tuple[np.ndarray, np.ndarray]]
+    metric_count: int
+    point_count: int
+    load_ms: float
+
+
 class AcquisitionSignals(QObject):
     finished = pyqtSignal(str, object)
     failed = pyqtSignal(int, str)
@@ -106,6 +150,16 @@ class ProcessingSignals(QObject):
 
 
 class MeasurementCompressionSignals(QObject):
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+
+class HeatmapArchiveLoadSignals(QObject):
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+
+class MetricArchiveReloadSignals(QObject):
     finished = pyqtSignal(object)
     failed = pyqtSignal(str)
 
@@ -185,6 +239,104 @@ class MeasurementCompressionTask(QRunnable):
             return
         logger.info("Measurement file compression finished | path=%s", result_path)
         self.signals.finished.emit(MeasurementCompressionResult(path=result_path))
+
+
+class HeatmapArchiveLoadTask(QRunnable):
+    def __init__(self, request: HeatmapArchiveLoadRequest) -> None:
+        super().__init__()
+        self._request = request
+        self.signals = HeatmapArchiveLoadSignals()
+
+    def run(self) -> None:
+        logger = logging.getLogger("lspr_app.heatmap_archive")
+        load_started = perf_counter()
+        try:
+            from lspr_app.storage.hdf5_export import load_spectrum_heatmap_history
+
+            logger.info(
+                "Heatmap archive load started | path=%s | max_rows=%s",
+                self._request.path,
+                self._request.max_rows,
+            )
+            wavelengths, history = load_spectrum_heatmap_history(
+                self._request.path,
+                max_rows=self._request.max_rows,
+                time_range_s=self._request.time_range_s,
+                wavelength_range_nm=self._request.wavelength_range_nm,
+                spectrum_group_name=self._request.spectrum_group_name,
+            )
+            load_ms = (perf_counter() - load_started) * 1000.0
+            build_started = perf_counter()
+            times, matrix = build_heatmap_arrays(history)
+            build_ms = (perf_counter() - build_started) * 1000.0
+        except Exception as exc:  # pragma: no cover - GUI runtime path
+            logger.exception("Heatmap archive load failed | path=%s", self._request.path)
+            self.signals.failed.emit(str(exc))
+            return
+        logger.info(
+            "Heatmap archive load finished | path=%s | rows=%s | cols=%s",
+            self._request.path,
+            int(len(times)),
+            int(matrix.shape[1]) if matrix.ndim == 2 else 0,
+        )
+        self.signals.finished.emit(
+            HeatmapArchiveLoadResult(
+                path=self._request.path,
+                source_epoch=self._request.source_epoch,
+                request_token=self._request.request_token,
+                wavelengths=np.asarray(wavelengths, dtype=np.float64),
+                times=np.asarray(times, dtype=np.float64),
+                matrix=np.asarray(matrix, dtype=np.float64),
+                row_count=int(len(times)),
+                load_ms=load_ms,
+                build_ms=build_ms,
+            )
+        )
+
+
+class MetricArchiveReloadTask(QRunnable):
+    def __init__(self, request: MetricArchiveReloadRequest) -> None:
+        super().__init__()
+        self._request = request
+        self.signals = MetricArchiveReloadSignals()
+
+    def run(self) -> None:
+        logger = logging.getLogger("lspr_app.metric_archive_reload")
+        load_started = perf_counter()
+        try:
+            from lspr_app.storage.hdf5_export import load_processed_metric_history
+
+            logger.info(
+                "Metric archive reload started | path=%s | metric_names=%s",
+                self._request.path,
+                self._request.metric_names if self._request.metric_names is not None else "all",
+            )
+            metric_names = set(self._request.metric_names) if self._request.metric_names is not None else None
+            series = load_processed_metric_history(self._request.path, metric_names=metric_names)
+            load_ms = (perf_counter() - load_started) * 1000.0
+            metric_count = int(len(series))
+            point_count = int(sum(int(len(points[0])) for points in series.values()))
+        except Exception as exc:  # pragma: no cover - GUI runtime path
+            logger.exception("Metric archive reload failed | path=%s", self._request.path)
+            self.signals.failed.emit(str(exc))
+            return
+        logger.info(
+            "Metric archive reload finished | path=%s | metrics=%s | points=%s",
+            self._request.path,
+            metric_count,
+            point_count,
+        )
+        self.signals.finished.emit(
+            MetricArchiveReloadResult(
+                path=self._request.path,
+                source_epoch=self._request.source_epoch,
+                request_token=self._request.request_token,
+                series=series,
+                metric_count=metric_count,
+                point_count=point_count,
+                load_ms=load_ms,
+            )
+        )
 
 
 def _apply_temporal_smoothing(
