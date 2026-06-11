@@ -38,19 +38,22 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
     if profile is None:
         profile = launch_profile_spec(DEFAULT_LAUNCH_PROFILE)
 
-    window._window_mode_label = QLabel()
+    title_widget = QWidget()
+    title_widget.setObjectName("titleBar")
+
+    window._window_mode_label = QLabel(title_widget)
     window._window_mode_label.setObjectName("windowModeLabel")
     window._window_mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
     window._window_mode_label.setContentsMargins(0, 0, 0, 0)
     window._window_mode_label.setToolTip("Current application mode.")
     window._update_window_mode_label()
 
-    window._window_mode_icon_label = QLabel()
+    window._window_mode_icon_label = QLabel(title_widget)
     window._window_mode_icon_label.setObjectName("windowModeIconLabel")
     window._window_mode_icon_label.setFixedSize(16, 16)
     window._window_mode_icon_label.setToolTip("Current source icon.")
 
-    center_cluster = QWidget()
+    center_cluster = QWidget(title_widget)
     center_layout = QHBoxLayout()
     center_layout.setContentsMargins(0, 0, 0, 0)
     center_layout.setSpacing(5)
@@ -59,13 +62,13 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
     center_cluster.setLayout(center_layout)
     window._window_mode_cluster = center_cluster
 
-    status_cluster = QWidget()
+    status_cluster = QWidget(title_widget)
     status_layout = QHBoxLayout()
     status_layout.setContentsMargins(0, 0, 0, 0)
     status_layout.setSpacing(8)
     window._startup_loading_frames = ["â—", "â—“", "â—‘", "â—’"]
     window._startup_loading_frame_index = 0
-    window._startup_loading_label = QLabel("â—")
+    window._startup_loading_label = QLabel("â—", title_widget)
     window._startup_loading_label.setObjectName("startupLoadingLabel")
     window._startup_loading_label.setFixedSize(16, 16)
     window._startup_loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -85,12 +88,12 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
         ("valve", "Valve"),
         ("mswitch", "M-Switch"),
     ):
-        icon_label = QLabel()
+        icon_label = QLabel(title_widget)
         icon_label.setFixedSize(16, 16)
         icon_label.setToolTip(f"{label_text} connection status.")
-        text_label = QLabel(label_text)
+        text_label = QLabel(label_text, title_widget)
         text_label.setToolTip(f"{label_text} connection status.")
-        item = QWidget()
+        item = QWidget(title_widget)
         item_layout = QHBoxLayout()
         item_layout.setContentsMargins(0, 0, 0, 0)
         item_layout.setSpacing(4)
@@ -103,14 +106,14 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
     status_cluster.setVisible(bool(profile.show_device_statuses))
     window._titlebar_status_cluster = status_cluster
 
-    left_cluster = QWidget()
+    left_cluster = QWidget(title_widget)
     left_layout = QHBoxLayout()
     left_layout.setContentsMargins(0, 0, 0, 0)
     left_layout.setSpacing(6)
     left_layout.addWidget(menu_bar)
     left_cluster.setLayout(left_layout)
 
-    right_cluster = QWidget()
+    right_cluster = QWidget(title_widget)
     right_layout = QHBoxLayout()
     right_layout.setContentsMargins(0, 0, 0, 0)
     right_layout.setSpacing(4)
@@ -118,8 +121,6 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
     right_layout.addWidget(status_cluster)
     right_cluster.setLayout(right_layout)
 
-    title_widget = QWidget()
-    title_widget.setObjectName("titleBar")
     title_layout = QGridLayout()
     title_layout.setContentsMargins(8, 3, 8, 3)
     title_layout.setHorizontalSpacing(8)

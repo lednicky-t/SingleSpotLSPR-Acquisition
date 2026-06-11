@@ -248,12 +248,6 @@ def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
     except Exception as exc:
         window._log_error(f"Spectrum refresh failed: {exc}")
     window._update_poly_warning_indicator(fit)
-    window._log_throttled(
-        "plot_refresh",
-        f"Plot refreshed | mode={window.plot_selector.currentText().lower()} | fit={'on' if fit is not None else 'off'}",
-        level=logging.DEBUG,
-        min_interval=0.75,
-    )
     window._request_deferred_ui_refresh(trace_plot=True, live_estimate=True, telemetry=True, trace_label="Metric position (nm)")
     if window._pending_plot_request is not None:
         pending = window._pending_plot_request
@@ -266,7 +260,7 @@ def flush_deferred_ui_refreshes_for(window) -> None:
     _flush_deferred_ui_refreshes(window)
     elapsed_ms = (perf_counter() - started) * 1000.0
     window._last_deferred_ui_refresh_ms = elapsed_ms
-    if processing_debug_mode_enabled():
+    if bool(getattr(window, "_deep_timing_enabled", False)):
         if elapsed_ms >= 2.0:
             window._log_throttled(
                 "gui_deferred_refresh",
@@ -294,7 +288,7 @@ def flush_deferred_display_refreshes_for(window) -> None:
     window._last_deferred_display_refresh_ms = elapsed_ms
     if bool(getattr(window, "_live_active", False)):
         window._live_mode_deferred_display_flush_count = int(getattr(window, "_live_mode_deferred_display_flush_count", 0)) + 1
-    if processing_debug_mode_enabled():
+    if bool(getattr(window, "_deep_timing_enabled", False)):
         if elapsed_ms >= 2.0:
             window._log_throttled(
                 "gui_deferred_display_refresh",
@@ -338,7 +332,7 @@ def flush_deferred_metric_refreshes_for(window) -> None:
     window._last_deferred_metric_refresh_ms = elapsed_ms
     if bool(getattr(window, "_live_active", False)):
         window._live_mode_deferred_metric_flush_count = int(getattr(window, "_live_mode_deferred_metric_flush_count", 0)) + 1
-    if processing_debug_mode_enabled():
+    if bool(getattr(window, "_deep_timing_enabled", False)):
         if elapsed_ms >= 2.0:
             window._log_throttled(
                 "gui_deferred_metric_refresh",
@@ -366,7 +360,7 @@ def flush_deferred_stats_refreshes_for(window) -> None:
     window._last_deferred_stats_refresh_ms = elapsed_ms
     if bool(getattr(window, "_live_active", False)):
         window._live_mode_deferred_stats_flush_count = int(getattr(window, "_live_mode_deferred_stats_flush_count", 0)) + 1
-    if processing_debug_mode_enabled():
+    if bool(getattr(window, "_deep_timing_enabled", False)):
         if elapsed_ms >= 2.0:
             window._log_throttled(
                 "gui_deferred_stats_refresh",
@@ -385,7 +379,7 @@ def flush_plot_refreshes_for(window) -> None:
         except (TypeError, ValueError):
             window._last_plot_refresh_delay_ms = None
     _flush_plot_refreshes(window)
-    if processing_debug_mode_enabled():
+    if bool(getattr(window, "_deep_timing_enabled", False)):
         elapsed_ms = (perf_counter() - started) * 1000.0
         if elapsed_ms >= 2.0:
             window._log_throttled(
@@ -399,7 +393,7 @@ def flush_plot_refreshes_for(window) -> None:
 def refresh_plot_for(window) -> None:
     started = perf_counter()
     _refresh_plot(window)
-    if processing_debug_mode_enabled():
+    if bool(getattr(window, "_deep_timing_enabled", False)):
         elapsed_ms = (perf_counter() - started) * 1000.0
         if elapsed_ms >= 2.0:
             window._log_throttled(
@@ -720,12 +714,10 @@ def handle_live_setting_change_for(window) -> None:
         window._request_live_visual_refresh(0)
         window._request_trace_autoscale()
         window.status_label.setText("Live display window reset after settings change.")
-        window._log_debug("Live display reset after settings change.")
     elif window._source_mode == "simulation":
         window._session.set_sample(window._build_simulation_spectrum("sample"))
         window._schedule_processing_refresh()
         window._request_trace_autoscale()
-        window._log_debug("Simulation spectrum refreshed after settings change.")
     window._schedule_acquisition_state_persist()
 
 
@@ -736,12 +728,6 @@ def handle_simulation_output_rate_change_for(window) -> None:
         window._request_plot_refresh()
         window._request_trace_autoscale()
     window._schedule_acquisition_state_persist()
-    window._log_throttled(
-        "simulation_output_rate",
-        f"Simulation output rate set to {window.sim_output_rate_spin.value():.2f} Hz.",
-        level=logging.DEBUG,
-        min_interval=1.0,
-    )
 
 
 def update_window_mode_label_for(window) -> None:

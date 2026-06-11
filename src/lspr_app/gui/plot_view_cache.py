@@ -46,6 +46,8 @@ class MetricDisplayCache:
     last_old_display_points: int = 0
     last_tail_display_points: int = 0
     last_total_display_points: int = 0
+    last_window_start_x: float | None = None
+    last_window_end_x: float | None = None
     last_append_ms: float | None = None
     last_assemble_ms: float | None = None
     last_full_rebuild_ms: float | None = None
@@ -300,6 +302,158 @@ def _build_absolute_metric_envelope_arrays(
             max_x = np.concatenate((max_x, tail_x))
             max_y = np.concatenate((max_y, tail_y))
     return min_x, min_y, max_x, max_y, int(overlap_blocks)
+
+
+def _build_windowed_metric_arrays(
+    cache: MetricDisplayCache,
+    *,
+    target_points: int,
+    window_start_x: float | None,
+    window_end_x: float | None,
+) -> tuple[np.ndarray, np.ndarray, int, int, int]:
+    if not cache.levels:
+        empty = np.empty(0, dtype=np.float64)
+        return empty, empty, -1, 0, 0
+    tail_x, tail_y = _recent_tail_arrays(cache)
+    if len(tail_x) > 0:
+        if window_start_x is not None:
+            tail_visible = tail_x >= float(window_start_x)
+            tail_x = tail_x[tail_visible]
+            tail_y = tail_y[tail_visible]
+        if window_end_x is not None:
+            tail_visible = tail_x <= float(window_end_x)
+            tail_x = tail_x[tail_visible]
+            tail_y = tail_y[tail_visible]
+    tail_points = int(len(tail_x))
+    tail_start_x = float(tail_x[0]) if tail_points > 0 else None
+    if tail_points > int(target_points):
+        tail_x = tail_x[-int(target_points):]
+        tail_y = tail_y[-int(target_points):]
+        tail_points = int(len(tail_x))
+        tail_start_x = float(tail_x[0]) if tail_points > 0 else None
+
+    old_target_points = max(int(target_points) - tail_points, 1)
+    best_blocks: list[MetricCompressionBlock] = []
+    best_level = -1
+    best_error = float("inf")
+    for level_index, level in enumerate(cache.levels):
+        if not level:
+            continue
+        visible_blocks: list[MetricCompressionBlock] = []
+        for block in level:
+            if window_end_x is not None and float(block.start_x) > float(window_end_x):
+                break
+            if window_start_x is not None and float(block.end_x) < float(window_start_x):
+                continue
+            if tail_start_x is not None and float(block.end_x) >= float(tail_start_x):
+                continue
+            visible_blocks.append(block)
+        estimated_points = int(len(visible_blocks) * 2 + tail_points)
+        error = abs(float(estimated_points - old_target_points - tail_points))
+        if error < best_error:
+            best_error = error
+            best_level = level_index
+            best_blocks = visible_blocks
+            continue
+        if error == best_error and len(visible_blocks) > len(best_blocks):
+            best_level = level_index
+            best_blocks = visible_blocks
+
+    if best_level < 0:
+        best_level = 0
+        best_blocks = []
+
+    x_old, y_old = _blocks_to_trend_arrays(best_blocks, method="weighted_mean")
+    if len(x_old) == 0 and len(tail_x) == 0:
+        empty = np.empty(0, dtype=np.float64)
+        return empty, empty, int(best_level), 0, 0
+    if len(x_old) == 0:
+        display_x = tail_x
+        display_y = tail_y
+    elif len(tail_x) == 0:
+        display_x = x_old
+        display_y = y_old
+    else:
+        display_x = np.concatenate((x_old, tail_x))
+        display_y = np.concatenate((y_old, tail_y))
+    return display_x, display_y, int(best_level), int(len(best_blocks)), int(0)
+
+
+def _build_windowed_metric_envelope_arrays(
+    cache: MetricDisplayCache,
+    *,
+    target_points: int,
+    window_start_x: float | None,
+    window_end_x: float | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+    if not cache.levels:
+        empty = np.empty(0, dtype=np.float64)
+        return empty, empty, empty, empty, 0
+    tail_x, tail_y = _recent_tail_arrays(cache)
+    if len(tail_x) > 0:
+        if window_start_x is not None:
+            tail_visible = tail_x >= float(window_start_x)
+            tail_x = tail_x[tail_visible]
+            tail_y = tail_y[tail_visible]
+        if window_end_x is not None:
+            tail_visible = tail_x <= float(window_end_x)
+            tail_x = tail_x[tail_visible]
+            tail_y = tail_y[tail_visible]
+    tail_points = int(len(tail_x))
+    tail_start_x = float(tail_x[0]) if tail_points > 0 else None
+    if tail_points > int(target_points):
+        tail_x = tail_x[-int(target_points):]
+        tail_y = tail_y[-int(target_points):]
+        tail_points = int(len(tail_x))
+        tail_start_x = float(tail_x[0]) if tail_points > 0 else None
+
+    old_target_points = max(int(target_points) - tail_points, 1)
+    best_blocks: list[MetricCompressionBlock] = []
+    best_level = -1
+    best_error = float("inf")
+    for level_index, level in enumerate(cache.levels):
+        if not level:
+            continue
+        visible_blocks: list[MetricCompressionBlock] = []
+        for block in level:
+            if window_end_x is not None and float(block.start_x) > float(window_end_x):
+                break
+            if window_start_x is not None and float(block.end_x) < float(window_start_x):
+                continue
+            if tail_start_x is not None and float(block.end_x) >= float(tail_start_x):
+                continue
+            visible_blocks.append(block)
+        estimated_points = int(len(visible_blocks) * 2 + tail_points)
+        error = abs(float(estimated_points - old_target_points - tail_points))
+        if error < best_error:
+            best_error = error
+            best_level = level_index
+            best_blocks = visible_blocks
+            continue
+        if error == best_error and len(visible_blocks) > len(best_blocks):
+            best_level = level_index
+            best_blocks = visible_blocks
+
+    if best_level < 0:
+        best_level = 0
+        best_blocks = []
+
+    min_x, min_y, max_x, max_y = _blocks_to_envelope_line_arrays(best_blocks)
+    if len(min_x) == 0 and len(tail_x) == 0:
+        empty = np.empty(0, dtype=np.float64)
+        return empty, empty, empty, empty, 0
+    if len(tail_x) > 0:
+        if len(min_x) == 0:
+            min_x = tail_x
+            min_y = tail_y
+            max_x = tail_x
+            max_y = tail_y
+        else:
+            min_x = np.concatenate((min_x, tail_x))
+            min_y = np.concatenate((min_y, tail_y))
+            max_x = np.concatenate((max_x, tail_x))
+            max_y = np.concatenate((max_y, tail_y))
+    return min_x, min_y, max_x, max_y, int(best_level)
 
 
 def _tail_to_trend_arrays(
@@ -932,6 +1086,7 @@ class PlotViewCache:
         )
         self._heatmap_view_cache: OrderedDict[tuple[object, ...], tuple[np.ndarray, np.ndarray]] = OrderedDict()
         self._absolute_metric_view_cache: OrderedDict[tuple[object, ...], MetricDisplayCache] = OrderedDict()
+        self._rolling_metric_view_cache: OrderedDict[tuple[object, ...], MetricDisplayCache] = OrderedDict()
         self._absolute_heatmap_view_cache: OrderedDict[tuple[object, ...], dict[str, object]] = OrderedDict()
         self._live_absolute_metric_cache: dict[str, MetricDisplayCache] = {}
         self._live_absolute_archive_read_count = 0
@@ -947,6 +1102,7 @@ class PlotViewCache:
         )
         self._heatmap_view_cache.clear()
         self._absolute_metric_view_cache.clear()
+        self._rolling_metric_view_cache.clear()
         self._absolute_heatmap_view_cache.clear()
         self._live_absolute_metric_cache.clear()
 
@@ -1534,6 +1690,183 @@ class PlotViewCache:
             self._absolute_metric_view_cache.popitem(last=False)
         return display_x, display_y
 
+    def rolling_metric_view(
+        self,
+        token: tuple[object, ...],
+        x: np.ndarray,
+        y: np.ndarray,
+        *,
+        view_x_min: float | None = None,
+        view_x_max: float | None = None,
+        view_width_px: float | None = None,
+        enabled: bool = True,
+        minimum_points: int = 128,
+        oversample: float = 1.0,
+        default_points: int = 2048,
+        recent_tail_points: int | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        target_points = _target_points_from_width(
+            view_width_px,
+            enabled=enabled,
+            minimum_points=minimum_points,
+            oversample=oversample,
+            default_points=default_points,
+        )
+        cache_key = _absolute_metric_cache_key(token, target_points)
+        source_revision = token[3] if len(token) > 3 else None
+        x = np.asarray(x, dtype=np.float64)
+        y = np.asarray(y, dtype=np.float64)
+        if len(x) == 0 or len(y) == 0:
+            result = (x[:0], y[:0])
+            cache = self._rolling_metric_view_cache.get(cache_key)
+            if not isinstance(cache, MetricDisplayCache):
+                cache = MetricDisplayCache()
+            cache.source_revision = int(source_revision or 0)
+            cache.source_len = 0
+            cache.target_points = int(target_points)
+            cache.x_display = result[0]
+            cache.y_display = result[1]
+            cache.levels = []
+            cache.last_mode = "empty"
+            cache.display_output_revision += 1
+            cache.last_display_signature = _display_signature(cache.x_display, cache.y_display)
+            self._rolling_metric_view_cache[cache_key] = cache
+            return result
+
+        if not enabled:
+            clipped_x, clipped_y = downsample_metric_series_for_view(
+                x,
+                y,
+                view_x_min=view_x_min,
+                view_x_max=view_x_max,
+                view_width_px=view_width_px,
+                enabled=False,
+                minimum_points=minimum_points,
+                oversample=oversample,
+                default_points=default_points,
+            )
+            cache = self._rolling_metric_view_cache.get(cache_key)
+            if not isinstance(cache, MetricDisplayCache):
+                cache = MetricDisplayCache()
+            cache.source_revision = int(source_revision or 0)
+            cache.source_len = len(x)
+            cache.target_points = int(target_points)
+            cache.x_display = clipped_x
+            cache.y_display = clipped_y
+            cache.levels = []
+            cache.last_mode = "disabled"
+            cache.display_output_revision += 1
+            cache.last_display_signature = _display_signature(cache.x_display, cache.y_display)
+            self._rolling_metric_view_cache[cache_key] = cache
+            return clipped_x, clipped_y
+
+        cached = self._rolling_metric_view_cache.get(cache_key)
+        if not isinstance(cached, MetricDisplayCache):
+            cached = MetricDisplayCache(target_points=int(target_points))
+            self._rolling_metric_view_cache[cache_key] = cached
+        requested_recent_tail_points = max(
+            int(recent_tail_points) if recent_tail_points is not None else int(getattr(cached, "recent_tail_max_points", 300)),
+            0,
+        )
+        if (
+            cached.source_len == len(x)
+            and cached.target_points == int(target_points)
+            and cached.source_revision == int(source_revision or 0)
+            and cached.last_recent_tail_configured == int(requested_recent_tail_points)
+        ):
+            cached.hit_count += 1
+            cached.last_mode = "hit"
+            self._rolling_metric_view_cache.move_to_end(cache_key)
+            if cached.last_window_start_x == (float(view_x_min) if view_x_min is not None else None) and cached.last_window_end_x == (float(view_x_max) if view_x_max is not None else None):
+                return cached.x_display, cached.y_display
+        else:
+            cached.recent_tail_max_points = int(requested_recent_tail_points)
+            cached.last_recent_tail_configured = int(requested_recent_tail_points)
+            if (
+                cached.source_len > len(x)
+                or cached.source_len < 0
+                or cached.source_revision > int(source_revision or 0)
+                or not cached.levels
+            ):
+                self._rebuild_metric_compression_cache(cached, x, y, target_points=target_points)
+                _set_recent_tail_from_arrays(cached, x, y)
+            else:
+                old_len = int(cached.source_len)
+                self._append_metric_compression_cache(cached, x[old_len:], y[old_len:])
+                cached.target_points = int(target_points)
+                cached.source_revision = int(source_revision or 0)
+                if len(x) > old_len:
+                    tail_x = x[old_len:]
+                    tail_y = y[old_len:]
+                    for tail_x_value, tail_y_value in zip(tail_x, tail_y, strict=False):
+                        _append_recent_tail_point(cached, float(tail_x_value), float(tail_y_value))
+            cached.last_recent_tail_current = int(len(cached.recent_tail_x))
+            cached.last_window_start_x = float(view_x_min) if view_x_min is not None else None
+            cached.last_window_end_x = float(view_x_max) if view_x_max is not None else None
+            assemble_started = perf_counter()
+            display_x, display_y, display_level, old_blocks, overlap_blocks = _build_windowed_metric_arrays(
+                cached,
+                target_points=int(target_points),
+                window_start_x=view_x_min,
+                window_end_x=view_x_max,
+            )
+            cached.last_assemble_ms = (perf_counter() - assemble_started) * 1000.0
+            cached.last_display_level = int(display_level)
+            cached.last_display_blocks = int(old_blocks)
+            cached.last_old_display_blocks = int(old_blocks)
+            cached.last_overlap_blocks_skipped = int(overlap_blocks)
+            cached.last_old_display_points = int(max(len(display_x) - len(cached.recent_tail_x), 0))
+            cached.last_tail_display_points = int(len(cached.recent_tail_x))
+            cached.last_total_display_points = int(len(display_x))
+            cached.last_trend_method = "weighted_mean"
+            signature = _display_signature(display_x, display_y)
+            if signature != cached.last_display_signature:
+                cached.display_output_revision += 1
+                cached.last_display_signature = signature
+            cached.x_display = display_x
+            cached.y_display = display_y
+            cached.target_points = int(target_points)
+            cached.source_revision = int(source_revision or 0)
+            cached.last_mode = "rolling_recompute"
+            cached.last_source_used = "rolling_cache_recompute"
+            cached.last_invalidation_reason = "reuse"
+            self._rolling_metric_view_cache.move_to_end(cache_key)
+            while len(self._rolling_metric_view_cache) > self._max_view_entries:
+                self._rolling_metric_view_cache.popitem(last=False)
+            return display_x, display_y
+
+        display_x, display_y, display_level, old_blocks, overlap_blocks = _build_windowed_metric_arrays(
+            cached,
+            target_points=int(target_points),
+            window_start_x=view_x_min,
+            window_end_x=view_x_max,
+        )
+        cached.last_window_start_x = float(view_x_min) if view_x_min is not None else None
+        cached.last_window_end_x = float(view_x_max) if view_x_max is not None else None
+        cached.last_display_level = int(display_level)
+        cached.last_display_blocks = int(old_blocks)
+        cached.last_old_display_blocks = int(old_blocks)
+        cached.last_overlap_blocks_skipped = int(overlap_blocks)
+        cached.last_old_display_points = int(max(len(display_x) - len(cached.recent_tail_x), 0))
+        cached.last_tail_display_points = int(len(cached.recent_tail_x))
+        cached.last_total_display_points = int(len(display_x))
+        cached.last_trend_method = "weighted_mean"
+        signature = _display_signature(display_x, display_y)
+        if signature != cached.last_display_signature:
+            cached.display_output_revision += 1
+            cached.last_display_signature = signature
+        cached.x_display = display_x
+        cached.y_display = display_y
+        cached.target_points = int(target_points)
+        cached.source_revision = int(source_revision or 0)
+        cached.last_mode = "rolling_recompute"
+        cached.last_source_used = "rolling_cache_recompute"
+        cached.last_invalidation_reason = "reuse"
+        self._rolling_metric_view_cache.move_to_end(cache_key)
+        while len(self._rolling_metric_view_cache) > self._max_view_entries:
+            self._rolling_metric_view_cache.popitem(last=False)
+        return display_x, display_y
+
     def absolute_metric_envelope_view(
         self,
         token: tuple[object, ...],
@@ -1573,6 +1906,49 @@ class PlotViewCache:
         cached.last_total_display_points = int(len(min_x))
         return min_x, min_y, max_x, max_y
 
+    def rolling_metric_envelope_view(
+        self,
+        token: tuple[object, ...],
+        x: np.ndarray,
+        y: np.ndarray,
+        *,
+        view_x_min: float | None = None,
+        view_x_max: float | None = None,
+        view_width_px: float | None = None,
+        enabled: bool = True,
+        minimum_points: int = 128,
+        oversample: float = 1.0,
+        default_points: int = 2048,
+        recent_tail_points: int | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+        target_points = _target_points_from_width(
+            view_width_px,
+            enabled=enabled,
+            minimum_points=minimum_points,
+            oversample=oversample,
+            default_points=default_points,
+        )
+        cache_key = _absolute_metric_cache_key(token, target_points)
+        cached = self._rolling_metric_view_cache.get(cache_key)
+        if not isinstance(cached, MetricDisplayCache):
+            return None
+        if not cached.levels:
+            return None
+        if recent_tail_points is not None:
+            cached.recent_tail_max_points = max(int(recent_tail_points), 0)
+        cached.last_recent_tail_configured = int(max(cached.recent_tail_max_points, 0))
+        cached.last_recent_tail_current = int(len(cached.recent_tail_x))
+        min_x, min_y, max_x, max_y, display_level = _build_windowed_metric_envelope_arrays(
+            cached,
+            target_points=int(target_points),
+            window_start_x=view_x_min,
+            window_end_x=view_x_max,
+        )
+        cached.last_display_level = int(display_level)
+        cached.last_tail_display_points = int(len(cached.recent_tail_x))
+        cached.last_total_display_points = int(len(min_x))
+        return min_x, min_y, max_x, max_y
+
     def absolute_metric_display_state(self, token: tuple[object, ...]) -> tuple[object, ...] | None:
         for cache_key, cached in reversed(list(self._absolute_metric_view_cache.items())):
             if not isinstance(cached, MetricDisplayCache):
@@ -1592,10 +1968,16 @@ class PlotViewCache:
 
     def metric_cache_debug_snapshot(self) -> dict[str, object]:
         modes: dict[str, object] = {}
-        for key, cached in self._absolute_metric_view_cache.items():
-            if isinstance(cached, MetricDisplayCache):
+        for prefix, cache_map in (
+            ("absolute", self._absolute_metric_view_cache),
+            ("rolling", self._rolling_metric_view_cache),
+        ):
+            for key, cached in cache_map.items():
+                if not isinstance(cached, MetricDisplayCache):
+                    continue
                 level_counts = [len(level) for level in cached.levels]
-                modes[str(key)] = {
+                modes[f"{prefix}:{key}"] = {
+                    "view_mode": prefix,
                     "raw_block_size": int(cached.raw_block_size),
                     "combine_factor": int(cached.combine_factor),
                     "recent_tail_points_configured": int(cached.recent_tail_max_points),
@@ -1634,6 +2016,8 @@ class PlotViewCache:
                     "display_assembly_ms": cached.last_assemble_ms,
                     "assemble_ms": cached.last_assemble_ms,
                     "full_rebuild_ms": cached.last_full_rebuild_ms,
+                    "window_start_x": cached.last_window_start_x,
+                    "window_end_x": cached.last_window_end_x,
                 }
         return modes
 

@@ -36,6 +36,8 @@ def _metric_absolute_cache_modes_text(window: Any) -> str:
         return "-"
     if not isinstance(cache_info, dict) or not cache_info:
         return "-"
+    active_view_mode = str(getattr(window, "_sensorgram_view_mode", "absolute") or "absolute").strip().lower()
+    active_prefix = "rolling:" if active_view_mode == "rolling" else "absolute:"
     def _int_field(entry: dict[str, object], key: str, default: int = 0) -> int:
         value = entry.get(key, default)
         try:
@@ -52,11 +54,15 @@ def _metric_absolute_cache_modes_text(window: Any) -> str:
     for entry in cache_info.values():
         if not isinstance(entry, dict):
             continue
+        if str(entry.get("view_mode", "")).strip().lower() != active_view_mode:
+            continue
         total_hit += int(entry.get("hits", 0) or 0)
         total_incremental += int(entry.get("incremental", 0) or 0)
         total_rebuild += int(entry.get("rebuilds", 0) or 0)
     for key, entry in cache_info.items():
         if not isinstance(entry, dict):
+            continue
+        if not str(key).startswith(active_prefix):
             continue
         if latest_entry is None:
             latest_key = str(key)
@@ -101,7 +107,7 @@ def _metric_absolute_cache_modes_text(window: Any) -> str:
         f"assemble={_float_text(latest_entry, 'display_assembly_ms')}",
         f"rebuild={_float_text(latest_entry, 'full_rebuild_ms')}",
     ]
-    return f"hit={total_hit} incremental={total_incremental} rebuild={total_rebuild} | latest " + " ".join(latest_parts)
+    return f"mode={active_view_mode} hit={total_hit} incremental={total_incremental} rebuild={total_rebuild} | latest " + " ".join(latest_parts)
 
 
 def _sensorgram_x_domain_text(window: Any) -> str:
@@ -467,6 +473,7 @@ class SessionDiagnosticsSnapshot:
     metric_plot_disabled_fast_path_text: str
     metric_setdata_calls_text: str
     metric_setdata_skips_text: str
+    metric_cache_modes_text: str
     metric_absolute_cache_modes_text: str
     metric_absolute_source_text: str
     metric_absolute_invalidation_text: str
@@ -652,7 +659,8 @@ class SessionDiagnosticsSnapshot:
         metric_plot_disabled_fast_path_text = "yes" if bool(getattr(window, "_last_metric_plot_disabled_fast_path", False)) else "no"
         metric_setdata_calls_text = _queue_depth_max_text(getattr(window, "_last_metric_render_setdata_calls", None))
         metric_setdata_skips_text = _queue_depth_max_text(getattr(window, "_last_metric_render_setdata_skips", None))
-        metric_absolute_cache_modes_text = _metric_absolute_cache_modes_text(window)
+        metric_cache_modes_text = _metric_absolute_cache_modes_text(window)
+        metric_absolute_cache_modes_text = metric_cache_modes_text
         metric_absolute_source_text = str(getattr(window, "_last_metric_absolute_source_text", "-"))
         metric_absolute_invalidation_text = str(getattr(window, "_last_metric_absolute_cache_invalidation_text", "-"))
         metric_absolute_rebuild_count_text = str(getattr(window, "_last_metric_absolute_cache_rebuild_count_text", "-"))
@@ -894,6 +902,7 @@ class SessionDiagnosticsSnapshot:
             metric_plot_disabled_fast_path_text=metric_plot_disabled_fast_path_text,
             metric_setdata_calls_text=metric_setdata_calls_text,
             metric_setdata_skips_text=metric_setdata_skips_text,
+            metric_cache_modes_text=metric_cache_modes_text,
             metric_absolute_cache_modes_text=metric_absolute_cache_modes_text,
             metric_absolute_source_text=metric_absolute_source_text,
             metric_absolute_invalidation_text=metric_absolute_invalidation_text,
@@ -946,6 +955,7 @@ class SessionDiagnosticsSnapshot:
 def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list[str]:
     lines = [
         "App",
+        f"  Diagnostics: {snapshot.diagnostics.startup_summary_text()}",
         f"  Refresh rate: {snapshot.display_rate_text}",
         f"  Simulation output rate: {snapshot.simulation_rate_text}",
         f"  Recent refresh: {snapshot.actual_refresh_text}",
@@ -1039,7 +1049,7 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         f"  Metric render setData: {snapshot.metric_render_setdata_text}",
         f"  Metric plot disabled fast path: {snapshot.metric_plot_disabled_fast_path_text}",
         f"  Metric setData calls/skips: {snapshot.metric_setdata_calls_text}/{snapshot.metric_setdata_skips_text}",
-        f"  Metric absolute cache modes: {snapshot.metric_absolute_cache_modes_text}",
+        f"  Metric cache modes: {snapshot.metric_cache_modes_text}",
         f"  Live absolute source used: {snapshot.metric_absolute_source_text}",
         f"  Live absolute invalidation reason: {snapshot.metric_absolute_invalidation_text}",
         f"  Live absolute cache rebuild count: {snapshot.metric_absolute_rebuild_count_text}",

@@ -5,25 +5,33 @@ from pathlib import Path
 
 import pyqtgraph as pg
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSize, QSignalBlocker, pyqtSignal
+from PyQt6.QtGui import QColor, QIcon
 from PyQt6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
     QComboBox,
     QDialog,
-    QDialogButtonBox,
+    QColorDialog,
     QFrame,
     QFormLayout,
     QHBoxLayout,
+    QGridLayout,
     QLineEdit,
     QLabel,
     QVBoxLayout,
     QSlider,
+    QDoubleSpinBox,
     QSpinBox,
+    QSizePolicy,
+    QToolButton,
+    QTabWidget,
     QWidget,
 )
 
 from lspr_app.gui.ui_helpers import make_compact_spinbox
+from lspr_app.gui.main_window_processing import normalize_sensorgram_metric_name, sensorgram_metric_order
+from lspr_app.gui.icon_helpers import flow_tabler_icon, tint_tabler_icon
 
 
 @dataclass(frozen=True)
@@ -32,11 +40,91 @@ class _LineModeOption:
     step_mode: str | None
 
 
+@dataclass(frozen=True)
+class MetricModeSelectionState:
+    visible_modes: frozenset[str]
+    primary_mode: str
+
+
+@dataclass(frozen=True)
+class MetricModeRow:
+    mode: str
+    color_button: QToolButton
+    checkbox: QCheckBox
+    star_label: QToolButton
+    label: QLabel
+
+
+class MetricColorButton(QToolButton):
+    colorChanged = pyqtSignal(str)
+
+    def __init__(self, color: str, parent=None) -> None:
+        super().__init__(parent)
+        self._color = "#444444"
+        self.setFixedSize(22, 22)
+        self.setAutoRaise(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setToolTip("Pick a custom color for this metric.")
+        self.clicked.connect(self._pick_color)
+        self.set_color(color)
+
+    def color(self) -> str:
+        return self._color
+
+    def set_color(self, color: str) -> None:
+        qcolor = QColor(str(color))
+        if not qcolor.isValid():
+            qcolor = QColor("#444444")
+        self._color = qcolor.name()
+        self.setStyleSheet(
+            "QToolButton {"
+            f" background: {self._color};"
+            " border: 1px solid #666666;"
+            " border-radius: 3px;"
+            " padding: 0px;"
+            " margin: 0px;"
+            " }"
+            "QToolButton:hover { border: 1px solid #d0d0d0; }"
+        )
+        self.setToolTip(f"Metric color: {self._color}. Click to change.")
+
+    def _pick_color(self) -> None:  # pragma: no cover - GUI runtime path
+        selected = QColorDialog.getColor(QColor(self._color), self, "Select metric color")
+        if not selected.isValid():
+            return
+        self.set_color(selected.name())
+        self.colorChanged.emit(self._color)
+
+
+def _make_frameless_icon_button(icon: QIcon, tooltip: str, *, size: int = 28, parent: QWidget | None = None) -> QToolButton:
+    button = QToolButton(parent)
+    button.setAutoRaise(True)
+    button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setFixedSize(size, size)
+    button.setIcon(icon)
+    button.setIconSize(QSize(max(size - 6, 12), max(size - 6, 12)))
+    button.setToolTip(tooltip)
+    button.setStyleSheet(
+        "QToolButton {"
+        " border: none;"
+        " background: transparent;"
+        " padding: 0px;"
+        " margin: 0px;"
+        " }"
+        "QToolButton:hover { background: rgba(127, 127, 127, 0.10); }"
+        "QToolButton:pressed { background: rgba(127, 127, 127, 0.18); }"
+    )
+    return button
+
+
 _LINE_MODE_OPTIONS: tuple[_LineModeOption, ...] = (
     _LineModeOption("Linear", None),
     _LineModeOption("Step left", "left"),
     _LineModeOption("Step right", "right"),
     _LineModeOption("Step center", "center"),
+    _LineModeOption("Spline", "spline"),
 )
 
 _TIME_AXIS_OPTIONS: tuple[tuple[str, str], ...] = (
@@ -46,9 +134,10 @@ _TIME_AXIS_OPTIONS: tuple[tuple[str, str], ...] = (
 
 _ROLLING_WINDOW_OPTIONS: tuple[tuple[str, float], ...] = (
     ("1 min", 60.0),
-    ("10 min", 600.0),
+    ("5 min", 300.0),
+    ("15 min", 900.0),
     ("30 min", 1800.0),
-    ("1 h", 3600.0),
+    ("60 min", 3600.0),
 )
 
 _BUFFER_OPTIONS: tuple[tuple[str, float | None], ...] = (
@@ -72,33 +161,279 @@ def _normalize_line_mode(value: object | None) -> str | None:
     if not isinstance(value, str):
         return None
     normalized = value.strip().lower()
-    return normalized if normalized in {"left", "right", "center"} else None
+    return normalized if normalized in {"left", "right", "center", "spline"} else None
+
+
+class MetricModeSelector(QWidget):
+    selectionChanged = pyqtSignal(object, str)
+
+    def __init__(self, window) -> None:
+        super().__init__(window)
+        self._window = window
+        self._ordered_modes = sensorgram_metric_order(window)
+        if not self._ordered_modes:
+            self._ordered_modes = ["smoothed_max"]
+        self._rows: dict[str, MetricModeRow] = {}
+        self._state = self._make_valid_state(self._ordered_modes[:1], self._ordered_modes[0])
+        self._build_ui()
+
+    def _make_valid_state(self, visible_modes, primary_mode: str) -> MetricModeSelectionState:
+        visible_set = {mode for mode in self._ordered_modes if mode in {normalize_sensorgram_metric_name(name) for name in visible_modes}}
+        if not visible_set:
+            fallback = self._ordered_modes[0]
+            return MetricModeSelectionState(frozenset({fallback}), fallback)
+        primary = normalize_sensorgram_metric_name(primary_mode)
+        if primary not in visible_set:
+            primary = next(mode for mode in self._ordered_modes if mode in visible_set)
+        return MetricModeSelectionState(frozenset(visible_set), primary)
+
+    def _build_ui(self) -> None:
+        layout = QGridLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(2)
+        layout.setColumnStretch(0, 0)
+        layout.setColumnStretch(1, 0)
+        layout.setColumnStretch(2, 0)
+        layout.setColumnStretch(3, 0)
+
+        metric_header = QLabel("Metric")
+        metric_header.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(metric_header, 0, 0)
+
+        color_header = QLabel("Color")
+        color_header.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(color_header, 0, 1)
+
+        show_header = QLabel("Show")
+        show_header.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(show_header, 0, 2)
+
+        primary_header = QLabel("Primary")
+        primary_header.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(primary_header, 0, 3)
+
+        labels = getattr(self._window, "TRACE_METRIC_LABELS", {})
+        descriptions = getattr(self._window, "TRACE_METRIC_DESCRIPTIONS", {})
+        colors = getattr(self._window, "TRACE_METRIC_COLORS", {})
+        for row_index, mode in enumerate(self._ordered_modes, start=1):
+            metric_color = str(colors.get(mode, "#444444"))
+
+            label = QLabel(labels.get(mode, mode))
+            label.setMinimumHeight(22)
+            label.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+            description = descriptions.get(mode, mode)
+            label.setToolTip(f"{mode}: {description}")
+            label.setStyleSheet(f"color: {metric_color};")
+
+            color_button = MetricColorButton(metric_color)
+            color_button.colorChanged.connect(lambda color, metric=mode: self._on_color_changed(metric, color))
+
+            star_label = QToolButton()
+            star_label.setFixedSize(22, 22)
+            star_label.setAutoRaise(True)
+            star_label.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            star_label.setText("\u2606")
+            star_label.setCursor(Qt.CursorShape.PointingHandCursor)
+            star_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            star_label.setToolTip("Set this visible metric as the primary metric.")
+            star_label.setStyleSheet(
+                "QToolButton { background: transparent; border: none; padding: 0px; margin: 0px; color: #8a8a8a; }"
+            )
+            star_label.clicked.connect(lambda _checked=False, metric=mode: self._on_primary_clicked(metric))
+
+            checkbox = QCheckBox()
+            checkbox.setFixedHeight(22)
+            checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
+            checkbox.setToolTip("Include this metric in the sensorgram display and statistics.")
+            checkbox.setStyleSheet(
+                f"QCheckBox {{ color: {metric_color}; }}"
+                f"QCheckBox::indicator {{ width: 12px; height: 12px; border: 1px solid {metric_color}; border-radius: 2px; }}"
+                f"QCheckBox::indicator:unchecked {{ background: transparent; }}"
+                f"QCheckBox::indicator:checked {{ background: {metric_color}; }}"
+            )
+            checkbox.toggled.connect(lambda checked, metric=mode: self._on_visible_toggled(metric, checked))
+
+            self._rows[mode] = MetricModeRow(
+                mode=mode,
+                color_button=color_button,
+                checkbox=checkbox,
+                star_label=star_label,
+                label=label,
+            )
+            layout.addWidget(label, row_index, 0)
+            layout.addWidget(color_button, row_index, 1, alignment=Qt.AlignmentFlag.AlignHCenter)
+            layout.addWidget(checkbox, row_index, 2, alignment=Qt.AlignmentFlag.AlignHCenter)
+            layout.addWidget(star_label, row_index, 3, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self.setLayout(layout)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._sync_widgets()
+
+    def state(self) -> MetricModeSelectionState:
+        return MetricModeSelectionState(frozenset(self._state.visible_modes), self._state.primary_mode)
+
+    def set_state(self, visible_modes, primary_mode: str) -> None:
+        self._state = self._make_valid_state(visible_modes, primary_mode)
+        self._sync_widgets()
+
+    def _show_status(self, message: str) -> None:
+        status_label = getattr(self._window, "status_label", None)
+        if status_label is not None:
+            status_label.setText(message)
+
+    def _validate_state(self) -> None:
+        self._state = self._make_valid_state(self._state.visible_modes, self._state.primary_mode)
+
+    def _sync_widgets(self) -> None:
+        visible_modes = set(self._state.visible_modes)
+        primary_mode = self._state.primary_mode
+        for mode, row in self._rows.items():
+            visible = mode in visible_modes
+            primary = mode == primary_mode
+            with QSignalBlocker(row.checkbox), QSignalBlocker(row.star_label):
+                row.checkbox.setChecked(visible)
+                row.star_label.setText("\u2605" if primary else "\u2606")
+                row.star_label.setEnabled(visible)
+                row.star_label.setToolTip(
+                    "Primary metric" if primary else "Set this visible metric as the primary metric."
+                )
+            metric_color = getattr(self._window, "TRACE_METRIC_COLORS", {}).get(mode, "#444444")
+            description = getattr(self._window, "TRACE_METRIC_DESCRIPTIONS", {}).get(mode, mode)
+            row.color_button.set_color(metric_color)
+            row.label.setStyleSheet(f"font-weight: 700; color: {metric_color};" if primary else f"color: {metric_color};")
+            row.label.setToolTip(f"{mode}: {description}")
+            row.star_label.setStyleSheet(
+                "QToolButton { background: transparent; border: none; padding: 0px; margin: 0px; "
+                f"color: {'#f2c94c' if primary else '#8a8a8a'}; font-size: 16px; font-weight: 700; }}"
+            )
+
+    def _emit_state_changed(self) -> None:
+        self.selectionChanged.emit(frozenset(self._state.visible_modes), self._state.primary_mode)
+
+    def _on_visible_toggled(self, mode: str, checked: bool) -> None:
+        mode = normalize_sensorgram_metric_name(mode)
+        visible = set(self._state.visible_modes)
+        primary = self._state.primary_mode
+        if checked:
+            if mode in visible:
+                self._sync_widgets()
+                return
+            self._state = self._make_valid_state(visible | {mode}, primary)
+            self._sync_widgets()
+            self._emit_state_changed()
+            return
+        if mode not in visible:
+            self._sync_widgets()
+            return
+        if mode == primary:
+            self._show_status("Select another primary metric before hiding this one.")
+            self._sync_widgets()
+            return
+        if len(visible) <= 1:
+            self._sync_widgets()
+            return
+        visible.discard(mode)
+        self._state = self._make_valid_state(visible, primary)
+        self._sync_widgets()
+        self._emit_state_changed()
+
+    def _on_primary_clicked(self, mode: str) -> None:
+        mode = normalize_sensorgram_metric_name(mode)
+        if mode not in self._state.visible_modes:
+            self._sync_widgets()
+            return
+        if mode == self._state.primary_mode:
+            return
+        self._state = self._make_valid_state(self._state.visible_modes, mode)
+        self._sync_widgets()
+        self._emit_state_changed()
+
+    def _on_color_changed(self, mode: str, color: str) -> None:
+        window = self._window
+        if hasattr(window, "_set_sensorgram_metric_color"):
+            window._set_sensorgram_metric_color(mode, color, save=False)
+        else:
+            colors = getattr(window, "TRACE_METRIC_COLORS", None)
+            if isinstance(colors, dict):
+                colors[normalize_sensorgram_metric_name(mode)] = str(color)
+            time_plot_colors = getattr(window, "SENSORGRAM_TIME_PLOT_COLORS", None)
+            if isinstance(time_plot_colors, dict):
+                time_plot_colors[normalize_sensorgram_metric_name(mode)] = str(color)
+            if hasattr(window, "_apply_metric_color_styles"):
+                window._apply_metric_color_styles()
+            if hasattr(window, "_request_deferred_ui_refresh"):
+                window._request_deferred_ui_refresh(trace_plot=True, summary=True)
+        self._sync_widgets()
 
 
 class SensorgramPlotSettingsDialog(QDialog):
     def __init__(self, window) -> None:
         super().__init__(window)
         self._window = window
-        self.setWindowTitle("Sensorgram plot settings")
+        self.setWindowTitle("Sensogram settings")
         self.setModal(True)
         self.setMinimumWidth(430)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Close,
+        layout = QVBoxLayout()
+        tabs = QTabWidget(self)
+        tabs.setDocumentMode(False)
+        tabs.setStyleSheet(
+            "QTabWidget::pane {"
+            "  border: 1px solid #3a4250;"
+            "  border-radius: 8px;"
+            "  background: #10151d;"
+            "}"
+            "QTabBar::tab {"
+            "  background: #1a2029;"
+            "  color: #d7dde7;"
+            "  border: 1px solid #3a4250;"
+            "  border-bottom: none;"
+            "  padding: 8px 14px;"
+            "  margin-right: 4px;"
+            "  border-top-left-radius: 8px;"
+            "  border-top-right-radius: 8px;"
+            "}"
+            "QTabBar::tab:selected {"
+            "  background: #10151d;"
+            "  color: #ffffff;"
+            "  margin-bottom: -1px;"
+            "}"
+            "QTabBar::tab:!selected {"
+            "  margin-top: 2px;"
+            "}"
+        )
+        tabs.addTab(self._build_live_tab(), "Live mode")
+        tabs.addTab(self._build_preview_tab(), "Preview mode")
+        tabs.setCurrentIndex(0)
+        layout.addWidget(tabs)
+
+        buttons_row = QHBoxLayout()
+        buttons_row.setContentsMargins(0, 0, 0, 0)
+        buttons_row.setSpacing(8)
+        buttons_row.addStretch(1)
+
+        self.apply_icon_button = _make_frameless_icon_button(
+            tint_tabler_icon(flow_tabler_icon("checkbox"), QColor("#50d890")),
+            "Apply settings",
+            size=30,
             parent=self,
         )
-        apply_button = buttons.button(QDialogButtonBox.StandardButton.Apply)
-        close_button = buttons.button(QDialogButtonBox.StandardButton.Close)
-        apply_button.setDefault(False)
-        apply_button.setAutoDefault(False)
-        close_button.setDefault(False)
-        close_button.setAutoDefault(False)
-        apply_button.clicked.connect(self.apply_settings)
-        buttons.rejected.connect(self.reject)
+        self.apply_icon_button.clicked.connect(self.apply_settings)
+        buttons_row.addWidget(self.apply_icon_button)
 
-        layout = QVBoxLayout()
-        layout.addWidget(self._build_single_page())
-        layout.addWidget(buttons)
+        self.close_icon_button = _make_frameless_icon_button(
+            tint_tabler_icon(flow_tabler_icon("x"), QColor("#e46a6a")),
+            "Close dialog",
+            size=30,
+            parent=self,
+        )
+        self.close_icon_button.clicked.connect(self.reject)
+        buttons_row.addWidget(self.close_icon_button)
+
+        buttons_widget = QWidget(self)
+        buttons_widget.setLayout(buttons_row)
+        layout.addWidget(buttons_widget)
         self.setLayout(layout)
 
     def _add_section_header(self, layout: QVBoxLayout, title: str) -> None:
@@ -111,13 +446,20 @@ class SensorgramPlotSettingsDialog(QDialog):
         separator.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(separator)
 
-    def _build_single_page(self) -> QWidget:
+    def _build_live_tab(self) -> QWidget:
         page = QWidget(self)
         outer = QVBoxLayout(page)
-        outer.setSpacing(10)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(12)
+        outer.setContentsMargins(12, 12, 12, 12)
 
-        self._add_section_header(outer, "Common")
+        self.metric_mode_selector = MetricModeSelector(self._window)
+        self.metric_mode_selector.set_state(
+            getattr(self._window, "_sensorgram_metric_visible_modes", {"smoothed_max"}),
+            getattr(self._window, "_sensorgram_metric_primary_mode", "smoothed_max"),
+        )
+        self.metric_mode_selector.selectionChanged.connect(self._on_metric_mode_selection_changed)
+        outer.addWidget(self.metric_mode_selector)
+
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
@@ -128,72 +470,46 @@ class SensorgramPlotSettingsDialog(QDialog):
         )
         form.addRow("Anti-aliasing", self.antialias_check)
 
-        self.time_axis_mode_combo = QComboBox()
-        current_time_axis_mode = str(getattr(self._window, "_sensorgram_time_axis_mode", "elapsed") or "elapsed").strip().lower()
-        if current_time_axis_mode not in {"elapsed", "clock"}:
-            current_time_axis_mode = "elapsed"
+        line_style_row = QHBoxLayout()
+        line_style_row.setContentsMargins(0, 0, 0, 0)
+        line_style_row.setSpacing(8)
+
+        interp_label = QLabel("Interpolation")
+        interp_label.setToolTip("Choose how the sensorgram line is rendered.")
+        line_style_row.addWidget(interp_label)
+
+        self.line_mode_combo = QComboBox()
+        for option in _LINE_MODE_OPTIONS:
+            self.line_mode_combo.addItem(option.label, option.step_mode)
+        current_step_mode = _normalize_line_mode(getattr(self._window, "_sensorgram_line_step_mode", None))
         current_index = 0
-        for index, (label, mode) in enumerate(_TIME_AXIS_OPTIONS):
-            self.time_axis_mode_combo.addItem(label, mode)
-            if mode == current_time_axis_mode:
+        for index in range(self.line_mode_combo.count()):
+            if self.line_mode_combo.itemData(index) == current_step_mode:
                 current_index = index
-        self.time_axis_mode_combo.setCurrentIndex(current_index)
-        self.time_axis_mode_combo.setToolTip(
-            "Choose whether the sensorgram x-axis shows elapsed time since start or local clock time. The underlying data remain elapsed seconds."
+                break
+        self.line_mode_combo.setCurrentIndex(current_index)
+        self.line_mode_combo.setToolTip(
+            "Choose how points are connected in the sensorgram line: straight, stepped, or spline-smoothed."
         )
-        form.addRow("Time axis", self.time_axis_mode_combo)
+        line_style_row.addWidget(self.line_mode_combo)
 
-        points_row = QHBoxLayout()
-        points_row.setContentsMargins(0, 0, 0, 0)
-        points_row.setSpacing(8)
+        width_label = QLabel("Width")
+        width_label.setToolTip("Line thickness for the sensorgram curves.")
+        line_style_row.addWidget(width_label)
 
-        points_title = QLabel("Points rendered:")
-        points_title.setToolTip(
-            "Limit the amount of data drawn in the sensorgram display. The plot will keep the newest points and compress older history as needed."
-        )
-        points_row.addWidget(points_title)
-
-        metric_label = QLabel("Metric")
-        metric_label.setToolTip("Display-point cap for the metric time plot.")
-        points_row.addWidget(metric_label)
-        self.metric_display_points_spin = QSpinBox()
-        make_compact_spinbox(self.metric_display_points_spin)
-        self.metric_display_points_spin.setRange(16, 100000)
-        self.metric_display_points_spin.setValue(int(getattr(self._window, "_plot_display_points", 512)))
-        self.metric_display_points_spin.setToolTip(
-            "Maximum number of points kept visible in the metric time plot."
-        )
-        points_row.addWidget(self.metric_display_points_spin)
-
-        heatmap_label = QLabel("Heatmap")
-        heatmap_label.setToolTip("Display-point cap for the heatmap row history.")
-        points_row.addWidget(heatmap_label)
-        self.heatmap_rows_spin = QSpinBox()
-        make_compact_spinbox(self.heatmap_rows_spin)
-        self.heatmap_rows_spin.setRange(16, 100000)
-        self.heatmap_rows_spin.setValue(int(getattr(self._window, "_sensorgram_heatmap_history_max_rows", 800)))
-        self.heatmap_rows_spin.setToolTip(
-            "Maximum number of heatmap rows kept in the displayed history."
-        )
-        points_row.addWidget(self.heatmap_rows_spin)
-        points_row.addStretch(1)
-
-        points_row_widget = QWidget(self)
-        points_row_widget.setLayout(points_row)
-        form.addRow(points_row_widget)
-
-        self.rolling_window_combo = QComboBox()
-        current_window_s = float(getattr(self._window, "_trace_display_window_s", 60.0))
-        current_index = 0
-        for index, (label, seconds) in enumerate(_ROLLING_WINDOW_OPTIONS):
-            self.rolling_window_combo.addItem(label, seconds)
-            if abs(float(seconds) - current_window_s) < abs(float(_ROLLING_WINDOW_OPTIONS[current_index][1]) - current_window_s):
-                current_index = index
-        self.rolling_window_combo.setCurrentIndex(current_index)
-        self.rolling_window_combo.setToolTip(
-            "Set the shared rolling window length. This controls the visible time span when the sensorgram is in rolling mode."
-        )
-        form.addRow("Rolling window", self.rolling_window_combo)
+        self.line_width_spin = QDoubleSpinBox()
+        self.line_width_spin.setRange(0.5, 10.0)
+        self.line_width_spin.setSingleStep(0.1)
+        self.line_width_spin.setDecimals(1)
+        self.line_width_spin.setSuffix(" px")
+        self.line_width_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.line_width_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.line_width_spin.setValue(float(getattr(self._window, "_sensorgram_line_width_px", 2.2)))
+        self.line_width_spin.setToolTip("Set the thickness of the sensorgram line in pixels.")
+        self.line_width_spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.line_width_spin.setFixedWidth(62)
+        line_style_row.addWidget(self.line_width_spin)
+        line_style_row.addStretch(1)
 
         self.follow_latest_buffer_combo = QComboBox()
         current_buffer_fraction = getattr(self._window, "_metric_autoscale_follow_latest_buffer_fraction", 0.05)
@@ -216,9 +532,13 @@ class SensorgramPlotSettingsDialog(QDialog):
                 current_index = index
         self.follow_latest_buffer_combo.setCurrentIndex(current_index)
         self.follow_latest_buffer_combo.setToolTip(
-            "Keep a blank buffer on the right side of the plot so new data does not immediately touch the edge."
+            "Keep a blank buffer on the right side of the sensorgram plot so new data does not immediately touch the edge."
         )
         form.addRow("Right buffer", self.follow_latest_buffer_combo)
+
+        autoscale_row = QHBoxLayout()
+        autoscale_row.setContentsMargins(0, 0, 0, 0)
+        autoscale_row.setSpacing(8)
 
         self.autoscale_throttle_combo = QComboBox()
         current_throttle_s = getattr(self._window, "_metric_autoscale_min_interval_s", 1.0)
@@ -233,38 +553,40 @@ class SensorgramPlotSettingsDialog(QDialog):
                 current_index = index
         self.autoscale_throttle_combo.setCurrentIndex(current_index)
         self.autoscale_throttle_combo.setToolTip(
-            "Limit how often the plot may rescale its axes. Higher throttling reduces redraw churn, but the view follows new data more slowly."
+            "Limit how often the sensorgram plot may rescale its axes. Higher throttling reduces redraw churn, but the view follows new data more slowly."
         )
-        form.addRow("Autoscale throttling", self.autoscale_throttle_combo)
+        autoscale_row.addWidget(QLabel("Throttling"))
+        autoscale_row.addWidget(self.autoscale_throttle_combo)
 
-        self.skip_tiny_changes_check = QCheckBox("Skip tiny changes")
+        self.skip_tiny_changes_check = QCheckBox("Gate")
         self.skip_tiny_changes_check.setChecked(
             bool(getattr(self._window, "_metric_autoscale_skip_tiny_changes_enabled", True))
         )
         self.skip_tiny_changes_check.setToolTip(
-            "Skip autoscale updates when the visible range change is very small. This reduces unnecessary redraws."
+            "Skip autoscale updates when the visible range change is very small. This reduces unnecessary redraws in both display modes."
         )
-        form.addRow("Autoscale gate", self.skip_tiny_changes_check)
+        autoscale_row.addSpacing(12)
+        autoscale_row.addWidget(self.skip_tiny_changes_check)
+        autoscale_row.addStretch(1)
 
-        outer.addLayout(form)
+        autoscale_row_widget = QWidget(self)
+        autoscale_row_widget.setLayout(autoscale_row)
+        form.addRow("Autoscale", autoscale_row_widget)
 
-        self._add_section_header(outer, "Metric")
         metric_form = QFormLayout()
         metric_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        self.line_mode_combo = QComboBox()
-        for option in _LINE_MODE_OPTIONS:
-            self.line_mode_combo.addItem(option.label, option.step_mode)
-        current_step_mode = _normalize_line_mode(getattr(self._window, "_sensorgram_line_step_mode", None))
-        current_index = 0
-        for index in range(self.line_mode_combo.count()):
-            if self.line_mode_combo.itemData(index) == current_step_mode:
-                current_index = index
-                break
-        self.line_mode_combo.setCurrentIndex(current_index)
-        self.line_mode_combo.setToolTip(
-            "Choose how points are connected in the plot: straight line, or stepped between samples."
+        points_row = QHBoxLayout()
+        points_row.setContentsMargins(0, 0, 0, 0)
+        points_row.setSpacing(12)
+
+        self.metric_display_points_spin = QSpinBox()
+        make_compact_spinbox(self.metric_display_points_spin)
+        self.metric_display_points_spin.setRange(16, 100000)
+        self.metric_display_points_spin.setValue(int(getattr(self._window, "_plot_display_points", 512)))
+        self.metric_display_points_spin.setToolTip(
+            "Maximum number of points kept visible in the sensorgram time plot."
         )
-        metric_form.addRow("Line interpolation", self.line_mode_combo)
+        points_row.addWidget(self.metric_display_points_spin)
 
         self.recent_tail_points_spin = QSpinBox()
         make_compact_spinbox(self.recent_tail_points_spin)
@@ -274,16 +596,27 @@ class SensorgramPlotSettingsDialog(QDialog):
             int(getattr(self._window, "_sensorgram_compression_recent_tail_points", 300))
         )
         self.recent_tail_points_spin.setToolTip(
-            "Number of newest metric points kept uncompressed in the absolute sensorgram plot. Older data is shown using compression."
+            "Number of newest points kept uncompressed in the absolute sensorgram plot. Older data is shown using compression."
         )
-        metric_form.addRow("Recent raw tail points", self.recent_tail_points_spin)
+        points_row.addSpacing(12)
+        points_row.addWidget(QLabel("Live tail"))
+        points_row.addWidget(self.recent_tail_points_spin)
+        points_row.addStretch(1)
 
-        self.envelope_overlay_check = QCheckBox("Show envelope overlay")
+        points_row_widget = QWidget(self)
+        points_row_widget.setLayout(points_row)
+        metric_form.addRow("Display points", points_row_widget)
+
+        line_style_row_widget = QWidget(self)
+        line_style_row_widget.setLayout(line_style_row)
+        metric_form.addRow("Line", line_style_row_widget)
+
+        self.envelope_overlay_check = QCheckBox("Show")
         self.envelope_overlay_check.setChecked(
             bool(getattr(self._window, "_sensorgram_metric_envelope_overlay_enabled", False))
         )
         self.envelope_overlay_check.setToolTip(
-            "Draw the min/max envelope as a faint secondary layer over the trend line. The main trace still uses the compression trend, not the envelope."
+            "Draw the min/max envelope as a faint secondary layer over the trend line."
         )
         envelope_row = QHBoxLayout()
         envelope_row.setContentsMargins(0, 0, 0, 0)
@@ -311,28 +644,70 @@ class SensorgramPlotSettingsDialog(QDialog):
         envelope_row_widget.setLayout(envelope_row)
         metric_form.addRow("Envelope overlay", envelope_row_widget)
 
-        note = QLabel("These settings affect the sensorgram time plot and the spectrum line plot display.")
-        note.setWordWrap(True)
-        metric_form.addRow("", note)
-
         outer.addLayout(metric_form)
+        outer.addLayout(form)
+        return page
+
+    def _build_preview_tab(self) -> QWidget:
+        page = QWidget(self)
+        outer = QVBoxLayout(page)
+        outer.setSpacing(12)
+        outer.setContentsMargins(12, 12, 12, 12)
+
+        preview_form = QFormLayout()
+        preview_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+        heatmap_points_row = QHBoxLayout()
+        heatmap_points_row.setContentsMargins(0, 0, 0, 0)
+        heatmap_points_row.setSpacing(8)
+
+        heatmap_label = QLabel("Heatmap")
+        heatmap_label.setToolTip("Display-point cap for the preview heatmap row history.")
+        heatmap_points_row.addWidget(heatmap_label)
+
+        self.heatmap_rows_spin = QSpinBox()
+        make_compact_spinbox(self.heatmap_rows_spin)
+        self.heatmap_rows_spin.setRange(16, 100000)
+        self.heatmap_rows_spin.setValue(int(getattr(self._window, "_sensorgram_heatmap_history_max_rows", 800)))
+        self.heatmap_rows_spin.setToolTip("Maximum number of heatmap rows kept in the preview history.")
+        heatmap_points_row.addWidget(self.heatmap_rows_spin)
+        heatmap_points_row.addStretch(1)
+
+        heatmap_points_row_widget = QWidget(self)
+        heatmap_points_row_widget.setLayout(heatmap_points_row)
+        preview_form.addRow("Points rendered", heatmap_points_row_widget)
+
+        preview_note = QLabel("These settings affect the sensorgram heatmap preview display.")
+        preview_note.setWordWrap(True)
+        preview_form.addRow("", preview_note)
+
+        outer.addLayout(preview_form)
+        outer.addStretch(1)
         return page
 
     def apply_settings(self) -> None:
         window = self._window
+        selector = getattr(self, "metric_mode_selector", None)
+        if selector is not None:
+            state = selector.state()
+            if hasattr(window, "_apply_sensorgram_metric_selection"):
+                window._apply_sensorgram_metric_selection(state.visible_modes, state.primary_mode, save=False)
+            else:
+                window._sensorgram_metric_visible_modes = set(state.visible_modes)
+                window._sensorgram_metric_primary_mode = state.primary_mode
+                window._trace_stats_metric_name = state.primary_mode
         window._plot_antialias_enabled = bool(self.antialias_check.isChecked())
         pg.setConfigOptions(antialias=window._plot_antialias_enabled)
-        window._sensorgram_time_axis_mode = str(self.time_axis_mode_combo.currentData() or "elapsed")
         window._plot_display_points = int(self.metric_display_points_spin.value())
+        window._sensorgram_line_step_mode = _normalize_line_mode(self.line_mode_combo.currentData())
+        window._sensorgram_line_width_px = max(float(self.line_width_spin.value()), 0.5)
         window._sensorgram_heatmap_history_max_rows = int(self.heatmap_rows_spin.value())
-        window._trace_display_window_s = float(self.rolling_window_combo.currentData())
         buffer_fraction = self.follow_latest_buffer_combo.currentData()
         window._metric_autoscale_follow_latest_buffer_fraction = 0.0 if buffer_fraction is None else float(buffer_fraction)
         throttle_s = self.autoscale_throttle_combo.currentData()
         window._metric_autoscale_min_interval_s = float(throttle_s or 0.0)
         window._metric_autoscale_throttle_mode = str(self.autoscale_throttle_combo.currentText())
         window._metric_autoscale_skip_tiny_changes_enabled = bool(self.skip_tiny_changes_check.isChecked())
-        window._sensorgram_line_step_mode = _normalize_line_mode(self.line_mode_combo.currentData())
         window._sensorgram_compression_recent_tail_points = max(int(self.recent_tail_points_spin.value()), 0)
         window._sensorgram_metric_envelope_overlay_enabled = bool(self.envelope_overlay_check.isChecked())
         window._sensorgram_metric_envelope_overlay_alpha = max(int(self.envelope_overlay_alpha_slider.value()), 0)
@@ -359,15 +734,31 @@ class SensorgramPlotSettingsDialog(QDialog):
                 window._apply_sensorgram_display_style()
             except Exception:
                 pass
+        if hasattr(window, "_apply_metric_color_styles"):
+            try:
+                window._apply_metric_color_styles()
+            except Exception:
+                pass
         if hasattr(window, "_apply_sensorgram_time_axis_mode"):
             try:
                 window._apply_sensorgram_time_axis_mode(redraw=False)
             except Exception:
                 pass
-        if hasattr(window, "_schedule_ui_state_persist"):
+        if hasattr(window, "_save_ui_state"):
+            window._save_ui_state()
+        elif hasattr(window, "_schedule_ui_state_persist"):
             window._schedule_ui_state_persist()
         if hasattr(window, "_request_deferred_ui_refresh"):
             window._request_deferred_ui_refresh(trace_plot=True, telemetry=True, live_estimate=True, summary=True)
+
+    def _on_metric_mode_selection_changed(self, visible_modes, primary_mode: str) -> None:
+        window = self._window
+        if hasattr(window, "_apply_sensorgram_metric_selection"):
+            window._apply_sensorgram_metric_selection(visible_modes, primary_mode, save=False)
+        else:
+            window._sensorgram_metric_visible_modes = set(visible_modes)
+            window._sensorgram_metric_primary_mode = primary_mode
+            window._trace_stats_metric_name = primary_mode
 
     def accept(self) -> None:
         self.apply_settings()
@@ -385,3 +776,4 @@ class SensorgramPlotSettingsDialog(QDialog):
 def show_sensorgram_plot_settings_dialog_for(window) -> None:
     dialog = SensorgramPlotSettingsDialog(window)
     dialog.exec()
+

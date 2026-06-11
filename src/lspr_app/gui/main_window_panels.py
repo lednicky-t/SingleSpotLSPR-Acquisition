@@ -58,11 +58,11 @@ def build_simulation_page(window) -> QWidget:
     simulation_group = QGroupBox("Simulation display model")
     simulation_layout = QGridLayout()
     simulation_layout.setHorizontalSpacing(8)
-    simulation_layout.setVerticalSpacing(6)
+    simulation_layout.setVerticalSpacing(3)
 
     simulation_info_row = QHBoxLayout()
     simulation_info_row.setContentsMargins(0, 0, 0, 0)
-    simulation_info_row.setSpacing(4)
+    simulation_info_row.setSpacing(2)
     simulation_info_row.addWidget(
         make_info_button(
             "Synthetic spectrum controls used in Simulation mode. "
@@ -192,22 +192,6 @@ def build_processing_group(window) -> QGroupBox:
     poly_label = QLabel("Poly order")
     poly_label.setToolTip("Polynomial order used when polynomial fitting is selected.")
     processing_layout.addRow(poly_label, poly_row)
-
-    metric_label = QLabel("Metric mode")
-    metric_label.setToolTip("Choose which spectrum tracking metric is shown in the metric plot and summary.")
-    processing_layout.addRow(metric_label, window.metric_mode_combo)
-
-    trace_label = QLabel("Metric")
-    trace_label.setToolTip("Toggle individual metric traces on and off.")
-    trace_row = QVBoxLayout()
-    trace_row.setContentsMargins(0, 0, 0, 0)
-    trace_row.setSpacing(2)
-    trace_row.addWidget(window.trace_max_check)
-    trace_row.addWidget(window.trace_centroid_check)
-    trace_row.addWidget(window.trace_poly_check)
-    trace_row.addWidget(window.trace_gaussian_check)
-    trace_row.addStretch(1)
-    processing_layout.addRow(trace_label, trace_row)
 
     processing_buttons = QHBoxLayout()
     processing_buttons.setSpacing(6)
@@ -376,6 +360,6 @@ def _add_sim_row(
 
 def _add_sim_section_header(layout: QGridLayout, row: int, text: str) -> None:
     header = QLabel(text)
-    header.setStyleSheet("font-weight: 700; margin-top: 4px; margin-bottom: 2px;")
+    header.setStyleSheet("font-weight: 700; margin-top: 2px; margin-bottom: 0px;")
     header.setToolTip(text)
     layout.addWidget(header, row, 0, 1, 3)

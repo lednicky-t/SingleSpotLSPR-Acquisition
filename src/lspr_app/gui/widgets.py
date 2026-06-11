@@ -7,7 +7,7 @@ import pyqtgraph as pg
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import QLabel, QSplitter, QSplitterHandle, QToolButton, QVBoxLayout, QSizePolicy, QWidget
+from PyQt6.QtWidgets import QLabel, QLayout, QSplitter, QSplitterHandle, QToolButton, QVBoxLayout, QSizePolicy, QWidget
 
 
 class SeparatorStyle:
@@ -200,6 +200,9 @@ class CollapsibleSection(QWidget):
         layout.addWidget(self._toggle)
         layout.addWidget(self._content)
         self.setLayout(layout)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(self.sizeHint().height())
         self._content.setVisible(expanded)
 
     def is_expanded(self) -> bool:
@@ -214,6 +217,8 @@ class CollapsibleSection(QWidget):
     def _set_expanded(self, expanded: bool) -> None:
         self._toggle.setIcon(self._make_chevron_icon(expanded))
         self._content.setVisible(expanded)
+        self.setMinimumHeight(self.sizeHint().height())
+        self.updateGeometry()
 
     def _make_chevron_icon(self, expanded: bool) -> QIcon:
         pixmap = QPixmap(12, 12)

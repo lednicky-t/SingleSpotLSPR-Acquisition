@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import QApplication
 from time import perf_counter
 
 from lspr_app.domain.pump_plan import to_core_experiment_plan
+from lspr_app.gui.main_window_processing import normalize_sensorgram_metric_name, sensorgram_metric_order, sync_legacy_metric_widgets_from_state
 from lspr_app.storage.app_config import save_acquisition_state, save_window_ui_state
 from lspr_core import LAUNCH_PROFILE_CONTROL_EDITOR, LAUNCH_PROFILE_FULL, LAUNCH_PROFILE_SIMULATION
 
@@ -34,14 +35,18 @@ def restore_ui_state(window) -> None:
     metric_autoscale_min_interval_s = ui_state.get("metric_autoscale_min_interval_s")
     metric_autoscale_throttle_mode = ui_state.get("metric_autoscale_throttle_mode")
     metric_autoscale_skip_tiny_changes_enabled = ui_state.get("metric_autoscale_skip_tiny_changes_enabled")
+    sensorgram_metric_colors = ui_state.get("sensorgram_metric_colors")
     sensorgram_metric_envelope_overlay_enabled = ui_state.get("sensorgram_metric_envelope_overlay_enabled")
     sensorgram_metric_envelope_overlay_alpha = ui_state.get("sensorgram_metric_envelope_overlay_alpha")
     sensorgram_line_mode = ui_state.get("sensorgram_line_mode")
+    sensorgram_line_width_px = ui_state.get("sensorgram_line_width_px")
     plot_antialias_enabled = ui_state.get("plot_antialias_enabled")
     sensorgram_heatmap_history_max_rows = ui_state.get("sensorgram_heatmap_history_max_rows")
     sensorgram_frozen = ui_state.get("sensorgram_frozen")
     left_controls_visible = ui_state.get("left_controls_visible")
     sensorgram_visible = ui_state.get("sensorgram_visible")
+    sensorgram_visible_modes = ui_state.get("sensorgram_visible_modes")
+    sensorgram_primary_mode = ui_state.get("sensorgram_primary_mode")
     trace_stats_metric_name = ui_state.get("trace_stats_metric_name")
     residual_y_range = ui_state.get("residual_y_range")
     residual_visible = bool(ui_state.get("show_residual", False))
@@ -107,7 +112,43 @@ def restore_ui_state(window) -> None:
         window._left_controls_scroll.setVisible(left_controls_visible)
     if isinstance(sensorgram_visible, bool):
         window._sensorgram_block.setVisible(sensorgram_visible)
-    if isinstance(trace_stats_metric_name, str) and trace_stats_metric_name:
+    have_new_metric_state = False
+    if isinstance(sensorgram_visible_modes, list):
+        visible = [normalize_sensorgram_metric_name(mode) for mode in sensorgram_visible_modes]
+        ordered = [mode for mode in sensorgram_metric_order(window) if mode in set(visible)]
+        if ordered:
+            window._sensorgram_metric_visible_modes = set(ordered)
+            have_new_metric_state = True
+    if isinstance(sensorgram_primary_mode, str):
+        primary = normalize_sensorgram_metric_name(sensorgram_primary_mode)
+        window._sensorgram_metric_primary_mode = primary
+        have_new_metric_state = True
+    if hasattr(window, "_sensorgram_metric_visible_modes") and hasattr(window, "_sensorgram_metric_primary_mode"):
+        visible = [mode for mode in sensorgram_metric_order(window) if mode in set(window._sensorgram_metric_visible_modes)]
+        if not visible:
+            visible = [sensorgram_metric_order(window)[0]]
+        primary = normalize_sensorgram_metric_name(getattr(window, "_sensorgram_metric_primary_mode", visible[0]))
+        if primary not in visible:
+            primary = visible[0]
+        window._sensorgram_metric_visible_modes = set(visible)
+        window._sensorgram_metric_primary_mode = primary
+        window._trace_stats_metric_name = primary
+        sync_legacy_metric_widgets_from_state(window)
+        if hasattr(window, "_update_trace_stats"):
+            window._update_trace_stats()
+    if isinstance(sensorgram_metric_colors, dict):
+        metric_colors = getattr(window, "TRACE_METRIC_COLORS", None)
+        sensorgram_colors = getattr(window, "SENSORGRAM_TIME_PLOT_COLORS", None)
+        if isinstance(metric_colors, dict):
+            for mode in sensorgram_metric_order(window):
+                color = sensorgram_metric_colors.get(mode)
+                if isinstance(color, str) and color:
+                    metric_colors[mode] = color
+                    if isinstance(sensorgram_colors, dict):
+                        sensorgram_colors[mode] = color
+        if hasattr(window, "_apply_metric_color_styles"):
+            window._apply_metric_color_styles()
+    if not have_new_metric_state and isinstance(trace_stats_metric_name, str) and trace_stats_metric_name:
         window._trace_stats_metric_name = trace_stats_metric_name
     if isinstance(sensorgram_view_mode, str):
         window._sensorgram_view_mode = window._normalize_sensorgram_view_mode(sensorgram_view_mode)
@@ -161,8 +202,14 @@ def restore_ui_state(window) -> None:
                     band.setVisible(bool(window._sensorgram_metric_envelope_overlay_enabled))
     if isinstance(sensorgram_metric_envelope_overlay_alpha, (int, float)):
         window._sensorgram_metric_envelope_overlay_alpha = max(min(int(sensorgram_metric_envelope_overlay_alpha), 100), 0)
+        if hasattr(window, "_apply_metric_color_styles"):
+            window._apply_metric_color_styles()
     if isinstance(sensorgram_line_mode, str):
         window._sensorgram_line_step_mode = window._normalize_sensorgram_line_mode(sensorgram_line_mode)
+    if isinstance(sensorgram_line_width_px, (int, float)) and float(sensorgram_line_width_px) > 0:
+        window._sensorgram_line_width_px = max(float(sensorgram_line_width_px), 0.5)
+        if hasattr(window, "_apply_metric_color_styles"):
+            window._apply_metric_color_styles()
     if isinstance(plot_antialias_enabled, (bool, str)):
         if isinstance(plot_antialias_enabled, bool):
             window._plot_antialias_enabled = bool(plot_antialias_enabled)
@@ -251,6 +298,10 @@ def save_ui_state(window) -> None:
             "metric_autoscale_skip_tiny_changes_enabled": bool(
                 getattr(window, "_metric_autoscale_skip_tiny_changes_enabled", True)
             ),
+            "sensorgram_metric_colors": {
+                mode: str(getattr(window, "TRACE_METRIC_COLORS", {}).get(mode, "#444444"))
+                for mode in sensorgram_metric_order(window)
+            },
             "sensorgram_metric_envelope_overlay_enabled": bool(
                 getattr(window, "_sensorgram_metric_envelope_overlay_enabled", False)
             ),
@@ -258,11 +309,20 @@ def save_ui_state(window) -> None:
                 getattr(window, "_sensorgram_metric_envelope_overlay_alpha", 16)
             ),
             "sensorgram_line_mode": "linear" if getattr(window, "_sensorgram_line_step_mode", None) is None else str(window._sensorgram_line_step_mode),
+            "sensorgram_line_width_px": float(getattr(window, "_sensorgram_line_width_px", 2.2)),
             "plot_antialias_enabled": bool(getattr(window, "_plot_antialias_enabled", False)),
             "sensorgram_heatmap_history_max_rows": int(getattr(window, "_sensorgram_heatmap_history_max_rows", 800)),
             "sensorgram_frozen": bool(getattr(window, "_sensorgram_frozen", False)),
             "left_controls_visible": window._left_controls_scroll.isVisible(),
             "sensorgram_visible": window._sensorgram_block.isVisible(),
+            "sensorgram_visible_modes": [
+                mode
+                for mode in sensorgram_metric_order(window)
+                if mode in set(getattr(window, "_sensorgram_metric_visible_modes", set()))
+            ],
+            "sensorgram_primary_mode": normalize_sensorgram_metric_name(
+                getattr(window, "_sensorgram_metric_primary_mode", getattr(window, "_trace_stats_metric_name", "smoothed_max"))
+            ),
             "trace_stats_metric_name": window._trace_stats_metric_name,
             "residual_y_range": residual_y_range,
             "collapsible_sections": collapsible_section_state(window),
@@ -327,6 +387,12 @@ def acquisition_state_payload(window) -> dict[str, object]:
         "live_rate_hz": float(window.live_rate_spin.value()),
         "show_residual": bool(window.show_residual_button.isChecked()),
         "freeze_plots": bool(window.freeze_plots_button.isChecked()),
+        "session_summary_font_size_pt": float(getattr(window.session_summary, "_panel_font_size_pt", 8.0))
+        if getattr(window, "session_summary", None) is not None
+        else 8.0,
+        "log_terminal_font_size_pt": float(getattr(window.log_terminal, "_panel_font_size_pt", 8.0))
+        if getattr(window, "log_terminal", None) is not None
+        else 8.0,
         "acquisition": {
             "integration_time_ms": float(acquisition.integration_time_ms),
             "averages": int(acquisition.averages),
@@ -499,6 +565,18 @@ def apply_acquisition_state_to_widgets(window, state: dict[str, object]) -> None
 
         window._update_dark_reference_button_icons()
         window._update_window_mode_label()
+
+        session_font_size = state.get("session_summary_font_size_pt")
+        if isinstance(session_font_size, (int, float)):
+            apply_font_size = getattr(window, "_apply_text_widget_font_size", None)
+            if callable(apply_font_size):
+                apply_font_size(window.session_summary, float(session_font_size), minimum=7.0, maximum=16.0)
+
+        log_font_size = state.get("log_terminal_font_size_pt")
+        if isinstance(log_font_size, (int, float)):
+            apply_font_size = getattr(window, "_apply_text_widget_font_size", None)
+            if callable(apply_font_size):
+                apply_font_size(window.log_terminal, float(log_font_size), minimum=7.0, maximum=16.0)
     finally:
         window._suspend_acquisition_autosave = False
     schedule_acquisition_state_persist(window)

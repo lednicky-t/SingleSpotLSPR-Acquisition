@@ -5,12 +5,13 @@ import ctypes
 import os
 import socket
 import sys
+import traceback
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from time import perf_counter
 
-from PyQt6.QtCore import QObject, QEasingCurve, QLockFile, QPropertyAnimation, QStandardPaths, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QEasingCurve, QLockFile, QPropertyAnimation, QStandardPaths, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QLinearGradient, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
@@ -89,6 +90,143 @@ def _recover_stale_lock(lock: QLockFile) -> bool:
         pass
 
     return lock.tryLock(0)
+
+
+class StartupSuspiciousWidgetTracer(QObject):
+    _IGNORED_WIDGET_CLASSES = {"MainWindow", "StartupSplash", "QMenu", "ViewBoxMenu"}
+    _SUSPICIOUS_WIDGET_CLASSES = {"QWidget", "QFrame", "QPushButton", "QToolButton", "QComboBox", "QLabel", "QScrollArea"}
+
+    def __init__(self, logger: logging.Logger, enabled: bool) -> None:
+        super().__init__()
+        self._logger = logger
+        self._enabled = bool(enabled)
+
+    def eventFilter(self, obj, event) -> bool:  # pragma: no cover - GUI runtime path
+        if not self._enabled or not isinstance(obj, QWidget):
+            return False
+        if not obj.isWindow():
+            return False
+
+        event_type = event.type()
+        if event_type not in {
+            QEvent.Type.Show,
+            QEvent.Type.Hide,
+            QEvent.Type.Close,
+            QEvent.Type.ShowToParent,
+            QEvent.Type.Polish,
+        }:
+            return False
+
+        if not self._is_suspicious_widget(obj):
+            return False
+
+        self._log_widget(obj, event_type)
+        return False
+
+    def _is_suspicious_widget(self, widget: QWidget) -> bool:
+        class_name = widget.__class__.__name__
+        if class_name in self._IGNORED_WIDGET_CLASSES:
+            return False
+        if class_name not in self._SUSPICIOUS_WIDGET_CLASSES:
+            return False
+        try:
+            object_name = widget.objectName().strip()
+        except Exception:
+            object_name = ""
+        try:
+            title = widget.windowTitle().strip()
+        except Exception:
+            title = ""
+        try:
+            parent = widget.parentWidget()
+        except Exception:
+            parent = None
+
+        geometry_suspicious = False
+        try:
+            geo = widget.geometry()
+            geometry_suspicious = (geo.width(), geo.height()) in {
+                (640, 480),
+                (100, 30),
+                (34, 34),
+            }
+        except Exception:
+            geometry_suspicious = False
+
+        return (
+            parent is None
+            or not object_name
+            or object_name.startswith("qt_")
+            or not title
+            or geometry_suspicious
+        )
+
+    def _format_parent_info(self, widget: QWidget) -> tuple[str, str]:
+        try:
+            parent = widget.parentWidget()
+        except Exception:
+            parent = None
+        if parent is None:
+            return "-", "-"
+
+        try:
+            parent_text = (
+                f"{parent.__class__.__name__}(objectName={parent.objectName()!r}, "
+                f"title={parent.windowTitle()!r}, visible={parent.isVisible()}, window={parent.isWindow()})"
+            )
+        except Exception:
+            parent_text = parent.__class__.__name__
+        chain: list[str] = [parent_text]
+        depth = 0
+        while depth < 5:
+            try:
+                parent = parent.parentWidget()
+            except Exception:
+                parent = None
+            if not isinstance(parent, QWidget):
+                break
+            try:
+                chain.append(
+                    f"{parent.__class__.__name__}(objectName={parent.objectName()!r}, "
+                    f"title={parent.windowTitle()!r}, visible={parent.isVisible()}, window={parent.isWindow()})"
+                )
+            except Exception:
+                chain.append(parent.__class__.__name__)
+            depth += 1
+        return chain[0], " -> ".join(chain)
+
+    def _log_widget(self, widget: QWidget, event_type: QEvent.Type) -> None:
+        try:
+            geo = widget.geometry()
+            frame = widget.frameGeometry()
+            parent_text, parent_chain = self._format_parent_info(widget)
+            try:
+                object_name = widget.objectName()
+            except Exception:
+                object_name = ""
+            try:
+                title = widget.windowTitle()
+            except Exception:
+                title = ""
+            message = (
+                "Suspicious startup widget | "
+                f"event={event_type.name} | "
+                f"class={widget.__class__.__name__} | "
+                f"objectName={object_name!r} | "
+                f"title={title!r} | "
+                f"visible={widget.isVisible()} | "
+                f"window={widget.isWindow()} | "
+                f"flags=0x{int(getattr(widget.windowFlags(), 'value', widget.windowFlags())):x} | "
+                f"geo=({geo.x()},{geo.y()},{geo.width()},{geo.height()}) | "
+                f"frame=({frame.x()},{frame.y()},{frame.width()},{frame.height()}) | "
+                f"parent={parent_text} | "
+                f"parent_chain={parent_chain}"
+            )
+            if event_type == QEvent.Type.Show:
+                message = f"{message}\n{''.join(traceback.format_stack(limit=16))}"
+            self._logger.info(message)
+        except Exception as exc:
+            self._logger.warning(f"Suspicious startup widget trace failed: {exc}")
 
 
 class StartupProgressBar(QProgressBar):
@@ -406,7 +544,8 @@ def discover_pump():
     return None
 
 
-def _attach_startup_file_logging() -> logging.Handler | None:
+def _attach_startup_file_logging() -> tuple[logging.Handler | None, DiagnosticsConfig]:
+    diagnostics = DiagnosticsConfig.from_env()
     project_destination = str(load_app_setting("recording_project_destination", "") or "").strip()
     experiment_name = str(load_app_setting("recording_experiment_name", "") or "").strip()
     try:
@@ -417,24 +556,33 @@ def _attach_startup_file_logging() -> logging.Handler | None:
             suffix=".log",
         )
     except Exception:
-        return None
+        return None, diagnostics
 
     handler = logging.FileHandler(log_path, encoding="utf-8")
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s %(message)s", "%H:%M:%S"))
-    apply_diagnostic_info_filter(handler, DiagnosticsConfig.from_env())
+    apply_diagnostic_info_filter(handler, diagnostics)
 
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
+    root_logger.setLevel(int(diagnostics.file_log_min_level))
     root_logger.addHandler(handler)
-    logging.getLogger("lspr_app").setLevel(logging.INFO)
-    logging.getLogger("lspr_app.bootstrap").setLevel(logging.INFO)
-    return handler
+    logging.getLogger("lspr_app").setLevel(int(diagnostics.gui_log_min_level))
+    logging.getLogger("lspr_app.bootstrap").setLevel(int(diagnostics.gui_log_min_level))
+    return handler, diagnostics
 
 
 def main() -> None:
-    file_handler = _attach_startup_file_logging()
+    file_handler, diagnostics = _attach_startup_file_logging()
+    bootstrap_logger = logging.getLogger("lspr_app.bootstrap")
+    bootstrap_level = logging.WARNING if diagnostics.profile == "off" else logging.INFO
+    bootstrap_logger.log(bootstrap_level, diagnostics.startup_summary_text())
     app = QApplication(sys.argv)
+    startup_widget_tracer = StartupSuspiciousWidgetTracer(
+        bootstrap_logger,
+        enabled=bool(diagnostics.debug_timing_enabled or diagnostics.deep_timing_enabled),
+    )
+    app.installEventFilter(startup_widget_tracer)
+    app._startup_widget_tracer = startup_widget_tracer
     app.setApplicationDisplayName("LSPR Acquisition")
     app.setApplicationVersion(__version__)
     apply_base_app_theme(app)
@@ -480,7 +628,9 @@ def main() -> None:
             return
         bootstrap_logger.info("Main window constructed.")
         app.main_window = window
+        window._startup_splash = splash
         window._startup_show_requested_t0 = perf_counter()
+        window.setWindowOpacity(0.0)
         if bool(getattr(window, "_start_maximized", False)):
             window._screen_fitted = True
             window.showMaximized()
@@ -488,9 +638,15 @@ def main() -> None:
             window._fit_window_to_available_screen()
             window._screen_fitted = True
             window.show()
-        splash.close()
 
     def _handle_startup_failure(message: str) -> None:
+        tracer = getattr(app, "_startup_widget_tracer", None)
+        if tracer is not None:
+            try:
+                app.removeEventFilter(tracer)
+            except Exception:
+                pass
+            app._startup_widget_tracer = None
         splash.close()
         QMessageBox.critical(None, "Startup error", message)
         app.quit()

@@ -9,9 +9,9 @@ from PyQt6.QtCore import QRectF
 
 import numpy as np
 import pyqtgraph as pg
+from scipy.interpolate import CubicSpline
 
 from lspr_app.domain.models import Spectrum
-from lspr_app.domain.processing import processing_debug_mode_enabled
 from lspr_app.gui.plot_view_cache import (
     build_heatmap_arrays,
     build_heatmap_history_token,
@@ -24,6 +24,28 @@ from lspr_app.gui.plot_view_cache import (
     sample_absolute_heatmap_rows_for_view,
     select_heatmap_rows_for_view,
 )
+
+
+def _spline_render_series(x: np.ndarray, y: np.ndarray, *, max_points: int = 4096) -> tuple[np.ndarray, np.ndarray]:
+    x_values = np.asarray(x, dtype=np.float64)
+    y_values = np.asarray(y, dtype=np.float64)
+    finite = np.isfinite(x_values) & np.isfinite(y_values)
+    x_values = x_values[finite]
+    y_values = y_values[finite]
+    if len(x_values) < 4:
+        return x_values, y_values
+    unique_x, unique_indices = np.unique(x_values, return_index=True)
+    y_values = y_values[unique_indices]
+    x_values = unique_x
+    if len(x_values) < 4:
+        return x_values, y_values
+    point_count = min(max(len(x_values) * 3, len(x_values)), max_points)
+    if point_count <= len(x_values):
+        return x_values, y_values
+    spline = CubicSpline(x_values, y_values, bc_type="natural")
+    dense_x = np.linspace(float(x_values[0]), float(x_values[-1]), point_count, dtype=np.float64)
+    dense_y = spline(dense_x)
+    return dense_x, np.asarray(dense_y, dtype=np.float64)
 
 
 def _current_metric_view_state(window) -> tuple[float | None, float | None, float | None]:
@@ -195,7 +217,9 @@ def _format_hhmmss(seconds: float) -> str:
 
 def _metric_compression_level_text(window, metric_name: str) -> str:
     plot_cache = getattr(window, "_plot_view_cache", None)
-    if plot_cache is not None and bool(getattr(window, "_live_active", False)) and getattr(window, "_sensorgram_view_mode", "absolute") == "absolute":
+    active_view_mode = str(getattr(window, "_sensorgram_view_mode", "absolute") or "absolute").strip().lower()
+    active_prefix = "rolling:" if active_view_mode == "rolling" else "absolute:"
+    if plot_cache is not None and bool(getattr(window, "_live_active", False)) and active_view_mode == "absolute":
         live_cache_map = getattr(plot_cache, "_live_absolute_metric_cache", None)
         if isinstance(live_cache_map, dict):
             live_cache = live_cache_map.get(str(metric_name or "").strip())
@@ -220,6 +244,8 @@ def _metric_compression_level_text(window, metric_name: str) -> str:
     best_key: str | None = None
     for key, entry in cache_modes.items():
         if not isinstance(entry, dict):
+            continue
+        if not str(key).startswith(active_prefix):
             continue
         key_text = str(key)
         if metric_name and metric_name not in key_text:
@@ -883,7 +909,7 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
         window._last_metric_autoscale_at = perf_counter()
         window._metric_autoscale_pending = False
         window._last_metric_autoscale_ms = (perf_counter() - started) * 1000.0
-        if processing_debug_mode_enabled():
+        if bool(getattr(window, "_deep_timing_enabled", False)):
             elapsed_ms = (perf_counter() - started) * 1000.0
             if elapsed_ms >= 2.0:
                 window._log_throttled(
@@ -1236,6 +1262,37 @@ def render_metric_series(
                         )
                     except Exception:
                         overlay_data = None
+            elif view_mode == "rolling" and not trace_view_locked:
+                display_x, display_y = cache.rolling_metric_view(
+                    series_token,
+                    x,
+                    y,
+                    view_x_min=view_x_min,
+                    view_x_max=view_x_max,
+                    view_width_px=view_width_px,
+                    enabled=downsampling_enabled,
+                    minimum_points=128,
+                    oversample=1.0,
+                    default_points=_metric_display_target_points(window),
+                    recent_tail_points=recent_tail_points,
+                )
+                if overlay_enabled:
+                    try:
+                        overlay_data = cache.rolling_metric_envelope_view(
+                            series_token,
+                            x,
+                            y,
+                            view_x_min=view_x_min,
+                            view_x_max=view_x_max,
+                            view_width_px=view_width_px,
+                            enabled=downsampling_enabled,
+                            minimum_points=128,
+                            oversample=1.0,
+                            default_points=_metric_display_target_points(window),
+                            recent_tail_points=recent_tail_points,
+                        )
+                    except Exception:
+                        overlay_data = None
             else:
                 display_x, display_y = cache.metric_view(
                     series_token,
@@ -1295,8 +1352,11 @@ def render_metric_series(
             _update_metric_envelope_overlay(metric_name, overlay_data)
             continue
         setdata_started = perf_counter()
-        if step_mode is None:
-            curve.setData(display_x, display_y)
+        if step_mode == "spline":
+            spline_x, spline_y = _spline_render_series(display_x, display_y)
+            curve.setData(spline_x, spline_y, stepMode=False)
+        elif step_mode is None:
+            curve.setData(display_x, display_y, stepMode=False)
         else:
             curve.setData(display_x, display_y, stepMode=step_mode)
         setdata_ms += (perf_counter() - setdata_started) * 1000.0
@@ -1355,7 +1415,7 @@ def render_metric_series(
     window._last_metric_render_raw_points = raw_points
     window._last_metric_render_display_points = display_points
     changed = setdata_calls > 0 or setdata_skips > 0
-    if processing_debug_mode_enabled():
+    if bool(getattr(window, "_deep_timing_enabled", False)):
         if elapsed_ms >= 2.0:
             window._log_throttled(
                 "metric_render",
@@ -1653,10 +1713,10 @@ def update_spectrum_stats(window, processed: Spectrum | None, fit: Spectrum | No
 
     peak_mode = window._current_processing_settings().spectrum_tracking_mode
     label_map = {
-        "smoothed_max": "max",
-        "poly_max": "poly",
-        "gaussian_center": "gauss",
-        "centroid": "centroid",
+        "smoothed_max": "S_Max",
+        "poly_max": "P_Max",
+        "gaussian_center": "G_Ctr",
+        "centroid": "Cent",
     }
     analysis = window._get_analysis_metrics(processed, fit)
     primary_peak = analysis.get("primary_peak_nm", float("nan"))
@@ -1684,7 +1744,7 @@ def update_metric_stats(window) -> None:
     started = perf_counter()
     series = window._active_trace_series()
     metric_name = window._trace_stats_metric()
-    metric_label = window.TRACE_METRIC_LABELS.get(metric_name, metric_name)
+    metric_label = getattr(window, "TRACE_METRIC_SHORT_LABELS", {}).get(metric_name, metric_name)
     metric_color = window.TRACE_METRIC_COLORS.get(metric_name, "#444444")
 
     visible_series: list[tuple[np.ndarray, np.ndarray]] = []
@@ -1723,7 +1783,7 @@ def update_metric_stats(window) -> None:
     else:
         x_values, y_values = visible_series[0]
         metric_name = selected_metrics[0] if selected_metrics else metric_name
-        metric_label = window.TRACE_METRIC_LABELS.get(metric_name, metric_name)
+        metric_label = getattr(window, "TRACE_METRIC_SHORT_LABELS", {}).get(metric_name, metric_name)
         metric_color = window.TRACE_METRIC_COLORS.get(metric_name, "#444444")
     if len(x_values) == 0 or len(y_values) == 0:
         window.trace_stats_label.setText(f"{_metric_label_span(metric_label, metric_color)}: - | min/max: - | span: - | dt -")
@@ -1754,7 +1814,7 @@ def update_metric_stats(window) -> None:
             metric_noise = f"{float(np.nanstd(metric_window)):.4f} nm"
         else:
             metric_noise = "-"
-        label = window.TRACE_METRIC_LABELS.get(metric_name, metric_name)
+        label = getattr(window, "TRACE_METRIC_SHORT_LABELS", {}).get(metric_name, metric_name)
         color = window.TRACE_METRIC_COLORS.get(metric_name, "#444444")
         noise_chunks.append(f"{_metric_label_span(label, color)} {escape(metric_noise)}")
 
@@ -1763,12 +1823,12 @@ def update_metric_stats(window) -> None:
         f" | min/max: {y_min:.3f} / {y_max:.3f} nm"
         f" | span: {y_max - y_min:.3f} nm"
         f" | dt {dt_text}"
-        f" | compression: {escape(compression_level_text)}"
+        f" | compr.: {escape(compression_level_text)}"
     )
     window.trace_noise_summary_label.setText(" | ".join(noise_chunks))
     window.trace_cursor_label.setText(window._trace_cursor_text)
 
-    if processing_debug_mode_enabled():
+    if bool(getattr(window, "_deep_timing_enabled", False)):
         elapsed_ms = (perf_counter() - started) * 1000.0
         if elapsed_ms >= 2.0:
             visible_points = 0

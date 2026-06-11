@@ -438,8 +438,8 @@ def _live_processing_worker_main(
                 fit = fit_processed_spectrum(processed, current_settings)
             finished = perf_counter()
             processing_ms = (finished - started) * 1000.0
-            if processing_debug_mode_enabled() and (queue_wait_ms >= 1.0 or processing_ms >= 5.0):
-                logger.info(
+            if processing_debug_mode_enabled() and (queue_wait_ms >= 100.0 or processing_ms >= 100.0):
+                logger.warning(
                     "Live processing latency: wait=%.2f ms | compute=%.2f ms | total=%.2f ms | backlog=%d",
                     queue_wait_ms,
                     processing_ms,

@@ -591,7 +591,8 @@ def append_log_record(window, levelno: int, source: str, text: str) -> None:
     received_events = getattr(window, "_log_received_events", None)
     if received_events is not None:
         received_events.append((perf_counter(), int(levelno), str(source), line))
-    if _is_performance_diagnostic(source, line) and int(levelno) < logging.ERROR:
+    diagnostics = DiagnosticsConfig.from_window(window)
+    if _is_performance_diagnostic(source, line) and int(levelno) < logging.ERROR and not diagnostics.deep_timing_enabled:
         suppressed_events = getattr(window, "_log_perf_suppressed_events", None)
         if suppressed_events is not None:
             suppressed_events.append((perf_counter(), int(levelno), str(source), line))
@@ -653,7 +654,8 @@ def insert_log_record(window, cursor: QTextCursor, levelno: int, source: str, te
 
 
 def append_log_record_now(window, levelno: int, source: str, text: str) -> None:
-    if _is_performance_diagnostic(source, text) and int(levelno) < logging.ERROR:
+    diagnostics = DiagnosticsConfig.from_window(window)
+    if _is_performance_diagnostic(source, text) and int(levelno) < logging.ERROR and not diagnostics.deep_timing_enabled:
         suppressed_events = getattr(window, "_log_perf_suppressed_events", None)
         if suppressed_events is not None:
             suppressed_events.append((perf_counter(), int(levelno), str(source), str(text)))
@@ -741,6 +743,9 @@ def refresh_session_summary_for(window, force: bool = False) -> None:
     text = build_session_panel_html_for(window)
     if force or text != window._last_summary_text:
         target.setHtml(text)
+        apply_font_size = getattr(window, "_apply_text_widget_font_size", None)
+        if callable(apply_font_size):
+            apply_font_size(target, float(getattr(target, "_panel_font_size_pt", 8.0)), minimum=7.0, maximum=16.0)
         window._last_summary_text = text
         scrollbar = target.verticalScrollBar()
         if stay_at_bottom:
@@ -767,6 +772,9 @@ def refresh_session_statistics_for(window, force: bool = False) -> None:
     text = build_session_panel_html_for(window)
     if force or text != window._last_session_stats_text:
         target.setHtml(text)
+        apply_font_size = getattr(window, "_apply_text_widget_font_size", None)
+        if callable(apply_font_size):
+            apply_font_size(target, float(getattr(target, "_panel_font_size_pt", 8.0)), minimum=7.0, maximum=16.0)
         window._last_session_stats_text = text
         scrollbar = target.verticalScrollBar()
         if stay_at_bottom:
@@ -816,6 +824,10 @@ def build_session_statistics_text_for(window) -> str:
 
 def append_session_stats_log_snapshot_for(window, text: str | None = None) -> None:
     if not getattr(window, "_measurement_active", False) and not getattr(window, "_session_stats_recording_active", False):
+        return
+    if not bool(getattr(window, "_session_stats_recording_enabled_by_default", False)) and not bool(
+        getattr(window, "_session_stats_recording_active", False)
+    ):
         return
     log = getattr(window, "_session_stats_log", None)
     if log is None:

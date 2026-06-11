@@ -146,6 +146,8 @@ def _sample_runtime_drift(window: Any) -> RuntimeDriftSample:
 def capture_runtime_drift_sample_for(window) -> None:
     if getattr(window, "_closing", False):
         return
+    if not bool(getattr(window, "_runtime_drift_probe_enabled", True)):
+        return
     sample = _sample_runtime_drift(window)
     samples = getattr(window, "_runtime_drift_samples", None)
     if not isinstance(samples, list):
@@ -270,6 +272,10 @@ def _top_growth_contributors(first: RuntimeDriftSample, latest: RuntimeDriftSamp
 
 
 def build_runtime_drift_lines_for(window) -> list[str]:
+    if not bool(getattr(window, "_runtime_drift_probe_enabled", True)):
+        return [
+            "  Diagnostics profile has runtime drift probe disabled.",
+        ]
     samples = list(getattr(window, "_runtime_drift_samples", []) or [])
     interval_ms = int(getattr(window, "_runtime_drift_probe_interval_ms", _DEFAULT_PROBE_INTERVAL_MS))
     if not samples:

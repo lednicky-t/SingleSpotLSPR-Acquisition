@@ -69,7 +69,7 @@ def _queue_size_safe(queue_obj) -> int | None:
 
 
 def _log_live_timing(window, key: str, message: str) -> None:
-    if not processing_debug_mode_enabled():
+    if not bool(getattr(window, "_deep_timing_enabled", False)):
         return
     window._log_throttled(key, message, level=logging.INFO, min_interval=0.5)
 
@@ -129,7 +129,6 @@ def _handle_measurement_file_compression_finished(window, result: object) -> Non
         window._measurement_path = None
         window.status_label.setText("Measurement stopped.")
         window._log_warning("Measurement file compression finished with an unexpected result payload.")
-        window._log_success("Measurement recording stopped.")
         window._refresh_plot()
         window._refresh_trace_plot("Metric position (nm)")
         window._request_trace_autoscale()
@@ -139,7 +138,6 @@ def _handle_measurement_file_compression_finished(window, result: object) -> Non
     window._measurement_path = None
     window.status_label.setText("Measurement stopped.")
     window._log_success("Measurement file compression finished.")
-    window._log_success("Measurement recording stopped.")
     window._refresh_plot()
     window._refresh_trace_plot("Metric position (nm)")
     window._request_trace_autoscale()
@@ -154,7 +152,6 @@ def _handle_measurement_file_compression_failed(window, message: str) -> None:
     window._measurement_path = None
     window.status_label.setText("Measurement stopped.")
     window._log_warning(f"Measurement file compression failed: {message}")
-    window._log_success("Measurement recording stopped.")
     window._refresh_plot()
     window._refresh_trace_plot("Metric position (nm)")
     window._request_trace_autoscale()
@@ -295,7 +292,6 @@ def request_manual_acquisition(window, kind: str) -> None:
         window._update_dark_reference_button_icons()
         window._request_deferred_ui_refresh(telemetry=True)
         window._schedule_acquisition_state_persist()
-        window._log_success(f"{kind.capitalize()} spectrum cached from live sample without pausing acquisition.")
         window.status_label.setText(f"{kind.capitalize()} cached from live sample.")
         return
     if window._live_worker is not None and window._live_worker.is_alive():
@@ -371,14 +367,13 @@ def handle_acquisition_success(window, kind: str, result: AcquisitionResult) -> 
         if selected_plot is not None:
             window._refresh_spectrum_plot(selected_plot, None)
         window._update_dark_reference_button_icons()
-        window._log_debug(f"Plot selector switched to {target_plot} after {kind} acquisition.")
-        window._log_success(f"{kind.capitalize()} spectrum acquired in {result.elapsed_ms:.1f} ms.")
+        window._log_success(f"{kind.capitalize()} spectrum acquired.")
     elif kind == "sample" and not window._live_active:
-        window._log_success(f"Sample spectrum acquired in {result.elapsed_ms:.1f} ms.")
+        window._log_success("Sample spectrum acquired.")
     elif kind == "sample":
         window._log_throttled(
             "live_sample",
-            f"Live sample updated in {result.elapsed_ms:.1f} ms.",
+            "Live sample updated.",
             level=logging.DEBUG,
             min_interval=1.0,
         )
@@ -403,7 +398,6 @@ def handle_acquisition_success(window, kind: str, result: AcquisitionResult) -> 
         pass
     else:
         window.status_label.setText(f"{kind.capitalize()} spectrum acquired successfully.")
-        window._log_debug(f"{kind.capitalize()} acquisition completed.")
         if window._pending_manual_kind is not None:
             pending = window._pending_manual_kind
             window._pending_manual_kind = None
@@ -489,7 +483,7 @@ def flush_live_acquisition_results(window) -> None:
                 window._last_overhead_ms = max(result.elapsed_ms - float(expected_budget_ms), 0.0)
             else:
                 window._last_overhead_ms = None
-        if window._effective_raw_rate_hz is not None:
+        if window._effective_raw_rate_hz is not None and bool(getattr(window, "_deep_timing_enabled", False)):
             window._log_throttled(
                 "raw_rate",
                 (
@@ -511,7 +505,7 @@ def flush_live_acquisition_results(window) -> None:
                 f"gap={spacing_text} | dropped={dropped_events}"
             ),
         )
-        if processing_debug_mode_enabled():
+        if bool(getattr(window, "_deep_timing_enabled", False)):
             window._log_throttled(
                 "live_acq_flush",
                 f"Live acquisition flush: {drain_ms:.2f} ms | dropped={dropped_events}",
@@ -618,7 +612,7 @@ def flush_live_processed_results(window) -> None:
                 f"wait={result.queue_wait_ms:.1f} ms | dropped={dropped_events}"
         ),
     )
-    if processing_debug_mode_enabled():
+    if bool(getattr(window, "_deep_timing_enabled", False)):
         window._log_throttled(
             "live_processed_flush",
             f"Live processing flush: {drain_ms:.2f} ms | dropped={dropped_events}",
@@ -683,12 +677,6 @@ def flush_live_processed_results(window) -> None:
     refresh_state.live_estimate_dirty = True
     refresh_state.telemetry_dirty = True
     window._append_processed_trace_history(processed, fit)
-    window._log_throttled(
-        "live_display",
-        f"Live display updated | dropped={dropped_events}",
-        level=logging.DEBUG,
-        min_interval=1.0,
-    )
     if window._live_processing_worker is not None and window._live_processing_worker.is_alive() and window._live_active:
         _request_live_acquisition_poll_for(window, window._live_ui_refresh_delay_ms)
 
@@ -1298,7 +1286,6 @@ def stop_measurement_run(window) -> None:
         window._set_recording_blink_indicator(False)
     window._sync_simulation_backend_from_controls()
     window._trace_view_locked = False
-    window._trace_display_cursor_s = 0.0
     window._live_trace_started_at = None
     window._metric_reference_processed = None
     window._refresh_session_statistics(force=True)
@@ -1335,7 +1322,7 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
         if started_at is not None:
             elapsed_s = max((processed.acquired_at - started_at).total_seconds(), 0.0)
         else:
-            elapsed_s = float(processed.acquired_at.timestamp())
+            elapsed_s = float(getattr(window, "_trace_display_cursor_s", 0.0) or 0.0)
 
     display_step_s = max(1.0 / max(window.live_rate_spin.value(), 1e-9), 1e-3)
     metrics = window._get_analysis_metrics(processed, fit)
@@ -1395,6 +1382,12 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
         writer.append_metrics([metric_row])
         window._request_deferred_ui_refresh(trace_plot=True, trace_label="Metric position (nm)")
         window._request_trace_autoscale()
+        notify_startup_data_rendered = getattr(window, "_notify_startup_data_rendered", None)
+        if callable(notify_startup_data_rendered):
+            try:
+                notify_startup_data_rendered("trace")
+            except Exception:
+                pass
         window._log_throttled(
             "trace_append",
             (

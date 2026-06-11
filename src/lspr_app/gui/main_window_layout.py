@@ -4,6 +4,7 @@ from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QHBoxLayout,
+    QLayout,
     QLabel,
     QScrollArea,
     QSizeGrip,
@@ -61,6 +62,8 @@ def build_main_layout_for(window) -> None:
     source_layout.setSpacing(6)
     source_layout.addWidget(window.source_tabs)
     source_block.setLayout(source_layout)
+    source_block.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    window.source_tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     plot_bar = QHBoxLayout()
     plot_bar.setSpacing(6)
@@ -86,6 +89,8 @@ def build_main_layout_for(window) -> None:
     window.sensorgram_view_mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
     window.sensorgram_view_mode_button.clicked.connect(window._cycle_sensorgram_view_mode)
     window._update_sensorgram_view_mode_button()
+    window.sensorgram_display_window_button.clicked.connect(window._cycle_sensorgram_display_window_s)
+    window._update_sensorgram_display_window_button()
     window.sensorgram_content_mode_button.clicked.connect(window._cycle_sensorgram_content_mode)
     window._update_sensorgram_content_mode_button()
     window.sensorgram_settings_button.clicked.connect(window._show_sensorgram_plot_settings_dialog)
@@ -96,6 +101,7 @@ def build_main_layout_for(window) -> None:
     trace_title_row.setSpacing(6)
     trace_title_row.addWidget(trace_title)
     trace_title_row.addWidget(window.sensorgram_view_mode_button)
+    trace_title_row.addWidget(window.sensorgram_display_window_button)
     trace_title_row.addStretch(1)
     trace_title_row_widget = QWidget()
     trace_title_row_widget.setLayout(trace_title_row)
@@ -172,6 +178,7 @@ def build_main_layout_for(window) -> None:
     window.sensorgram_header_splitter = trace_body_splitter
 
     source_section = CollapsibleSection("Light source", source_block, expanded=True)
+    source_section.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
     processing_section = CollapsibleSection("Processing", processing_group, expanded=False)
     session_top_row = QHBoxLayout()
     session_top_row.setContentsMargins(0, 0, 0, 0)
@@ -181,6 +188,8 @@ def build_main_layout_for(window) -> None:
     session_top_row.addWidget(session_rate_label)
     session_top_row.addWidget(window.live_rate_spin)
     session_top_row.addStretch(1)
+    session_top_row.addWidget(window.session_font_down_button)
+    session_top_row.addWidget(window.session_font_up_button)
     session_top_row.addWidget(window.session_stats_snapshot_button)
     session_top_row.addWidget(window.session_stats_save_button)
     session_top_row.addWidget(window.session_stats_record_button)
@@ -197,11 +206,12 @@ def build_main_layout_for(window) -> None:
     log_header_row = QHBoxLayout()
     log_header_row.setContentsMargins(0, 0, 0, 0)
     log_header_row.setSpacing(6)
-    log_header_row.addWidget(QLabel("View"))
     log_header_row.addWidget(window.log_view_all_button)
     log_header_row.addWidget(window.log_view_gui_button)
     log_header_row.addWidget(window.log_view_devices_button)
     log_header_row.addStretch(1)
+    log_header_row.addWidget(window.log_font_down_button)
+    log_header_row.addWidget(window.log_font_up_button)
     log_header_row.addWidget(window.log_follow_button)
     log_header_row.addWidget(window.log_copy_button)
     log_header_row.addWidget(window.log_clear_button)
@@ -219,9 +229,11 @@ def build_main_layout_for(window) -> None:
     window._session_section = session_section
     window._log_section = log_section
     window._restore_collapsible_section_state()
+    source_section.setMinimumHeight(source_section.sizeHint().height())
 
     left_panel = QVBoxLayout()
     left_panel.setSpacing(6)
+    left_panel.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
     left_panel.addLayout(measurement_bar)
     left_panel.addWidget(source_section)
     left_panel.addWidget(processing_section)
@@ -231,7 +243,7 @@ def build_main_layout_for(window) -> None:
 
     left_widget = QWidget()
     left_widget.setLayout(left_panel)
-    left_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+    left_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
 
     left_scroll = QScrollArea()
     left_scroll.setWidgetResizable(True)
@@ -254,6 +266,7 @@ def build_main_layout_for(window) -> None:
     spectrum_layout.addWidget(window.spectrum_plot, 1)
     spectrum_block.setLayout(spectrum_layout)
     window._spectra_block = spectrum_block
+    spectrum_block.installEventFilter(window)
 
     trace_block = QWidget()
     trace_layout = QVBoxLayout()
@@ -264,6 +277,7 @@ def build_main_layout_for(window) -> None:
     trace_layout.addWidget(window.trace_plot, 1)
     trace_block.setLayout(trace_layout)
     window._sensorgram_block = trace_block
+    trace_block.installEventFilter(window)
 
     window._top_content_stack = QStackedWidget()
     window._top_content_stack.addWidget(spectrum_block)
@@ -284,9 +298,12 @@ def build_main_layout_for(window) -> None:
     window._window_size_grip.setToolTip("Drag to resize the window.")
     footer_bar.addWidget(window._window_size_grip, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
     footer_widget = QWidget()
+    footer_widget.setContentsMargins(0, 0, 0, 0)
     footer_widget.setLayout(footer_bar)
     footer_widget.setObjectName("mainWindowStatusFooter")
     footer_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    footer_widget.setMinimumHeight(footer_widget.sizeHint().height())
+    footer_widget.setMaximumHeight(footer_widget.sizeHint().height())
 
     plot_splitter = CompactSplitter(Qt.Orientation.Vertical)
     plot_splitter.setChildrenCollapsible(False)
@@ -330,6 +347,7 @@ def build_main_layout_for(window) -> None:
     container = QWidget()
     container.setLayout(root_layout)
     window._main_content_widget = container
+    container.installEventFilter(window)
     window.setCentralWidget(container)
     window._sensorgram_header_controls_ready = True
     window._update_sensorgram_header_control_visibility()
