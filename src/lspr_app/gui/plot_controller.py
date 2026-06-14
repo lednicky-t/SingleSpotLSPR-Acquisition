@@ -217,9 +217,7 @@ def _format_hhmmss(seconds: float) -> str:
 
 def _metric_compression_level_text(window, metric_name: str) -> str:
     plot_cache = getattr(window, "_plot_view_cache", None)
-    active_view_mode = str(getattr(window, "_sensorgram_view_mode", "absolute") or "absolute").strip().lower()
-    active_prefix = "rolling:" if active_view_mode == "rolling" else "absolute:"
-    if plot_cache is not None and bool(getattr(window, "_live_active", False)) and active_view_mode == "absolute":
+    if plot_cache is not None and bool(getattr(window, "_live_active", False)):
         live_cache_map = getattr(plot_cache, "_live_absolute_metric_cache", None)
         if isinstance(live_cache_map, dict):
             live_cache = live_cache_map.get(str(metric_name or "").strip())
@@ -241,17 +239,15 @@ def _metric_compression_level_text(window, metric_name: str) -> str:
         return "-"
     metric_name = str(metric_name or "").strip()
     best_entry: dict[str, object] | None = None
-    best_key: str | None = None
     for key, entry in cache_modes.items():
         if not isinstance(entry, dict):
             continue
-        if not str(key).startswith(active_prefix):
+        if not str(key).startswith("absolute:"):
             continue
         key_text = str(key)
         if metric_name and metric_name not in key_text:
             continue
         if best_entry is None:
-            best_key = key_text
             best_entry = entry
             continue
         try:
@@ -260,7 +256,6 @@ def _metric_compression_level_text(window, metric_name: str) -> str:
         except (TypeError, ValueError):
             current_src = best_src = 0
         if current_src >= best_src:
-            best_key = key_text
             best_entry = entry
     if best_entry is None:
         return "-"
@@ -310,8 +305,9 @@ def _metric_display_target_points(window) -> int:
     return max(int(getattr(window, "_plot_display_points", 512)), 1)
 
 
-def _metric_label_span(label: str, color: str) -> str:
-    return f"<span style='color: {escape(color)}; font-weight: 600;'>{escape(label)}</span>"
+def _metric_label_span(label: str, color: str, *, bold: bool = False) -> str:
+    font_weight = "700" if bold else "600"
+    return f"<span style='color: {escape(color)}; font-weight: {font_weight};'>{escape(label)}</span>"
 
 
 def _set_plot_label_if_changed(plot, axis: str, text: str, window=None, cache_attr: str | None = None) -> None:
@@ -774,33 +770,32 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
         cache = getattr(window, "_plot_view_cache", None)
         if cache is not None:
             target_points = _metric_display_target_points(window)
-            view_mode = getattr(window, "_sensorgram_view_mode", "absolute")
             trace_view_locked = bool(getattr(window, "_trace_view_locked", False))
             live_active = bool(getattr(window, "_live_active", False))
             for metric_name in series.keys():
                 try:
                     overlay_data = None
-                    if view_mode == "absolute" and not trace_view_locked and live_active and hasattr(cache, "live_absolute_metric_envelope_view"):
+                    if not trace_view_locked and live_active and hasattr(cache, "live_absolute_metric_envelope_view"):
                         overlay_data = cache.live_absolute_metric_envelope_view(
                             metric_name,
                             target_points=target_points,
                             recent_tail_points=recent_tail_points,
                         )
-                    elif view_mode == "absolute" and not trace_view_locked and hasattr(cache, "absolute_metric_envelope_view"):
-                        series_token = build_metric_series_token(window, metric_name)
-                    metric_series = series.get(metric_name)
-                    if metric_series is not None:
-                        mx, my = tuple(np.asarray(item, dtype=np.float64) for item in metric_series)
-                        overlay_data = cache.absolute_metric_envelope_view(
-                            series_token,
-                            mx,
-                            my,
-                            view_width_px=None,
-                            enabled=True,
-                            minimum_points=128,
-                            oversample=1.0,
-                            default_points=target_points,
-                        )
+                    elif not trace_view_locked and hasattr(cache, "absolute_metric_envelope_view"):
+                        metric_series = series.get(metric_name)
+                        if metric_series is not None:
+                            series_token = build_metric_series_token(window, metric_name)
+                            mx, my = tuple(np.asarray(item, dtype=np.float64) for item in metric_series)
+                            overlay_data = cache.absolute_metric_envelope_view(
+                                series_token,
+                                mx,
+                                my,
+                                view_width_px=None,
+                                enabled=True,
+                                minimum_points=128,
+                                oversample=1.0,
+                                default_points=target_points,
+                            )
                     if overlay_data is not None:
                         min_x, min_y, max_x, max_y = overlay_data
                         if len(min_y) > 0:
@@ -840,12 +835,11 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
             if np.isfinite(overlay_max):
                 y_max = max(y_max, overlay_max)
     y_span = float(y_max - y_min)
-    view_mode = getattr(window, "_sensorgram_view_mode", "absolute")
     clock_mode = bool(getattr(window.trace_time_axis, "_mode", "elapsed") == "clock")
     follow_latest_buffer_s = _metric_follow_latest_buffer_s(
         window,
         clock_mode=clock_mode,
-        span_s=float(window._trace_display_window_s) if view_mode == "rolling" else x_span,
+        span_s=x_span,
     )
     last_range = getattr(window, "_last_metric_autoscale_range", None)
     if not force:
@@ -862,22 +856,25 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
                 window._metric_autoscale_pending = False
                 window._last_metric_autoscale_ms = (perf_counter() - started) * 1000.0
                 return
-    if view_mode == "rolling":
-        window_span = max(float(window._trace_display_window_s), 1e-9)
-        x_min = max(float(np.min(x)), latest_x - window_span)
-        x_max = latest_x + follow_latest_buffer_s
-    else:
-        x_min = float(np.min(x))
-        x_max = latest_x + follow_latest_buffer_s
+    x_min = float(np.min(x))
+    x_max = latest_x + follow_latest_buffer_s
     y_pad = max(y_span * 0.12, 1e-6)
+    overlay_y_pad_low = 0.0
+    overlay_y_pad_high = 0.0
+    reserved_y_padding = getattr(window, "_sensorgram_control_step_overlay_reserved_y_padding", None)
+    if callable(reserved_y_padding):
+        try:
+            overlay_y_pad_low, overlay_y_pad_high = reserved_y_padding(float(y_min), float(y_max))
+        except Exception:
+            overlay_y_pad_low, overlay_y_pad_high = 0.0, 0.0
     if getattr(window, "_trace_view_locked", False):
         window._metric_autoscale_pending = False
         return
     new_range = (
         float(x_min),
         float(x_max),
-        float(y_min - y_pad),
-        float(y_max + y_pad),
+        float(y_min - y_pad - overlay_y_pad_low),
+        float(y_max + y_pad + overlay_y_pad_high),
     )
     should_apply = True
     if isinstance(last_range, tuple) and len(last_range) == 4:
@@ -989,6 +986,12 @@ def refresh_metric_plot(window, trace_label: str) -> None:
         if not metric_plot_enabled:
             _show_metric_plot_unavailable(window, clock_mode)
             window._last_metric_plot_disabled_fast_path = True
+            sync_control_step_overlay = getattr(window, "_sync_sensorgram_control_step_overlay", None)
+            if callable(sync_control_step_overlay):
+                try:
+                    sync_control_step_overlay()
+                except Exception:
+                    pass
             return
         active_series = window._active_trace_series()
         if content_mode == "heatmap":
@@ -1005,6 +1008,12 @@ def refresh_metric_plot(window, trace_label: str) -> None:
                 _set_visible_if_changed(window.trace_legend, False)
             render_sensorgram_heatmap(window, window._sensorgram_heatmap_history, clock_mode=clock_mode)
             request_metric_autoscale(window)
+            sync_control_step_overlay = getattr(window, "_sync_sensorgram_control_step_overlay", None)
+            if callable(sync_control_step_overlay):
+                try:
+                    sync_control_step_overlay()
+                except Exception:
+                    pass
             return
         if active_series:
             _set_plot_label_if_changed(window.trace_plot, "left", trace_label, window, "_trace_left_label_text")
@@ -1021,6 +1030,12 @@ def refresh_metric_plot(window, trace_label: str) -> None:
                 _set_visible_if_changed(curve, True)
             if metric_changed or previous_visible_mode != visible_mode:
                 request_metric_autoscale(window)
+            sync_control_step_overlay = getattr(window, "_sync_sensorgram_control_step_overlay", None)
+            if callable(sync_control_step_overlay):
+                try:
+                    sync_control_step_overlay()
+                except Exception:
+                    pass
             return
 
         if content_mode == "heatmap":
@@ -1050,6 +1065,12 @@ def refresh_metric_plot(window, trace_label: str) -> None:
             level=logging.DEBUG,
             min_interval=1.5,
         )
+        sync_control_step_overlay = getattr(window, "_sync_sensorgram_control_step_overlay", None)
+        if callable(sync_control_step_overlay):
+            try:
+                sync_control_step_overlay()
+            except Exception:
+                pass
     finally:
         window._last_sensorgram_render_ms = (perf_counter() - started) * 1000.0
 
@@ -1083,25 +1104,11 @@ def render_metric_series(
             np.asarray([item[1] for item in series], dtype=np.float64),
         )
 
-    view_mode = getattr(window, "_sensorgram_view_mode", "absolute")
     trace_view_locked = bool(getattr(window, "_trace_view_locked", False))
     _, _, view_width_px = _current_metric_view_state(window)
     view_x_min = view_x_max = None
     if trace_view_locked:
         view_x_min, view_x_max, view_width_px = _current_metric_view_state(window)
-    elif view_mode == "rolling" and len(history) > 0:
-        latest_x = None
-        for series in history.values():
-            x_values, _ = _series_to_arrays(series)
-            if len(x_values) == 0:
-                continue
-            series_latest = float(x_values[-1])
-            if latest_x is None or series_latest > latest_x:
-                latest_x = series_latest
-        if latest_x is not None:
-            window_span = max(float(getattr(window, "_trace_display_window_s", 60.0)), 1e-9)
-            view_x_max = latest_x
-            view_x_min = latest_x - window_span
     active_series = {}
     render_state_cache = getattr(window, "_metric_render_state_cache", None)
     if not isinstance(render_state_cache, dict):
@@ -1189,6 +1196,7 @@ def render_metric_series(
         overlay_data = None
         clock_offset_s = None
         view_started = perf_counter()
+        view_mode = "absolute"
         if cache is not None and view_mode == "absolute" and not trace_view_locked and bool(getattr(window, "_live_active", False)):
             live_display = cache.live_absolute_metric_view(
                 metric_name,
@@ -1262,37 +1270,6 @@ def render_metric_series(
                         )
                     except Exception:
                         overlay_data = None
-            elif view_mode == "rolling" and not trace_view_locked:
-                display_x, display_y = cache.rolling_metric_view(
-                    series_token,
-                    x,
-                    y,
-                    view_x_min=view_x_min,
-                    view_x_max=view_x_max,
-                    view_width_px=view_width_px,
-                    enabled=downsampling_enabled,
-                    minimum_points=128,
-                    oversample=1.0,
-                    default_points=_metric_display_target_points(window),
-                    recent_tail_points=recent_tail_points,
-                )
-                if overlay_enabled:
-                    try:
-                        overlay_data = cache.rolling_metric_envelope_view(
-                            series_token,
-                            x,
-                            y,
-                            view_x_min=view_x_min,
-                            view_x_max=view_x_max,
-                            view_width_px=view_width_px,
-                            enabled=downsampling_enabled,
-                            minimum_points=128,
-                            oversample=1.0,
-                            default_points=_metric_display_target_points(window),
-                            recent_tail_points=recent_tail_points,
-                        )
-                    except Exception:
-                        overlay_data = None
             else:
                 display_x, display_y = cache.metric_view(
                     series_token,
@@ -1331,14 +1308,14 @@ def render_metric_series(
         view_prep_ms += (perf_counter() - view_started) * 1000.0
         display_x, _ = _sensorgram_display_x_values(window, display_x, clock_mode=clock_mode)
         display_state = None
-        if cache is not None and view_mode == "absolute" and not trace_view_locked and bool(getattr(window, "_live_active", False)):
+        if cache is not None and not trace_view_locked and bool(getattr(window, "_live_active", False)):
             display_state = cache.live_absolute_metric_state(metric_name)
-        elif cache is not None and view_mode == "absolute" and not trace_view_locked:
+        elif cache is not None and not trace_view_locked:
             display_state = cache.absolute_metric_display_state(series_token)
         render_state_key = (
             metric_name,
             downsampling_enabled,
-            view_mode,
+            "absolute",
             bool(trace_view_locked),
             step_mode,
             bool(overlay_enabled),
@@ -1428,6 +1405,12 @@ def render_metric_series(
                 level=logging.INFO,
                 min_interval=0.5,
             )
+    sync_control_step_overlay = getattr(window, "_sync_sensorgram_control_step_overlay", None)
+    if callable(sync_control_step_overlay):
+        try:
+            sync_control_step_overlay()
+        except Exception:
+            pass
     return changed
 
 
@@ -1481,17 +1464,12 @@ def render_sensorgram_heatmap(
         return
 
     started = perf_counter()
-    view_mode = getattr(window, "_sensorgram_view_mode", "absolute")
+    view_mode = "absolute"
     trace_view_locked = bool(getattr(window, "_trace_view_locked", False))
     _, _, _view_width_px = _current_metric_view_state(window)
     view_x_min = view_x_max = None
     if trace_view_locked:
         view_x_min, view_x_max, _view_width_px = _current_metric_view_state(window)
-    elif view_mode == "rolling" and len(history) > 0:
-        latest_x = float(history[-1][0])
-        window_span = max(float(getattr(window, "_trace_display_window_s", 60.0)), 1e-9)
-        view_x_max = latest_x
-        view_x_min = latest_x - window_span
     requested_view_x_min = view_x_min
     requested_view_x_max = view_x_max
     view_height_px = None
@@ -1553,8 +1531,6 @@ def render_sensorgram_heatmap(
             enabled=True,
         )
     window._last_sensorgram_heatmap_arrays_ms = (perf_counter() - arrays_started) * 1000.0
-    if view_mode == "rolling" and len(times) > 0:
-        times = times - float(times[0])
     wavelengths = np.asarray(window._sensorgram_heatmap_wavelengths, dtype=np.float64)
     if len(times) == 0 or len(wavelengths) == 0:
         _set_visible_if_changed(window.trace_heatmap_image, False)
@@ -1804,9 +1780,18 @@ def update_metric_stats(window) -> None:
     dt_values = np.diff(x_values)
     dt_text = "-" if len(dt_values) == 0 else f"{float(np.nanmean(dt_values)):.2f} s"
     compression_level_text = _metric_compression_level_text(window, metric_name)
+    primary_metric_name = window._primary_trace_metric() if hasattr(window, "_primary_trace_metric") else None
+    primary_metric_name = str(primary_metric_name or "").strip()
+    metric_is_primary = bool(primary_metric_name) and metric_name == primary_metric_name
+    metric_value_color = metric_color
     window_s = window.trace_noise_window_spin.value()
     noise_chunks: list[str] = []
-    for metric_name, (metric_x, metric_y) in series.items():
+    metric_order = list(getattr(window, "TRACE_METRIC_LABELS", {}).keys())
+    ordered_metric_names = [name for name in metric_order if name in series]
+    if not ordered_metric_names:
+        ordered_metric_names = list(series.keys())
+    for metric_name in ordered_metric_names:
+        metric_x, metric_y = series[metric_name]
         tail_start = float(metric_x[-1]) - window_s
         tail_index = int(np.searchsorted(metric_x, tail_start, side="left"))
         metric_window = metric_y[tail_index:]
@@ -1819,7 +1804,8 @@ def update_metric_stats(window) -> None:
         noise_chunks.append(f"{_metric_label_span(label, color)} {escape(metric_noise)}")
 
     window.trace_stats_label.setText(
-        f"{_metric_label_span(metric_label, metric_color)}: {escape(latest_time_text)} (+{_format_hhmmss(elapsed_from_start_s)}), {latest_y:.3f} nm"
+        f"{_metric_label_span(metric_label, metric_color, bold=metric_is_primary)}: {escape(latest_time_text)} (+{_format_hhmmss(elapsed_from_start_s)}), "
+        f"<span style='color: {escape(metric_value_color)}; font-weight: 700;'>{latest_y:.3f} nm</span>"
         f" | min/max: {y_min:.3f} / {y_max:.3f} nm"
         f" | span: {y_max - y_min:.3f} nm"
         f" | dt {dt_text}"

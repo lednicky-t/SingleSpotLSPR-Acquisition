@@ -9,14 +9,26 @@ from lspr_app.storage.app_config import (
     load_processing_settings,
     load_processing_settings_from_hdf5,
     save_processing_settings,
+    save_processing_settings_to_hdf5,
 )
 
 METRIC_MODE_ORDER = ("smoothed_max", "poly_max", "centroid", "gaussian_center")
+METRIC_ARCHIVE_NAME_MAP = {
+    "smoothed_max": "smoothed_max_nm",
+    "poly_max": "poly_max_nm",
+    "centroid": "centroid_nm",
+    "gaussian_center": "gaussian_center_nm",
+}
+METRIC_ARCHIVE_NAME_TO_MODE_MAP = {archive_name: mode for mode, archive_name in METRIC_ARCHIVE_NAME_MAP.items()}
 
 SMOOTHING_METHOD_LABELS = {
     "none": "None",
-    "moving_average": "Moving average",
-    "savitzky_golay": "Savitzky-Golay",
+    "moving_average": "Avg",
+    "savitzky_golay": "SG",
+}
+CROP_METHOD_LABELS = {
+    "fixed_width": "Range",
+    "threshold": "Thresh",
 }
 ANALYSIS_RESOLUTION_OPTIONS = (
     ("10\u207B\u00B9", 0.1),
@@ -83,6 +95,29 @@ def _set_combo_value(combo, value: str, *, fallback: str | None = None) -> None:
 def normalize_sensorgram_metric_name(metric_name: object) -> str:
     normalized = str(metric_name or "").strip().lower()
     return normalized if normalized in METRIC_MODE_ORDER else "smoothed_max"
+
+
+def sensorgram_metric_archive_name(metric_name: object) -> str:
+    normalized = normalize_sensorgram_metric_name(metric_name)
+    return METRIC_ARCHIVE_NAME_MAP.get(normalized, normalized)
+
+
+def sensorgram_metric_archive_names(metric_names: object) -> tuple[str, ...]:
+    if metric_names is None:
+        return tuple()
+    if isinstance(metric_names, (str, bytes)):
+        metric_names = (metric_names,)
+    archive_names: list[str] = []
+    for metric_name in metric_names:
+        archive_name = sensorgram_metric_archive_name(metric_name)
+        if archive_name and archive_name not in archive_names:
+            archive_names.append(archive_name)
+    return tuple(archive_names)
+
+
+def sensorgram_metric_mode_name(metric_name: object) -> str:
+    normalized = str(metric_name or "").strip().lower()
+    return METRIC_ARCHIVE_NAME_TO_MODE_MAP.get(normalized, normalize_sensorgram_metric_name(normalized))
 
 
 def sensorgram_metric_order(window) -> list[str]:
@@ -155,9 +190,9 @@ def current_processing_settings(window) -> ProcessingSettings:
         smoothing_method=_combo_value(window.smoothing_method_combo),
         smoothing_window=window.smoothing_window_spin.value(),
         temporal_smoothing=window.temporal_smoothing_spin.value(),
-        crop_method=window.crop_method_combo.currentText(),
+        crop_method=_combo_value(window.crop_method_combo),
         crop_fraction=window.crop_fraction_spin.value(),
-        fit_method=window.fit_method_combo.currentText(),
+        fit_method=_combo_value(window.fit_method_combo),
         polynomial_order=window.poly_order_spin.value(),
         fit_window_width_nm=window.fit_window_spin.value(),
         analysis_resolution_nm=analysis_resolution_value(window.analysis_resolution_spin),
@@ -185,10 +220,14 @@ def apply_processing_settings_to_widgets(window, settings: ProcessingSettings) -
     window.smoothing_window_spin.setValue(settings.smoothing_window)
     window.temporal_smoothing_spin.setValue(getattr(settings, "temporal_smoothing", 1))
     crop_method = getattr(settings, "crop_method", "fixed_width")
-    window.crop_method_combo.setCurrentText(crop_method if crop_method in {"fixed_width", "threshold"} else "fixed_width")
+    _set_combo_value(
+        window.crop_method_combo,
+        crop_method,
+        fallback=CROP_METHOD_LABELS.get(crop_method, "Range"),
+    )
     window.crop_fraction_spin.setValue(float(getattr(settings, "crop_fraction", 0.7)))
     fit_method = getattr(settings, "fit_method", "none")
-    window.fit_method_combo.setCurrentText(fit_method if fit_method in {"none", "poly", "gaussian"} else "none")
+    _set_combo_value(window.fit_method_combo, fit_method, fallback="Gauss" if fit_method == "gaussian" else fit_method)
     window.poly_order_spin.setValue(settings.polynomial_order)
     window.fit_window_spin.setValue(int(round(settings.fit_window_width_nm)))
     set_analysis_resolution_value(window.analysis_resolution_spin, float(getattr(settings, "analysis_resolution_nm", 0.001)))
@@ -211,17 +250,56 @@ def apply_processing_settings_to_widgets(window, settings: ProcessingSettings) -
 def sync_processing_crop_parameter_widget(window) -> None:
     stack = getattr(window, "crop_parameter_stack", None)
     label = getattr(window, "crop_parameter_label", None)
+    fit_method_combo = getattr(window, "fit_method_combo", None)
+    crop_method_combo = getattr(window, "crop_method_combo", None)
+    poly_order_spin = getattr(window, "poly_order_spin", None)
+    fit_method = _combo_value(fit_method_combo) if fit_method_combo is not None else "none"
     if stack is None or label is None:
         return
-    crop_method = window.crop_method_combo.currentText()
+    crop_method = _combo_value(crop_method_combo) if crop_method_combo is not None else "fixed_width"
+    parameter_title_text = "Fraction" if crop_method == "threshold" else "Range"
     if crop_method == "threshold":
         stack.setCurrentWidget(window.crop_fraction_spin)
-        label.setText("Fraction")
-        label.setToolTip("Threshold fraction of peak height used to crop the fit range.")
-        return
-    stack.setCurrentWidget(window.fit_window_spin)
-    label.setText("Range")
-    label.setToolTip("Fit-range width in nm used to crop the fit range when the crop method is fixed_width.")
+    else:
+        stack.setCurrentWidget(window.fit_window_spin)
+
+    poly_widgets_visible = fit_method == "poly"
+    crop_widgets_visible = fit_method in {"poly", "gaussian"}
+    parameter_widgets_visible = fit_method in {"poly", "gaussian"}
+
+    if crop_method_combo is not None:
+        crop_method_combo.setVisible(crop_widgets_visible)
+        crop_method_combo.blockSignals(True)
+        crop_method_combo.setCurrentText("Thresh" if crop_method == "threshold" else "Range")
+        crop_method_combo.blockSignals(False)
+    if stack is not None:
+        stack.setVisible(parameter_widgets_visible)
+    if label is not None:
+        label.setVisible(False)
+        label.setText(parameter_title_text)
+        label.setToolTip(
+            "Threshold fraction of peak height used to crop the fit range."
+            if crop_method == "threshold"
+            else "Fit-range width in nm used to crop the fit range when the crop method is fixed_width."
+        )
+    if poly_order_spin is not None:
+        poly_order_spin.setVisible(poly_widgets_visible)
+    if hasattr(window, "_processing_fit_order_title_widget"):
+        window._processing_fit_order_title_widget.setVisible(poly_widgets_visible)
+    if hasattr(window, "_processing_fit_crop_title_widget"):
+        window._processing_fit_crop_title_widget.setVisible(crop_widgets_visible)
+    if hasattr(window, "_processing_fit_parameter_title_widget"):
+        window._processing_fit_parameter_title_widget.setVisible(parameter_widgets_visible)
+        window._processing_fit_parameter_title_widget.setText(parameter_title_text)
+        window._processing_fit_parameter_title_widget.setToolTip(
+            "Threshold fraction of peak height used to crop the fit range."
+            if crop_method == "threshold"
+            else "Fit-range width in nm used to crop the fit range when the crop method is fixed_width."
+        )
+    if hasattr(window, "_processing_fit_method_title_widget"):
+        window._processing_fit_method_title_widget.setVisible(True)
+
+
 
 
 def persist_processing_settings(window) -> None:
@@ -234,12 +312,18 @@ def save_processing_settings_dialog(window) -> None:
         window,
         "Save processing settings",
         str(DEFAULT_CONFIG_PATH),
-        "JSON files (*.json)",
+        "HDF5 files (*.h5 *.hdf5);;JSON files (*.json)",
     )
     if not path_str:
         return
     settings = current_processing_settings(window)
-    save_processing_settings(settings, Path(path_str))
+    path = Path(path_str)
+    if not path.suffix:
+        path = path.with_suffix(".h5")
+    if path.suffix.lower() in {".h5", ".hdf5"}:
+        save_processing_settings_to_hdf5(settings, path)
+    else:
+        save_processing_settings(settings, path)
     save_processing_settings(settings)
     window.status_label.setText(f"Saved processing settings to {path_str}")
     window._log_success(f"Processing settings saved to {Path(path_str).name}.")

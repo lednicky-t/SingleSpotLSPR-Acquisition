@@ -36,8 +36,6 @@ def _metric_absolute_cache_modes_text(window: Any) -> str:
         return "-"
     if not isinstance(cache_info, dict) or not cache_info:
         return "-"
-    active_view_mode = str(getattr(window, "_sensorgram_view_mode", "absolute") or "absolute").strip().lower()
-    active_prefix = "rolling:" if active_view_mode == "rolling" else "absolute:"
     def _int_field(entry: dict[str, object], key: str, default: int = 0) -> int:
         value = entry.get(key, default)
         try:
@@ -54,15 +52,11 @@ def _metric_absolute_cache_modes_text(window: Any) -> str:
     for entry in cache_info.values():
         if not isinstance(entry, dict):
             continue
-        if str(entry.get("view_mode", "")).strip().lower() != active_view_mode:
-            continue
         total_hit += int(entry.get("hits", 0) or 0)
         total_incremental += int(entry.get("incremental", 0) or 0)
         total_rebuild += int(entry.get("rebuilds", 0) or 0)
     for key, entry in cache_info.items():
         if not isinstance(entry, dict):
-            continue
-        if not str(key).startswith(active_prefix):
             continue
         if latest_entry is None:
             latest_key = str(key)
@@ -545,12 +539,18 @@ class SessionDiagnosticsSnapshot:
         scheduler_task_breakdown_lines = _scheduler_task_breakdown_lines(window)
         trace_points_text = "-"
         trace_buffer_points_text = "-"
-        metric_history_buffers = getattr(window, "_metric_history_buffers", None)
-        if metric_history_buffers:
+        plot_view_cache = getattr(window, "_plot_view_cache", None)
+        if plot_view_cache is not None and hasattr(plot_view_cache, "metric_cache_debug_snapshot"):
             try:
-                trace_buffer_points_text = str(max(len(buffer) for buffer in metric_history_buffers.values()))
-            except ValueError:
-                trace_buffer_points_text = "0"
+                cache_snapshot = plot_view_cache.metric_cache_debug_snapshot()
+                display_counts = [
+                    int(entry.get("display_points", 0))
+                    for entry in cache_snapshot.values()
+                ]
+                if display_counts:
+                    trace_buffer_points_text = str(max(display_counts))
+            except Exception:
+                trace_buffer_points_text = "-"
         trace_raw_points_text = "-"
         trace_display_points_text = "-"
         trace_throttle_text = "-"
@@ -675,7 +675,7 @@ class SessionDiagnosticsSnapshot:
             try:
                 metric_autoscale_text = (
                     f"{_timing_plain_text(getattr(window, '_last_metric_autoscale_ms', None))} | "
-                    f"mode={getattr(window, '_sensorgram_view_mode', '-')}"
+                    f"mode=absolute"
                     f" | x={float(autoscale_range[0]):.3f}..{float(autoscale_range[1]):.3f}"
                     f" | y={float(autoscale_range[2]):.3f}..{float(autoscale_range[3]):.3f}"
                     f" | follow_latest={float(getattr(window, '_metric_autoscale_follow_latest_buffer_fraction', 0.0)):.3f}"

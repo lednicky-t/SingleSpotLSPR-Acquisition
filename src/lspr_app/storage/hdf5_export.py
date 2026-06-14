@@ -817,49 +817,16 @@ def _float_or_nan(value: object) -> float:
         return float("nan")
 
 
-def load_processed_metric_history(path: Path, metric_names: set[str] | None = None) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    path = Path(path).expanduser()
-    if not path.exists():
-        return {}
-    try:
-        with h5py.File(path, "r") as handle:
-            processed_group = handle.get("processed")
-            if processed_group is None:
-                return {}
-            metrics_group = processed_group.get("metrics")
-            if metrics_group is None:
-                return {}
-            time_dataset = metrics_group.get("t_ms")
-            if time_dataset is None:
-                return {}
-            times = np.asarray(time_dataset[...], dtype=np.float64) / 1000.0
-            if len(times) == 0:
-                return {}
-            history: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-            excluded = {
-                LSPR_PROCESSED_METRICS_ACQUIRED_AT_UNIX_MS_DATASET_NAME,
-                "t_ms",
-                "sample_index",
-            }
-            for name, dataset in metrics_group.items():
-                if name in excluded or not isinstance(dataset, h5py.Dataset):
-                    continue
-                if metric_names is not None and name not in metric_names:
-                    continue
-                if dataset.ndim != 1:
-                    continue
-                values = np.asarray(dataset[...], dtype=np.float64)
-                if len(values) != len(times):
-                    continue
-                history[name] = (times, values)
-            return history
-    except Exception:
-        return {}
-def load_processed_metric_history(path: Path, metric_names: set[str] | None = None) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+def load_processed_metric_history(
+    path: Path,
+    metric_names: set[str] | None = None,
+    *,
+    time_range_s: tuple[float, float] | None = None,
+) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     from lspr_app.storage.metric_archive import load_metric_archive_history
 
     if path.suffix.lower() == ".jsonl":
-        return load_metric_archive_history(path, metric_names=metric_names)
+        return load_metric_archive_history(path, metric_names=metric_names, time_range_s=time_range_s)
 
     series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     with h5py.File(path, "r") as handle:
@@ -874,13 +841,31 @@ def load_processed_metric_history(path: Path, metric_names: set[str] | None = No
         if time_ds is None:
             return {}
         times_s = np.asarray(time_ds[...], dtype=float) / 1000.0
+        start_index = 0
+        end_index = len(times_s)
+        if time_range_s is not None:
+            try:
+                start_s = float(time_range_s[0])
+                end_s = float(time_range_s[1])
+            except Exception:
+                start_s = end_s = None  # type: ignore[assignment]
+            else:
+                if np.isfinite(start_s) and np.isfinite(end_s):
+                    if end_s < start_s:
+                        start_s, end_s = end_s, start_s
+                    start_index = int(np.searchsorted(times_s, start_s, side="left"))
+                    end_index = int(np.searchsorted(times_s, end_s, side="right"))
+                    times_s = times_s[start_index:end_index]
 
         for metric_name, dataset in metrics_group.items():
             if metric_name in {"t_ms", "acquired_at_unix_ms", "sample_index"}:
                 continue
             if metric_names is not None and metric_name not in metric_names:
                 continue
-            values = np.asarray(dataset[...], dtype=float)
+            if time_range_s is not None:
+                values = np.asarray(dataset[start_index:end_index], dtype=float)
+            else:
+                values = np.asarray(dataset[...], dtype=float)
             series[metric_name] = (times_s.copy(), values)
     return series
 

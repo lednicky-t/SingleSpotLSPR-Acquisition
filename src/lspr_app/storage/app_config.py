@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 import h5py
 import numpy as np
 
 from lspr_app.domain.models import ProcessingSettings
-from lspr_io import read_processing_settings_metadata
+from lspr_app import __version__ as APP_VERSION
+from lspr_io import (
+    read_processing_settings_metadata,
+    standard_measurement_metadata,
+    write_measurement_root_metadata,
+    write_processed_metrics_metadata,
+    write_processing_settings_metadata,
+)
 
 
 DEFAULT_CONFIG_PATH = Path.cwd() / "lspr_settings.json"
@@ -59,6 +67,47 @@ def save_processing_settings(settings: ProcessingSettings, path: Path = DEFAULT_
     payload = _load_payload(path)
     payload["processing"] = asdict(settings)
     _write_payload(payload, path)
+
+
+def save_processing_settings_to_hdf5(settings: ProcessingSettings, path: Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as handle:
+        write_measurement_root_metadata(
+            handle,
+            **standard_measurement_metadata(
+                created_by="LSPR Acquisition",
+                started_at_utc=datetime.now(timezone.utc),
+                app_name="LSPR Acquisition",
+                app_version=APP_VERSION,
+                experiment_name="",
+            ),
+        )
+        metadata = handle.create_group("metadata")
+        processed = handle.create_group("processed")
+        metrics_group = processed.create_group("metrics")
+        write_processed_metrics_metadata(metrics_group)
+        write_processing_settings_metadata(metrics_group, asdict(settings))
+
+        for key, value in (
+            ("processing_range_min_nm", settings.wavelength_min_nm),
+            ("processing_range_max_nm", settings.wavelength_max_nm),
+            ("processing_baseline_method", settings.baseline_method),
+            ("processing_smoothing_method", settings.smoothing_method),
+            ("processing_smoothing_window", settings.smoothing_window),
+            ("processing_temporal_smoothing", settings.temporal_smoothing),
+            ("processing_crop_method", settings.crop_method),
+            ("processing_crop_fraction", settings.crop_fraction),
+            ("processing_fit_method", settings.fit_method),
+            ("processing_polynomial_order", settings.polynomial_order),
+            ("processing_fit_window_width_nm", settings.fit_window_width_nm),
+            ("processing_analysis_resolution_nm", settings.analysis_resolution_nm),
+            ("spectrum_tracking_mode", settings.spectrum_tracking_mode),
+            ("peak_tracking_mode", settings.spectrum_tracking_mode),
+            ("processing_trace_noise_window_s", settings.trace_noise_window_s),
+        ):
+            metadata.attrs[key] = value
+        metadata.attrs["trace_metrics"] = np.asarray(settings.trace_metrics, dtype=h5py.string_dtype(encoding="utf-8"))
 
 
 def load_processing_settings(path: Path = DEFAULT_CONFIG_PATH) -> ProcessingSettings:

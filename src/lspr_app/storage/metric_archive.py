@@ -9,6 +9,8 @@ import tempfile
 import h5py
 import numpy as np
 
+from lspr_app.storage.measurement_archive import ensure_temp_measurement_writer
+
 _ARCHIVE_PATH_ATTR = "_metric_archive_path"
 _ARCHIVE_HANDLE_ATTR = "_metric_archive_handle"
 _ARCHIVE_ROWS_ATTR = "_metric_archive_rows"
@@ -136,6 +138,13 @@ def _normalize_metric_row(metric_row: Any) -> dict[str, float]:
 
 
 def append_metric_archive_row(window: Any, metric_row: Any) -> Path:
+    writer = ensure_temp_measurement_writer(window)
+    row = _normalize_metric_row(metric_row)
+    if row:
+        try:
+            writer.append_metrics([row])
+        except Exception:
+            pass
     return ensure_metric_archive_path(window)
 
 
@@ -173,7 +182,12 @@ def _row_timestamp_s(row: dict[str, Any], fallback_index: int) -> float:
     return float(fallback_index)
 
 
-def load_metric_archive_history(path: Path, metric_names: set[str] | None = None) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+def load_metric_archive_history(
+    path: Path,
+    metric_names: set[str] | None = None,
+    *,
+    time_range_s: tuple[float, float] | None = None,
+) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     if not path.exists():
         return {}
 
@@ -194,6 +208,18 @@ def load_metric_archive_history(path: Path, metric_names: set[str] | None = None
                 if not isinstance(row, dict):
                     continue
                 timestamp_s = _row_timestamp_s(row, fallback_index)
+                if time_range_s is not None:
+                    try:
+                        start_s = float(time_range_s[0])
+                        end_s = float(time_range_s[1])
+                    except Exception:
+                        start_s = end_s = None  # type: ignore[assignment]
+                    else:
+                        if np.isfinite(start_s) and np.isfinite(end_s):
+                            if end_s < start_s:
+                                start_s, end_s = end_s, start_s
+                            if timestamp_s < start_s or timestamp_s > end_s:
+                                continue
                 for key, value in row.items():
                     if key in {"t_ms", "acquired_at_unix_ms", "time_s", "sample_index"}:
                         continue
@@ -229,11 +255,29 @@ def load_metric_archive_history(path: Path, metric_names: set[str] | None = None
         if time_ds is None:
             return {}
         times_s = np.asarray(time_ds[...], dtype=float) / 1000.0
+        start_index = 0
+        end_index = len(times_s)
+        if time_range_s is not None:
+            try:
+                start_s = float(time_range_s[0])
+                end_s = float(time_range_s[1])
+            except Exception:
+                start_s = end_s = None  # type: ignore[assignment]
+            else:
+                if np.isfinite(start_s) and np.isfinite(end_s):
+                    if end_s < start_s:
+                        start_s, end_s = end_s, start_s
+                    start_index = int(np.searchsorted(times_s, start_s, side="left"))
+                    end_index = int(np.searchsorted(times_s, end_s, side="right"))
+                    times_s = times_s[start_index:end_index]
         for metric_name, dataset in metrics.items():
             if metric_name in {"t_ms", "acquired_at_unix_ms", "sample_index"}:
                 continue
             if metric_names is not None and metric_name not in metric_names:
                 continue
-            values = np.asarray(dataset[...], dtype=float)
+            if time_range_s is not None:
+                values = np.asarray(dataset[start_index:end_index], dtype=float)
+            else:
+                values = np.asarray(dataset[...], dtype=float)
             series[metric_name] = (times_s.copy(), values)
     return series

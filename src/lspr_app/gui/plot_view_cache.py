@@ -57,6 +57,23 @@ class MetricDisplayCache:
     last_archive_points: int = 0
 
 
+@dataclass(slots=True)
+class RollingMetricDisplayCache:
+    metric_name: str = ""
+    window_s: float = 60.0
+    latest_s: float | None = None
+    window_start_x: float | None = None
+    window_end_x: float | None = None
+    raw_x: deque[float] = field(default_factory=deque)
+    raw_y: deque[float] = field(default_factory=deque)
+    compression: MetricDisplayCache = field(default_factory=MetricDisplayCache)
+    pending_live_points: int = 0
+    reload_request_id: int = 0
+    applied_reload_request_id: int = 0
+    stale_reload_count: int = 0
+    archive_path: str | None = None
+
+
 @dataclass(slots=True, frozen=True)
 class MetricCompressionBlock:
     start_x: float
@@ -579,55 +596,12 @@ def _display_signature(x: np.ndarray, y: np.ndarray) -> tuple[object, ...]:
     )
 
 
-def extract_series_arrays(series: object) -> tuple[np.ndarray, np.ndarray]:
-    if series is None:
-        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
-    if hasattr(series, "to_arrays"):
-        arrays = series.to_arrays()  # type: ignore[no-any-return]
-        return np.asarray(arrays[0], dtype=np.float64), np.asarray(arrays[1], dtype=np.float64)
-    if isinstance(series, tuple) and len(series) == 2:
-        return np.asarray(series[0], dtype=np.float64), np.asarray(series[1], dtype=np.float64)
-    try:
-        if len(series) == 0:  # type: ignore[arg-type]
-            return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
-    except TypeError:
-        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
-    return (
-        np.asarray([float(item[0]) for item in series], dtype=np.float64),
-        np.asarray([float(item[1]) for item in series], dtype=np.float64),
-    )
-
-
 def build_active_trace_series_token(window) -> tuple[object, ...]:
     selected_metrics = frozenset(getattr(window, "_selected_trace_metrics", lambda: [])())
-    view_mode = getattr(window, "_normalize_sensorgram_view_mode", lambda value: value)(
-        getattr(window, "_sensorgram_view_mode", "absolute")
-    )
-
-    def _source_entries(source: object) -> tuple[tuple[str, int, int, int], ...]:
-        if not isinstance(source, dict):
-            return ()
-        entries: list[tuple[str, int, int, int]] = []
-        for metric_name, series in source.items():
-            if metric_name not in selected_metrics:
-                continue
-            if len(series) <= 0:
-                continue
-            entries.append(
-                (
-                    str(metric_name),
-                    id(series),
-                    int(getattr(series, "revision", 0)),
-                    int(len(series)),
-                )
-            )
-        return tuple(entries)
-
-    metric_history_buffers = getattr(window, "_metric_history_buffers", None)
     archive_path = getattr(window, "_metric_archive_path", None)
     archive_path = Path(archive_path).expanduser() if archive_path else None
     plot_view_cache = getattr(window, "_plot_view_cache", None)
-    if view_mode == "absolute" and plot_view_cache is not None:
+    if plot_view_cache is not None:
         try:
             live_states = tuple(
                 state
@@ -637,24 +611,13 @@ def build_active_trace_series_token(window) -> tuple[object, ...]:
         except Exception:
             live_states = ()
         if live_states:
-            return ("live_absolute", view_mode, live_states, tuple(sorted(selected_metrics)))
-    if view_mode == "absolute" and bool(getattr(window, "_live_active", False)):
-        return ("live_absolute_empty", view_mode, tuple(sorted(selected_metrics)))
-    if isinstance(metric_history_buffers, dict) and metric_history_buffers:
-        source = _source_entries(metric_history_buffers)
-        return ("rolling", source)
-    if view_mode == "absolute" and archive_path is not None and archive_path.exists():
+            return ("live_absolute", live_states, tuple(sorted(selected_metrics)))
+    if archive_path is not None and archive_path.exists():
         try:
             mtime_ns = archive_path.stat().st_mtime_ns
         except OSError:
             mtime_ns = 0
-        return ("archive", str(archive_path), int(mtime_ns), view_mode, tuple(sorted(selected_metrics)))
-    if not bool(getattr(window, "_live_active", False)) and archive_path is not None and archive_path.exists():
-        try:
-            mtime_ns = archive_path.stat().st_mtime_ns
-        except OSError:
-            mtime_ns = 0
-        return ("archive", str(archive_path), int(mtime_ns), view_mode, tuple(sorted(selected_metrics)))
+        return ("archive", str(archive_path), int(mtime_ns), tuple(sorted(selected_metrics)))
     return ("empty", ())
 
 
@@ -690,34 +653,15 @@ def build_heatmap_history_token(window) -> tuple[object, ...]:
 
 
 def build_metric_series_token(window, metric_name: str) -> tuple[object, ...]:
-    view_mode = getattr(window, "_normalize_sensorgram_view_mode", lambda value: value)(
-        getattr(window, "_sensorgram_view_mode", "absolute")
-    )
     archive_path = getattr(window, "_metric_archive_path", None)
     archive_path = Path(archive_path).expanduser() if archive_path else None
-    if view_mode == "absolute" and archive_path is not None and archive_path.exists():
+    if archive_path is not None and archive_path.exists():
         try:
             mtime_ns = archive_path.stat().st_mtime_ns
         except OSError:
             mtime_ns = 0
         return (str(metric_name), "archive", str(archive_path), int(mtime_ns))
-    if not bool(getattr(window, "_live_active", False)) and archive_path is not None and archive_path.exists():
-        try:
-            mtime_ns = archive_path.stat().st_mtime_ns
-        except OSError:
-            mtime_ns = 0
-        return (str(metric_name), "archive", str(archive_path), int(mtime_ns))
-    metric_history_buffers = getattr(window, "_metric_history_buffers", None)
-    if isinstance(metric_history_buffers, dict):
-        series = metric_history_buffers.get(metric_name)
-        if series is not None:
-            return (
-                str(metric_name),
-                "rolling",
-                id(series),
-                int(getattr(series, "revision", 0)),
-                int(len(series)),
-            )
+    plot_view_cache = getattr(window, "_plot_view_cache", None)
     return (str(metric_name), "empty", 0, 0, 0)
 
 
@@ -1086,7 +1030,6 @@ class PlotViewCache:
         )
         self._heatmap_view_cache: OrderedDict[tuple[object, ...], tuple[np.ndarray, np.ndarray]] = OrderedDict()
         self._absolute_metric_view_cache: OrderedDict[tuple[object, ...], MetricDisplayCache] = OrderedDict()
-        self._rolling_metric_view_cache: OrderedDict[tuple[object, ...], MetricDisplayCache] = OrderedDict()
         self._absolute_heatmap_view_cache: OrderedDict[tuple[object, ...], dict[str, object]] = OrderedDict()
         self._live_absolute_metric_cache: dict[str, MetricDisplayCache] = {}
         self._live_absolute_archive_read_count = 0
@@ -1102,7 +1045,6 @@ class PlotViewCache:
         )
         self._heatmap_view_cache.clear()
         self._absolute_metric_view_cache.clear()
-        self._rolling_metric_view_cache.clear()
         self._absolute_heatmap_view_cache.clear()
         self._live_absolute_metric_cache.clear()
 
@@ -1690,183 +1632,6 @@ class PlotViewCache:
             self._absolute_metric_view_cache.popitem(last=False)
         return display_x, display_y
 
-    def rolling_metric_view(
-        self,
-        token: tuple[object, ...],
-        x: np.ndarray,
-        y: np.ndarray,
-        *,
-        view_x_min: float | None = None,
-        view_x_max: float | None = None,
-        view_width_px: float | None = None,
-        enabled: bool = True,
-        minimum_points: int = 128,
-        oversample: float = 1.0,
-        default_points: int = 2048,
-        recent_tail_points: int | None = None,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        target_points = _target_points_from_width(
-            view_width_px,
-            enabled=enabled,
-            minimum_points=minimum_points,
-            oversample=oversample,
-            default_points=default_points,
-        )
-        cache_key = _absolute_metric_cache_key(token, target_points)
-        source_revision = token[3] if len(token) > 3 else None
-        x = np.asarray(x, dtype=np.float64)
-        y = np.asarray(y, dtype=np.float64)
-        if len(x) == 0 or len(y) == 0:
-            result = (x[:0], y[:0])
-            cache = self._rolling_metric_view_cache.get(cache_key)
-            if not isinstance(cache, MetricDisplayCache):
-                cache = MetricDisplayCache()
-            cache.source_revision = int(source_revision or 0)
-            cache.source_len = 0
-            cache.target_points = int(target_points)
-            cache.x_display = result[0]
-            cache.y_display = result[1]
-            cache.levels = []
-            cache.last_mode = "empty"
-            cache.display_output_revision += 1
-            cache.last_display_signature = _display_signature(cache.x_display, cache.y_display)
-            self._rolling_metric_view_cache[cache_key] = cache
-            return result
-
-        if not enabled:
-            clipped_x, clipped_y = downsample_metric_series_for_view(
-                x,
-                y,
-                view_x_min=view_x_min,
-                view_x_max=view_x_max,
-                view_width_px=view_width_px,
-                enabled=False,
-                minimum_points=minimum_points,
-                oversample=oversample,
-                default_points=default_points,
-            )
-            cache = self._rolling_metric_view_cache.get(cache_key)
-            if not isinstance(cache, MetricDisplayCache):
-                cache = MetricDisplayCache()
-            cache.source_revision = int(source_revision or 0)
-            cache.source_len = len(x)
-            cache.target_points = int(target_points)
-            cache.x_display = clipped_x
-            cache.y_display = clipped_y
-            cache.levels = []
-            cache.last_mode = "disabled"
-            cache.display_output_revision += 1
-            cache.last_display_signature = _display_signature(cache.x_display, cache.y_display)
-            self._rolling_metric_view_cache[cache_key] = cache
-            return clipped_x, clipped_y
-
-        cached = self._rolling_metric_view_cache.get(cache_key)
-        if not isinstance(cached, MetricDisplayCache):
-            cached = MetricDisplayCache(target_points=int(target_points))
-            self._rolling_metric_view_cache[cache_key] = cached
-        requested_recent_tail_points = max(
-            int(recent_tail_points) if recent_tail_points is not None else int(getattr(cached, "recent_tail_max_points", 300)),
-            0,
-        )
-        if (
-            cached.source_len == len(x)
-            and cached.target_points == int(target_points)
-            and cached.source_revision == int(source_revision or 0)
-            and cached.last_recent_tail_configured == int(requested_recent_tail_points)
-        ):
-            cached.hit_count += 1
-            cached.last_mode = "hit"
-            self._rolling_metric_view_cache.move_to_end(cache_key)
-            if cached.last_window_start_x == (float(view_x_min) if view_x_min is not None else None) and cached.last_window_end_x == (float(view_x_max) if view_x_max is not None else None):
-                return cached.x_display, cached.y_display
-        else:
-            cached.recent_tail_max_points = int(requested_recent_tail_points)
-            cached.last_recent_tail_configured = int(requested_recent_tail_points)
-            if (
-                cached.source_len > len(x)
-                or cached.source_len < 0
-                or cached.source_revision > int(source_revision or 0)
-                or not cached.levels
-            ):
-                self._rebuild_metric_compression_cache(cached, x, y, target_points=target_points)
-                _set_recent_tail_from_arrays(cached, x, y)
-            else:
-                old_len = int(cached.source_len)
-                self._append_metric_compression_cache(cached, x[old_len:], y[old_len:])
-                cached.target_points = int(target_points)
-                cached.source_revision = int(source_revision or 0)
-                if len(x) > old_len:
-                    tail_x = x[old_len:]
-                    tail_y = y[old_len:]
-                    for tail_x_value, tail_y_value in zip(tail_x, tail_y, strict=False):
-                        _append_recent_tail_point(cached, float(tail_x_value), float(tail_y_value))
-            cached.last_recent_tail_current = int(len(cached.recent_tail_x))
-            cached.last_window_start_x = float(view_x_min) if view_x_min is not None else None
-            cached.last_window_end_x = float(view_x_max) if view_x_max is not None else None
-            assemble_started = perf_counter()
-            display_x, display_y, display_level, old_blocks, overlap_blocks = _build_windowed_metric_arrays(
-                cached,
-                target_points=int(target_points),
-                window_start_x=view_x_min,
-                window_end_x=view_x_max,
-            )
-            cached.last_assemble_ms = (perf_counter() - assemble_started) * 1000.0
-            cached.last_display_level = int(display_level)
-            cached.last_display_blocks = int(old_blocks)
-            cached.last_old_display_blocks = int(old_blocks)
-            cached.last_overlap_blocks_skipped = int(overlap_blocks)
-            cached.last_old_display_points = int(max(len(display_x) - len(cached.recent_tail_x), 0))
-            cached.last_tail_display_points = int(len(cached.recent_tail_x))
-            cached.last_total_display_points = int(len(display_x))
-            cached.last_trend_method = "weighted_mean"
-            signature = _display_signature(display_x, display_y)
-            if signature != cached.last_display_signature:
-                cached.display_output_revision += 1
-                cached.last_display_signature = signature
-            cached.x_display = display_x
-            cached.y_display = display_y
-            cached.target_points = int(target_points)
-            cached.source_revision = int(source_revision or 0)
-            cached.last_mode = "rolling_recompute"
-            cached.last_source_used = "rolling_cache_recompute"
-            cached.last_invalidation_reason = "reuse"
-            self._rolling_metric_view_cache.move_to_end(cache_key)
-            while len(self._rolling_metric_view_cache) > self._max_view_entries:
-                self._rolling_metric_view_cache.popitem(last=False)
-            return display_x, display_y
-
-        display_x, display_y, display_level, old_blocks, overlap_blocks = _build_windowed_metric_arrays(
-            cached,
-            target_points=int(target_points),
-            window_start_x=view_x_min,
-            window_end_x=view_x_max,
-        )
-        cached.last_window_start_x = float(view_x_min) if view_x_min is not None else None
-        cached.last_window_end_x = float(view_x_max) if view_x_max is not None else None
-        cached.last_display_level = int(display_level)
-        cached.last_display_blocks = int(old_blocks)
-        cached.last_old_display_blocks = int(old_blocks)
-        cached.last_overlap_blocks_skipped = int(overlap_blocks)
-        cached.last_old_display_points = int(max(len(display_x) - len(cached.recent_tail_x), 0))
-        cached.last_tail_display_points = int(len(cached.recent_tail_x))
-        cached.last_total_display_points = int(len(display_x))
-        cached.last_trend_method = "weighted_mean"
-        signature = _display_signature(display_x, display_y)
-        if signature != cached.last_display_signature:
-            cached.display_output_revision += 1
-            cached.last_display_signature = signature
-        cached.x_display = display_x
-        cached.y_display = display_y
-        cached.target_points = int(target_points)
-        cached.source_revision = int(source_revision or 0)
-        cached.last_mode = "rolling_recompute"
-        cached.last_source_used = "rolling_cache_recompute"
-        cached.last_invalidation_reason = "reuse"
-        self._rolling_metric_view_cache.move_to_end(cache_key)
-        while len(self._rolling_metric_view_cache) > self._max_view_entries:
-            self._rolling_metric_view_cache.popitem(last=False)
-        return display_x, display_y
-
     def absolute_metric_envelope_view(
         self,
         token: tuple[object, ...],
@@ -1906,49 +1671,6 @@ class PlotViewCache:
         cached.last_total_display_points = int(len(min_x))
         return min_x, min_y, max_x, max_y
 
-    def rolling_metric_envelope_view(
-        self,
-        token: tuple[object, ...],
-        x: np.ndarray,
-        y: np.ndarray,
-        *,
-        view_x_min: float | None = None,
-        view_x_max: float | None = None,
-        view_width_px: float | None = None,
-        enabled: bool = True,
-        minimum_points: int = 128,
-        oversample: float = 1.0,
-        default_points: int = 2048,
-        recent_tail_points: int | None = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
-        target_points = _target_points_from_width(
-            view_width_px,
-            enabled=enabled,
-            minimum_points=minimum_points,
-            oversample=oversample,
-            default_points=default_points,
-        )
-        cache_key = _absolute_metric_cache_key(token, target_points)
-        cached = self._rolling_metric_view_cache.get(cache_key)
-        if not isinstance(cached, MetricDisplayCache):
-            return None
-        if not cached.levels:
-            return None
-        if recent_tail_points is not None:
-            cached.recent_tail_max_points = max(int(recent_tail_points), 0)
-        cached.last_recent_tail_configured = int(max(cached.recent_tail_max_points, 0))
-        cached.last_recent_tail_current = int(len(cached.recent_tail_x))
-        min_x, min_y, max_x, max_y, display_level = _build_windowed_metric_envelope_arrays(
-            cached,
-            target_points=int(target_points),
-            window_start_x=view_x_min,
-            window_end_x=view_x_max,
-        )
-        cached.last_display_level = int(display_level)
-        cached.last_tail_display_points = int(len(cached.recent_tail_x))
-        cached.last_total_display_points = int(len(min_x))
-        return min_x, min_y, max_x, max_y
-
     def absolute_metric_display_state(self, token: tuple[object, ...]) -> tuple[object, ...] | None:
         for cache_key, cached in reversed(list(self._absolute_metric_view_cache.items())):
             if not isinstance(cached, MetricDisplayCache):
@@ -1968,57 +1690,53 @@ class PlotViewCache:
 
     def metric_cache_debug_snapshot(self) -> dict[str, object]:
         modes: dict[str, object] = {}
-        for prefix, cache_map in (
-            ("absolute", self._absolute_metric_view_cache),
-            ("rolling", self._rolling_metric_view_cache),
-        ):
-            for key, cached in cache_map.items():
-                if not isinstance(cached, MetricDisplayCache):
-                    continue
-                level_counts = [len(level) for level in cached.levels]
-                modes[f"{prefix}:{key}"] = {
-                    "view_mode": prefix,
-                    "raw_block_size": int(cached.raw_block_size),
-                    "combine_factor": int(cached.combine_factor),
-                    "recent_tail_points_configured": int(cached.recent_tail_max_points),
-                    "recent_tail_points_current": int(len(cached.recent_tail_x)),
-                    "source_len": int(cached.source_len),
-                    "source_points": int(cached.source_len),
-                    "target_points": int(cached.target_points),
-                    "display_len": int(len(cached.x_display)),
-                    "display_points": int(len(cached.x_display)),
-                    "last_mode": str(cached.last_mode),
-                    "trend_method": str(cached.last_trend_method),
-                    "last_source_used": str(cached.last_source_used),
-                    "last_invalidation_reason": str(cached.last_invalidation_reason),
-                    "archive_read_count": int(cached.archive_read_count),
-                    "last_archive_points": int(cached.last_archive_points),
-                    "hits": int(cached.hit_count),
-                    "incremental": int(cached.incremental_count),
-                    "rebuilds": int(cached.rebuild_count),
-                    "levels": level_counts,
-                    "level_counts": level_counts,
-                    "level_weights": [level_raw_weight(cached, level_index) for level_index in range(len(cached.levels))],
-                    "new_points": int(cached.last_new_points_processed),
-                    "base_blocks": int(cached.last_base_blocks),
-                    "level_count": int(cached.last_levels),
-                    "tail_groups_updated": int(cached.last_tail_groups_updated),
-                    "display_level": int(cached.last_display_level),
-                    "selected_level": int(cached.last_display_level),
-                    "selected_level_raw_weight": level_raw_weight(cached, cached.last_display_level) if cached.last_display_level >= 0 else 0,
-                    "display_blocks": int(cached.last_display_blocks),
-                    "display_old_blocks": int(cached.last_old_display_blocks),
-                    "display_overlap_blocks_skipped": int(cached.last_overlap_blocks_skipped),
-                    "display_old_points": int(cached.last_old_display_points),
-                    "display_tail_points": int(cached.last_tail_display_points),
-                    "display_total_points": int(cached.last_total_display_points),
-                    "append_ms": cached.last_append_ms,
-                    "display_assembly_ms": cached.last_assemble_ms,
-                    "assemble_ms": cached.last_assemble_ms,
-                    "full_rebuild_ms": cached.last_full_rebuild_ms,
-                    "window_start_x": cached.last_window_start_x,
-                    "window_end_x": cached.last_window_end_x,
-                }
+        for key, cached in self._absolute_metric_view_cache.items():
+            if not isinstance(cached, MetricDisplayCache):
+                continue
+            level_counts = [len(level) for level in cached.levels]
+            modes[f"absolute:{key}"] = {
+                "view_mode": "absolute",
+                "raw_block_size": int(cached.raw_block_size),
+                "combine_factor": int(cached.combine_factor),
+                "recent_tail_points_configured": int(cached.recent_tail_max_points),
+                "recent_tail_points_current": int(len(cached.recent_tail_x)),
+                "source_len": int(cached.source_len),
+                "source_points": int(cached.source_len),
+                "target_points": int(cached.target_points),
+                "display_len": int(len(cached.x_display)),
+                "display_points": int(len(cached.x_display)),
+                "last_mode": str(cached.last_mode),
+                "trend_method": str(cached.last_trend_method),
+                "last_source_used": str(cached.last_source_used),
+                "last_invalidation_reason": str(cached.last_invalidation_reason),
+                "archive_read_count": int(cached.archive_read_count),
+                "last_archive_points": int(cached.last_archive_points),
+                "hits": int(cached.hit_count),
+                "incremental": int(cached.incremental_count),
+                "rebuilds": int(cached.rebuild_count),
+                "levels": level_counts,
+                "level_counts": level_counts,
+                "level_weights": [level_raw_weight(cached, level_index) for level_index in range(len(cached.levels))],
+                "new_points": int(cached.last_new_points_processed),
+                "base_blocks": int(cached.last_base_blocks),
+                "level_count": int(cached.last_levels),
+                "tail_groups_updated": int(cached.last_tail_groups_updated),
+                "display_level": int(cached.last_display_level),
+                "selected_level": int(cached.last_display_level),
+                "selected_level_raw_weight": level_raw_weight(cached, cached.last_display_level) if cached.last_display_level >= 0 else 0,
+                "display_blocks": int(cached.last_display_blocks),
+                "display_old_blocks": int(cached.last_old_display_blocks),
+                "display_overlap_blocks_skipped": int(cached.last_overlap_blocks_skipped),
+                "display_old_points": int(cached.last_old_display_points),
+                "display_tail_points": int(cached.last_tail_display_points),
+                "display_total_points": int(cached.last_total_display_points),
+                "append_ms": cached.last_append_ms,
+                "display_assembly_ms": cached.last_assemble_ms,
+                "assemble_ms": cached.last_assemble_ms,
+                "full_rebuild_ms": cached.last_full_rebuild_ms,
+                "window_start_x": cached.last_window_start_x,
+                "window_end_x": cached.last_window_end_x,
+            }
         return modes
 
     def absolute_heatmap_view(

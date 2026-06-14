@@ -25,10 +25,8 @@ def restore_ui_state(window) -> None:
     session_stats_splitter_sizes = ui_state.get("session_stats_splitter_sizes")
     maximized = ui_state.get("maximized")
     top_view_mode = ui_state.get("top_view_mode")
-    sensorgram_view_mode = ui_state.get("sensorgram_view_mode")
     sensorgram_content_mode = ui_state.get("sensorgram_content_mode")
     sensorgram_time_axis_mode = ui_state.get("sensorgram_time_axis_mode")
-    trace_display_window_s = ui_state.get("trace_display_window_s")
     metric_display_points = ui_state.get("metric_display_points")
     sensorgram_compression_recent_tail_points = ui_state.get("sensorgram_compression_recent_tail_points")
     metric_autoscale_follow_latest_buffer_fraction = ui_state.get("metric_autoscale_follow_latest_buffer_fraction")
@@ -38,6 +36,12 @@ def restore_ui_state(window) -> None:
     sensorgram_metric_colors = ui_state.get("sensorgram_metric_colors")
     sensorgram_metric_envelope_overlay_enabled = ui_state.get("sensorgram_metric_envelope_overlay_enabled")
     sensorgram_metric_envelope_overlay_alpha = ui_state.get("sensorgram_metric_envelope_overlay_alpha")
+    sensorgram_control_step_overlay_enabled = ui_state.get("sensorgram_control_step_overlay_enabled")
+    sensorgram_control_step_overlay_style = ui_state.get("sensorgram_control_step_overlay_style")
+    sensorgram_control_step_overlay_position = ui_state.get("sensorgram_control_step_overlay_position")
+    sensorgram_control_step_overlay_opacity = ui_state.get("sensorgram_control_step_overlay_opacity")
+    sensorgram_control_step_overlay_bar_height_px = ui_state.get("sensorgram_control_step_overlay_bar_height_px")
+    diagnostics_panel_visible = ui_state.get("diagnostics_panel_visible")
     sensorgram_line_mode = ui_state.get("sensorgram_line_mode")
     sensorgram_line_width_px = ui_state.get("sensorgram_line_width_px")
     plot_antialias_enabled = ui_state.get("plot_antialias_enabled")
@@ -104,7 +108,10 @@ def restore_ui_state(window) -> None:
     ):
         window.session_stats_splitter.setSizes(session_stats_splitter_sizes)
     if isinstance(top_view_mode, str) and top_view_mode in {"spectra", "flow"}:
-        if top_view_mode == "flow":
+        if top_view_mode == "flow" and not bool(getattr(window, "_ui_startup_ready", False)):
+            window._top_view_mode = "flow"
+            window._pending_top_view_mode = "flow"
+        elif top_view_mode == "flow":
             window._activate_flow_view()
         else:
             window._activate_spectra_view()
@@ -132,7 +139,11 @@ def restore_ui_state(window) -> None:
             primary = visible[0]
         window._sensorgram_metric_visible_modes = set(visible)
         window._sensorgram_metric_primary_mode = primary
-        window._trace_stats_metric_name = primary
+        if isinstance(trace_stats_metric_name, str) and trace_stats_metric_name:
+            current_stats = normalize_sensorgram_metric_name(trace_stats_metric_name)
+            window._trace_stats_metric_name = current_stats if current_stats in visible else visible[0]
+        elif not hasattr(window, "_trace_stats_metric_name") or normalize_sensorgram_metric_name(getattr(window, "_trace_stats_metric_name", visible[0])) not in visible:
+            window._trace_stats_metric_name = visible[0]
         sync_legacy_metric_widgets_from_state(window)
         if hasattr(window, "_update_trace_stats"):
             window._update_trace_stats()
@@ -149,10 +160,9 @@ def restore_ui_state(window) -> None:
         if hasattr(window, "_apply_metric_color_styles"):
             window._apply_metric_color_styles()
     if not have_new_metric_state and isinstance(trace_stats_metric_name, str) and trace_stats_metric_name:
-        window._trace_stats_metric_name = trace_stats_metric_name
-    if isinstance(sensorgram_view_mode, str):
-        window._sensorgram_view_mode = window._normalize_sensorgram_view_mode(sensorgram_view_mode)
-        window._update_sensorgram_view_mode_button()
+        current_stats = normalize_sensorgram_metric_name(trace_stats_metric_name)
+        if current_stats in sensorgram_metric_order(window):
+            window._trace_stats_metric_name = current_stats
     if isinstance(sensorgram_content_mode, str):
         window._sensorgram_content_mode = window._normalize_sensorgram_content_mode(sensorgram_content_mode)
         window._apply_sensorgram_content_mode(save=False)
@@ -163,8 +173,6 @@ def restore_ui_state(window) -> None:
         window._sensorgram_time_axis_mode = normalized_time_axis_mode
         if hasattr(window, "_apply_sensorgram_time_axis_mode"):
             window._apply_sensorgram_time_axis_mode(redraw=False)
-    if isinstance(trace_display_window_s, (int, float)) and float(trace_display_window_s) > 0:
-        window._trace_display_window_s = window._normalize_sensorgram_display_window_s(trace_display_window_s)
     if isinstance(metric_display_points, (int, float)) and int(metric_display_points) > 0:
         window._plot_display_points = max(int(metric_display_points), 1)
     if isinstance(sensorgram_compression_recent_tail_points, (int, float)) and int(sensorgram_compression_recent_tail_points) >= 0:
@@ -202,6 +210,62 @@ def restore_ui_state(window) -> None:
                     band.setVisible(bool(window._sensorgram_metric_envelope_overlay_enabled))
     if isinstance(sensorgram_metric_envelope_overlay_alpha, (int, float)):
         window._sensorgram_metric_envelope_overlay_alpha = max(min(int(sensorgram_metric_envelope_overlay_alpha), 100), 0)
+    if isinstance(sensorgram_control_step_overlay_enabled, (bool, str)):
+        if isinstance(sensorgram_control_step_overlay_enabled, bool):
+            window._sensorgram_control_step_overlay_enabled = bool(sensorgram_control_step_overlay_enabled)
+        else:
+            window._sensorgram_control_step_overlay_enabled = str(sensorgram_control_step_overlay_enabled).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        if hasattr(window, "_sync_sensorgram_control_step_overlay"):
+            try:
+                window._sync_sensorgram_control_step_overlay()
+            except Exception:
+                pass
+    if isinstance(sensorgram_control_step_overlay_style, str) and sensorgram_control_step_overlay_style:
+        style = str(sensorgram_control_step_overlay_style).strip().lower()
+        if style not in {"background", "bar"}:
+            style = "bar"
+        window._sensorgram_control_step_overlay_style = style
+    if isinstance(sensorgram_control_step_overlay_position, str) and sensorgram_control_step_overlay_position:
+        position = str(sensorgram_control_step_overlay_position).strip().lower()
+        if position not in {"top", "bottom"}:
+            position = "top"
+        window._sensorgram_control_step_overlay_position = position
+    if isinstance(sensorgram_control_step_overlay_opacity, (int, float)):
+        window._sensorgram_control_step_overlay_opacity = max(min(float(sensorgram_control_step_overlay_opacity), 100.0), 0.0)
+    if isinstance(sensorgram_control_step_overlay_bar_height_px, (int, float)) and float(sensorgram_control_step_overlay_bar_height_px) > 0:
+        window._sensorgram_control_step_overlay_bar_height_px = int(sensorgram_control_step_overlay_bar_height_px)
+    if any(
+        value is not None
+        for value in (
+            sensorgram_control_step_overlay_style,
+            sensorgram_control_step_overlay_position,
+            sensorgram_control_step_overlay_opacity,
+            sensorgram_control_step_overlay_bar_height_px,
+        )
+    ) and hasattr(window, "_sync_sensorgram_control_step_overlay"):
+        try:
+            window._sync_sensorgram_control_step_overlay()
+        except Exception:
+            pass
+    if isinstance(diagnostics_panel_visible, (bool, str)):
+        if isinstance(diagnostics_panel_visible, bool):
+            visible = bool(diagnostics_panel_visible)
+        else:
+            visible = str(diagnostics_panel_visible).strip().lower() in {"1", "true", "yes", "on"}
+        if hasattr(window, "_set_diagnostics_panel_visible"):
+            try:
+                window._set_diagnostics_panel_visible(visible)
+            except Exception:
+                pass
+        elif hasattr(window, "_log_section"):
+            window._log_section.setVisible(visible)
+        elif hasattr(window, "log_terminal"):
+            window.log_terminal.setVisible(visible)
         if hasattr(window, "_apply_metric_color_styles"):
             window._apply_metric_color_styles()
     if isinstance(sensorgram_line_mode, str):
@@ -282,10 +346,8 @@ def save_ui_state(window) -> None:
             if hasattr(window, "session_stats_splitter") and window.session_stats_splitter is not None
             else [],
             "top_view_mode": window._top_view_mode,
-            "sensorgram_view_mode": window._sensorgram_view_mode,
             "sensorgram_content_mode": window._sensorgram_content_mode,
             "sensorgram_time_axis_mode": str(getattr(window, "_sensorgram_time_axis_mode", "elapsed")),
-            "trace_display_window_s": float(window._trace_display_window_s),
             "metric_display_points": int(getattr(window, "_plot_display_points", 512)),
             "sensorgram_compression_recent_tail_points": int(
                 getattr(window, "_sensorgram_compression_recent_tail_points", 300)
@@ -308,6 +370,22 @@ def save_ui_state(window) -> None:
             "sensorgram_metric_envelope_overlay_alpha": int(
                 getattr(window, "_sensorgram_metric_envelope_overlay_alpha", 16)
             ),
+            "sensorgram_control_step_overlay_enabled": bool(
+                getattr(window, "_sensorgram_control_step_overlay_enabled", True)
+            ),
+            "sensorgram_control_step_overlay_style": str(
+                getattr(window, "_sensorgram_control_step_overlay_style", "bar")
+            ),
+            "sensorgram_control_step_overlay_position": str(
+                getattr(window, "_sensorgram_control_step_overlay_position", "top")
+            ),
+            "sensorgram_control_step_overlay_opacity": float(
+                getattr(window, "_sensorgram_control_step_overlay_opacity", 25.0)
+            ),
+            "sensorgram_control_step_overlay_bar_height_px": int(
+                getattr(window, "_sensorgram_control_step_overlay_bar_height_px", 8)
+            ),
+            "diagnostics_panel_visible": bool(getattr(window, "_diagnostics_panel_enabled", False)),
             "sensorgram_line_mode": "linear" if getattr(window, "_sensorgram_line_step_mode", None) is None else str(window._sensorgram_line_step_mode),
             "sensorgram_line_width_px": float(getattr(window, "_sensorgram_line_width_px", 2.2)),
             "plot_antialias_enabled": bool(getattr(window, "_plot_antialias_enabled", False)),

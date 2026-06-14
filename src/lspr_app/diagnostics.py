@@ -80,7 +80,7 @@ def _profile_defaults(profile: DiagnosticsProfile) -> dict[str, object]:
         "session_stats_recording_enabled_by_default": False,
         "debug_timing_enabled": False,
         "deep_timing_enabled": False,
-        "diagnostics_panel_enabled": True,
+        "diagnostics_panel_enabled": False,
     }
 
 

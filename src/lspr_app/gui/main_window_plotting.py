@@ -37,6 +37,7 @@ from lspr_app.gui.trace_plot_controller import (
     request_metric_autoscale as _request_metric_autoscale,
     update_metric_stats as _update_metric_stats,
 )
+from lspr_app.gui.sensorgram_control_step_overlay import build_sensorgram_control_step_overlay_segments
 from lspr_app.gui.processing_helpers import (
     analysis_cache_token as _analysis_cache_token,
     analysis_metrics_cache_token as _analysis_metrics_cache_token,
@@ -52,7 +53,6 @@ from lspr_app.gui.processing_helpers import (
 )
 from lspr_app.gui.main_window_logging import build_pipeline_timing_breakdown_for, _timing_plain_text
 from lspr_app.gui.workers import ProcessingRequest, ProcessingResult, ProcessingTask
-
 
 def get_analysis_processed_spectrum_for(window, signal: Spectrum | None) -> tuple[Spectrum | None, Spectrum | None]:
     if signal is None:
@@ -439,19 +439,37 @@ def handle_residual_toggle_for(window, visible: bool) -> None:
 
 
 def update_poly_warning_indicator_for(window, fit: Spectrum | None) -> None:
+    spin = getattr(window, "poly_order_spin", None)
+    if spin is None:
+        return
+    default_tooltip = str(getattr(window, "_poly_order_default_tooltip", spin.toolTip()) or "").strip()
     if fit is None:
-        window.poly_warning_label.hide()
+        spin.setStyleSheet("")
+        if default_tooltip:
+            spin.setToolTip(default_tooltip)
         return
     reduced = bool(fit.metadata.get("fit_order_reduced"))
     requested = fit.metadata.get("requested_polynomial_order")
     used = fit.metadata.get("polynomial_order")
     if not reduced or requested is None or used is None:
-        window.poly_warning_label.hide()
+        spin.setStyleSheet("")
+        if default_tooltip:
+            spin.setToolTip(default_tooltip)
         return
-    window.poly_warning_label.setToolTip(
-        f"Requested polynomial order {requested} was reduced to {used} for numerical stability."
+    spin.setStyleSheet(
+        """
+        QSpinBox {
+            color: #d64545;
+            border: 1px solid #d64545;
+        }
+        QSpinBox::up-button, QSpinBox::down-button {
+            border-left: 1px solid #d64545;
+        }
+        """
     )
-    window.poly_warning_label.show()
+    spin.setToolTip(
+        f"{default_tooltip}\nWarning: the polynomial order was reduced from {requested} to {used} for numerical stability."
+    )
 
 
 def set_plots_frozen_for(window, frozen: bool) -> None:
@@ -477,16 +495,18 @@ def set_sensorgram_frozen_for(window, frozen: bool) -> None:
         window._refresh_trace_plot("Metric position (nm)")
         window._ui_refresh_state.metric_plot_dirty = False
         window._request_trace_autoscale()
+    if hasattr(window, "status_label"):
+        freeze_state = "On" if frozen else "Off"
+        window.status_label.setText(f"Sensorgram freeze {freeze_state}.")
     window._schedule_acquisition_state_persist()
 
 
 def clear_trace_history_for(window) -> None:
-    if hasattr(window, "_metric_history_buffers"):
-        window._metric_history_buffers.clear()
     if hasattr(window, "_metric_render_display_cache"):
         window._metric_render_display_cache.clear()
     if hasattr(window, "_metric_render_state_cache"):
         window._metric_render_state_cache.clear()
+    plot_view_cache = getattr(window, "_plot_view_cache", None)
     if hasattr(window, "_sensorgram_heatmap_history"):
         window._sensorgram_heatmap_history.clear()
     if hasattr(window, "_sensorgram_heatmap_history_revision"):
@@ -517,6 +537,14 @@ def clear_trace_history_for(window) -> None:
         window._sensorgram_metric_archive_reload_loading = False
     if hasattr(window, "_sensorgram_metric_archive_reload_task"):
         window._sensorgram_metric_archive_reload_task = None
+    if hasattr(window, "_sensorgram_control_step_events"):
+        window._sensorgram_control_step_events.clear()
+    if hasattr(window, "_sensorgram_control_step_overlay_items"):
+        for item in list(getattr(window, "_sensorgram_control_step_overlay_items", [])):
+            try:
+                item.setVisible(False)
+            except Exception:
+                pass
     signal = window._session.state.absorbance or window._session.state.sample
     if signal is not None:
         processed, _ = window._get_analysis_processed_spectrum(signal)
@@ -527,7 +555,8 @@ def clear_trace_history_for(window) -> None:
         window._metric_reference_processed = None
     window._refresh_trace_plot("Metric position (nm)")
     window._update_trace_stats()
-    window.status_label.setText("Metric history cleared.")
+    freeze_state = "On" if bool(getattr(window, "_sensorgram_frozen", False)) else "Off"
+    window.status_label.setText(f"Metric history cleared. Sensorgram freeze {freeze_state}.")
 
 
 def compute_centroid_nm_for(window, processed: Spectrum, fit: Spectrum | None) -> float:

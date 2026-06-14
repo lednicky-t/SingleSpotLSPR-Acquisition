@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 import pyqtgraph as pg
 
-from PyQt6.QtCore import Qt, QSize, QSignalBlocker, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, QSignalBlocker, QByteArray, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon
 from PyQt6.QtWidgets import (
     QAbstractSpinBox,
@@ -13,7 +14,6 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QColorDialog,
-    QFrame,
     QFormLayout,
     QHBoxLayout,
     QGridLayout,
@@ -26,12 +26,17 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QToolButton,
     QTabWidget,
+    QStackedWidget,
     QWidget,
 )
 
 from lspr_app.gui.ui_helpers import make_compact_spinbox
 from lspr_app.gui.main_window_processing import normalize_sensorgram_metric_name, sensorgram_metric_order
 from lspr_app.gui.icon_helpers import flow_tabler_icon, tint_tabler_icon
+from lspr_app.storage.app_config import load_app_setting, save_app_setting
+
+
+_SENSORGRAM_SETTINGS_DIALOG_GEOMETRY_KEY = "sensorgram_plot_settings_dialog_geometry"
 
 
 @dataclass(frozen=True)
@@ -97,6 +102,15 @@ class MetricColorButton(QToolButton):
         self.colorChanged.emit(self._color)
 
 
+def _make_row_title_label(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    label.adjustSize()
+    label.setMinimumWidth(label.sizeHint().width())
+    label.setMaximumWidth(label.sizeHint().width())
+    return label
+
+
 def _make_frameless_icon_button(icon: QIcon, tooltip: str, *, size: int = 28, parent: QWidget | None = None) -> QToolButton:
     button = QToolButton(parent)
     button.setAutoRaise(True)
@@ -124,7 +138,6 @@ _LINE_MODE_OPTIONS: tuple[_LineModeOption, ...] = (
     _LineModeOption("Step left", "left"),
     _LineModeOption("Step right", "right"),
     _LineModeOption("Step center", "center"),
-    _LineModeOption("Spline", "spline"),
 )
 
 _TIME_AXIS_OPTIONS: tuple[tuple[str, str], ...] = (
@@ -161,14 +174,22 @@ def _normalize_line_mode(value: object | None) -> str | None:
     if not isinstance(value, str):
         return None
     normalized = value.strip().lower()
-    return normalized if normalized in {"left", "right", "center", "spline"} else None
+    return normalized if normalized in {"left", "right", "center"} else None
+
+
+def _log_dialog_timing(window, key: str, message: str) -> None:
+    if not bool(getattr(window, "_deep_timing_enabled", False)):
+        return
+    logger = getattr(window, "_log_throttled", None)
+    if callable(logger):
+        logger(key, message, level=20, min_interval=0.5)
 
 
 class MetricModeSelector(QWidget):
     selectionChanged = pyqtSignal(object, str)
 
     def __init__(self, window) -> None:
-        super().__init__(window)
+        super().__init__()
         self._window = window
         self._ordered_modes = sensorgram_metric_order(window)
         if not self._ordered_modes:
@@ -369,6 +390,7 @@ class MetricModeSelector(QWidget):
 
 class SensorgramPlotSettingsDialog(QDialog):
     def __init__(self, window) -> None:
+        started_total = perf_counter()
         super().__init__(window)
         self._window = window
         self.setWindowTitle("Sensogram settings")
@@ -403,8 +425,20 @@ class SensorgramPlotSettingsDialog(QDialog):
             "  margin-top: 2px;"
             "}"
         )
+        live_started = perf_counter()
         tabs.addTab(self._build_live_tab(), "Live mode")
+        _log_dialog_timing(
+            self._window,
+            "sensorgram_settings.live_tab",
+            f"Sensorgram settings live tab built in {(perf_counter() - live_started) * 1000.0:.2f} ms",
+        )
+        preview_started = perf_counter()
         tabs.addTab(self._build_preview_tab(), "Preview mode")
+        _log_dialog_timing(
+            self._window,
+            "sensorgram_settings.preview_tab",
+            f"Sensorgram settings preview tab built in {(perf_counter() - preview_started) * 1000.0:.2f} ms",
+        )
         tabs.setCurrentIndex(0)
         layout.addWidget(tabs)
 
@@ -435,16 +469,152 @@ class SensorgramPlotSettingsDialog(QDialog):
         buttons_widget.setLayout(buttons_row)
         layout.addWidget(buttons_widget)
         self.setLayout(layout)
+        geometry_started = perf_counter()
+        self._restore_dialog_geometry()
+        _log_dialog_timing(
+            self._window,
+            "sensorgram_settings.geometry",
+            f"Sensorgram settings geometry restored in {(perf_counter() - geometry_started) * 1000.0:.2f} ms",
+        )
+        _log_dialog_timing(
+            self._window,
+            "sensorgram_settings.construct",
+            f"Sensorgram settings dialog constructed in {(perf_counter() - started_total) * 1000.0:.2f} ms",
+        )
 
-    def _add_section_header(self, layout: QVBoxLayout, title: str) -> None:
-        label = QLabel(title)
-        label.setProperty("class", "sectionTitle")
-        label.setStyleSheet("font-weight: 700;")
-        layout.addWidget(label)
-        separator = QFrame(self)
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(separator)
+    def refresh_from_window(self) -> None:
+        started = perf_counter()
+        selector = getattr(self, "metric_mode_selector", None)
+        if selector is not None:
+            selector.set_state(
+                getattr(self._window, "_sensorgram_metric_visible_modes", {"smoothed_max"}),
+                getattr(self._window, "_sensorgram_metric_primary_mode", "smoothed_max"),
+            )
+        if hasattr(self, "control_overlay_check"):
+            self.control_overlay_check.setChecked(bool(getattr(self._window, "_sensorgram_control_step_overlay_enabled", True)))
+        if hasattr(self, "control_overlay_style_combo"):
+            self.control_overlay_style_combo.setCurrentIndex(
+                0 if str(getattr(self._window, "_sensorgram_control_step_overlay_style", "bar")) == "bar" else 1
+            )
+        if hasattr(self, "control_overlay_position_button"):
+            self._set_control_overlay_position(str(getattr(self._window, "_sensorgram_control_step_overlay_position", "top")))
+        if hasattr(self, "control_overlay_thickness_spin"):
+            self.control_overlay_thickness_spin.setValue(
+                int(max(min(float(getattr(self._window, "_sensorgram_control_step_overlay_bar_height_px", 18)), 72.0), 8.0))
+            )
+        if hasattr(self, "control_overlay_opacity_spin"):
+            self.control_overlay_opacity_spin.setValue(
+                int(max(min(float(getattr(self._window, "_sensorgram_control_step_overlay_opacity", 25.0)), 100.0), 0.0))
+            )
+        if hasattr(self, "antialias_check"):
+            self.antialias_check.setChecked(bool(getattr(self._window, "_plot_antialias_enabled", False)))
+        if hasattr(self, "line_mode_combo"):
+            current_step_mode = _normalize_line_mode(getattr(self._window, "_sensorgram_line_step_mode", None))
+            current_index = 0
+            for index in range(self.line_mode_combo.count()):
+                if self.line_mode_combo.itemData(index) == current_step_mode:
+                    current_index = index
+                    break
+            self.line_mode_combo.setCurrentIndex(current_index)
+        if hasattr(self, "line_width_spin"):
+            self.line_width_spin.setValue(float(getattr(self._window, "_sensorgram_line_width_px", 2.2)))
+        if hasattr(self, "follow_latest_buffer_combo"):
+            current_buffer_fraction = getattr(self._window, "_metric_autoscale_follow_latest_buffer_fraction", 0.05)
+            if current_buffer_fraction is None:
+                current_buffer_fraction = 0.0
+            try:
+                current_buffer_fraction = float(current_buffer_fraction)
+            except (TypeError, ValueError):
+                current_buffer_fraction = 0.05
+            current_index = 0
+            for index, (_label, fraction) in enumerate(_BUFFER_OPTIONS):
+                if fraction is None:
+                    match = current_buffer_fraction <= 0.0
+                else:
+                    match = abs(float(fraction) - current_buffer_fraction) < abs(
+                        float(_BUFFER_OPTIONS[current_index][1] or 0.0) - current_buffer_fraction
+                    )
+                if match:
+                    current_index = index
+            self.follow_latest_buffer_combo.setCurrentIndex(current_index)
+        if hasattr(self, "autoscale_throttle_combo"):
+            current_throttle_s = getattr(self._window, "_metric_autoscale_min_interval_s", 1.0)
+            try:
+                current_throttle_s = float(current_throttle_s)
+            except (TypeError, ValueError):
+                current_throttle_s = 1.0
+            current_index = 0
+            for index, (_label, seconds) in enumerate(_AUTOSCALE_THROTTLE_OPTIONS):
+                if abs(float(seconds or 0.0) - current_throttle_s) < abs(float(_AUTOSCALE_THROTTLE_OPTIONS[current_index][1] or 0.0) - current_throttle_s):
+                    current_index = index
+            self.autoscale_throttle_combo.setCurrentIndex(current_index)
+        if hasattr(self, "skip_tiny_changes_check"):
+            self.skip_tiny_changes_check.setChecked(bool(getattr(self._window, "_metric_autoscale_skip_tiny_changes_enabled", True)))
+        if hasattr(self, "metric_display_points_spin"):
+            self.metric_display_points_spin.setValue(int(getattr(self._window, "_plot_display_points", 512)))
+        if hasattr(self, "recent_tail_points_spin"):
+            self.recent_tail_points_spin.setValue(int(getattr(self._window, "_sensorgram_compression_recent_tail_points", 300)))
+        if hasattr(self, "envelope_overlay_check"):
+            self.envelope_overlay_check.setChecked(bool(getattr(self._window, "_sensorgram_metric_envelope_overlay_enabled", False)))
+        if hasattr(self, "envelope_overlay_alpha_spin"):
+            current_alpha = int(getattr(self._window, "_sensorgram_metric_envelope_overlay_alpha", 16))
+            self.envelope_overlay_alpha_spin.setValue(max(0, min(current_alpha, 100)))
+        _log_dialog_timing(
+            self._window,
+            "sensorgram_settings.refresh",
+            f"Sensorgram settings refresh_from_window completed in {(perf_counter() - started) * 1000.0:.2f} ms",
+        )
+
+    def _restore_dialog_geometry(self) -> None:
+        geometry = load_app_setting(_SENSORGRAM_SETTINGS_DIALOG_GEOMETRY_KEY, "")
+        if isinstance(geometry, str) and geometry:
+            try:
+                if self.restoreGeometry(QByteArray.fromBase64(geometry.encode("ascii"))):
+                    return
+            except Exception:
+                pass
+
+    def _save_dialog_geometry(self) -> None:
+        try:
+            geometry = bytes(self.saveGeometry().toBase64()).decode("ascii")
+        except Exception:
+            return
+        if geometry:
+            save_app_setting(_SENSORGRAM_SETTINGS_DIALOG_GEOMETRY_KEY, geometry)
+
+    def _control_overlay_position(self) -> str:
+        button = getattr(self, "control_overlay_position_button", None)
+        if button is None:
+            return "top"
+        return "bottom" if bool(button.isChecked()) else "top"
+
+    def _set_control_overlay_position(self, position: str) -> None:
+        button = getattr(self, "control_overlay_position_button", None)
+        if button is None:
+            return
+        button.blockSignals(True)
+        button.setChecked(str(position or "top").strip().lower() == "bottom")
+        button.blockSignals(False)
+        self._sync_control_overlay_position_button()
+
+    def _sync_control_overlay_position_button(self) -> None:
+        button = getattr(self, "control_overlay_position_button", None)
+        if button is None:
+            return
+        position = self._control_overlay_position()
+        icon_name = "arrow_bar_to_up" if position == "bottom" else "arrow_bar_to_down"
+        button.setIcon(tint_tabler_icon(flow_tabler_icon(icon_name), QColor("#f0f3f7")))
+        button.setToolTip(
+            "Timeline at the bottom. Click to move it to the top."
+            if position == "bottom"
+            else "Timeline at the top. Click to move it to the bottom."
+        )
+
+    def _sync_control_overlay_widgets(self) -> None:
+        style = str(self.control_overlay_style_combo.currentData() or "bar")
+        stack = getattr(self, "control_overlay_param_stack", None)
+        if stack is not None:
+            stack.setCurrentIndex(0 if style == "bar" else 1)
 
     def _build_live_tab(self) -> QWidget:
         page = QWidget(self)
@@ -460,23 +630,99 @@ class SensorgramPlotSettingsDialog(QDialog):
         self.metric_mode_selector.selectionChanged.connect(self._on_metric_mode_selection_changed)
         outer.addWidget(self.metric_mode_selector)
 
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.control_overlay_style_combo = QComboBox()
+        self.control_overlay_style_combo.addItem("Compact", "bar")
+        self.control_overlay_style_combo.addItem("Full", "background")
+        self.control_overlay_style_combo.setCurrentIndex(
+            0 if str(getattr(self._window, "_sensorgram_control_step_overlay_style", "bar")) == "bar" else 1
+        )
+        self.control_overlay_style_combo.setToolTip(
+            "Choose whether the timeline is shown as compact bars or full-height background bands."
+        )
 
-        self.antialias_check = QCheckBox("Enabled")
+        self.control_overlay_check = QCheckBox("")
+        self.control_overlay_check.setChecked(
+            bool(getattr(self._window, "_sensorgram_control_step_overlay_enabled", True))
+        )
+        self.control_overlay_check.setToolTip(
+            "Overlay the real experiment-control steps on the sensorgram plot. The live runtime state is used, so jumps, pauses, and step changes all update the overlay."
+        )
+        self.control_overlay_check.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.control_overlay_check.setStyleSheet(
+            "QCheckBox { margin: 0px; padding: 0px; spacing: 4px; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; }"
+        )
+
+        self.control_overlay_position_button = _make_frameless_icon_button(
+            tint_tabler_icon(flow_tabler_icon("arrow_bar_to_down"), QColor("#8fbaff")),
+            "Timeline at the top. Click to move it to the bottom.",
+            size=24,
+            parent=self,
+        )
+        self.control_overlay_position_button.setCheckable(True)
+        self.control_overlay_position_button.setChecked(
+            str(getattr(self._window, "_sensorgram_control_step_overlay_position", "top")) == "bottom"
+        )
+        self.control_overlay_position_button.clicked.connect(lambda *_args: self._sync_control_overlay_position_button())
+        self._sync_control_overlay_position_button()
+
+        self.control_overlay_thickness_spin = QSpinBox()
+        make_compact_spinbox(self.control_overlay_thickness_spin)
+        self.control_overlay_thickness_spin.setRange(8, 72)
+        self.control_overlay_thickness_spin.setSuffix(" px")
+        self.control_overlay_thickness_spin.setValue(
+            int(max(min(float(getattr(self._window, "_sensorgram_control_step_overlay_bar_height_px", 18)), 72.0), 8.0))
+        )
+        self.control_overlay_thickness_spin.setToolTip(
+            "Timeline size in pixels for compact mode. The label text scales with this value so the bar stays tall enough to contain it."
+        )
+        self.control_overlay_thickness_spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.control_overlay_thickness_spin.setFixedWidth(74)
+
+        self.control_overlay_opacity_spin = QSpinBox()
+        make_compact_spinbox(self.control_overlay_opacity_spin)
+        self.control_overlay_opacity_spin.setRange(0, 100)
+        self.control_overlay_opacity_spin.setSuffix("%")
+        self.control_overlay_opacity_spin.setValue(
+            int(max(min(float(getattr(self._window, "_sensorgram_control_step_overlay_opacity", 25.0)), 100.0), 0.0))
+        )
+        self.control_overlay_opacity_spin.setToolTip("Opacity used by the full timeline background.")
+        self.control_overlay_opacity_spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.control_overlay_opacity_spin.setFixedWidth(74)
+
+        self.control_overlay_size_label = QLabel("Size")
+        self.control_overlay_size_label.setToolTip("Timeline size in pixels for compact mode.")
+        self.control_overlay_size_widget = QWidget(self)
+        control_overlay_size_row = QHBoxLayout(self.control_overlay_size_widget)
+        control_overlay_size_row.setContentsMargins(0, 0, 0, 0)
+        control_overlay_size_row.setSpacing(8)
+        control_overlay_size_row.addWidget(self.control_overlay_size_label)
+        control_overlay_size_row.addWidget(self.control_overlay_thickness_spin)
+        self.control_overlay_size_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        self.control_overlay_opacity_label = QLabel("Opacity")
+        self.control_overlay_opacity_label.setToolTip("Opacity used by the full timeline background.")
+        self.control_overlay_opacity_widget = QWidget(self)
+        control_overlay_opacity_row = QHBoxLayout(self.control_overlay_opacity_widget)
+        control_overlay_opacity_row.setContentsMargins(0, 0, 0, 0)
+        control_overlay_opacity_row.setSpacing(8)
+        control_overlay_opacity_row.addWidget(self.control_overlay_opacity_label)
+        control_overlay_opacity_row.addWidget(self.control_overlay_opacity_spin)
+        self.control_overlay_opacity_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        self.control_overlay_style_combo.currentIndexChanged.connect(lambda *_args: self._sync_control_overlay_widgets())
+        self._sync_control_overlay_widgets()
+
+        self.control_overlay_param_stack = QStackedWidget(self)
+        self.control_overlay_param_stack.addWidget(self.control_overlay_size_widget)
+        self.control_overlay_param_stack.addWidget(self.control_overlay_opacity_widget)
+        self.control_overlay_param_stack.setCurrentIndex(0 if str(self.control_overlay_style_combo.currentData() or "bar") == "bar" else 1)
+
+        self.antialias_check = QCheckBox("")
         self.antialias_check.setChecked(bool(getattr(self._window, "_plot_antialias_enabled", False)))
         self.antialias_check.setToolTip(
             "Enable anti-aliasing for sensorgram drawing."
         )
-        form.addRow("Anti-aliasing", self.antialias_check)
-
-        line_style_row = QHBoxLayout()
-        line_style_row.setContentsMargins(0, 0, 0, 0)
-        line_style_row.setSpacing(8)
-
-        interp_label = QLabel("Interpolation")
-        interp_label.setToolTip("Choose how the sensorgram line is rendered.")
-        line_style_row.addWidget(interp_label)
 
         self.line_mode_combo = QComboBox()
         for option in _LINE_MODE_OPTIONS:
@@ -489,13 +735,8 @@ class SensorgramPlotSettingsDialog(QDialog):
                 break
         self.line_mode_combo.setCurrentIndex(current_index)
         self.line_mode_combo.setToolTip(
-            "Choose how points are connected in the sensorgram line: straight, stepped, or spline-smoothed."
+            "Choose how points are connected in the sensorgram line: straight or stepped."
         )
-        line_style_row.addWidget(self.line_mode_combo)
-
-        width_label = QLabel("Width")
-        width_label.setToolTip("Line thickness for the sensorgram curves.")
-        line_style_row.addWidget(width_label)
 
         self.line_width_spin = QDoubleSpinBox()
         self.line_width_spin.setRange(0.5, 10.0)
@@ -508,8 +749,6 @@ class SensorgramPlotSettingsDialog(QDialog):
         self.line_width_spin.setToolTip("Set the thickness of the sensorgram line in pixels.")
         self.line_width_spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.line_width_spin.setFixedWidth(62)
-        line_style_row.addWidget(self.line_width_spin)
-        line_style_row.addStretch(1)
 
         self.follow_latest_buffer_combo = QComboBox()
         current_buffer_fraction = getattr(self._window, "_metric_autoscale_follow_latest_buffer_fraction", 0.05)
@@ -534,11 +773,6 @@ class SensorgramPlotSettingsDialog(QDialog):
         self.follow_latest_buffer_combo.setToolTip(
             "Keep a blank buffer on the right side of the sensorgram plot so new data does not immediately touch the edge."
         )
-        form.addRow("Right buffer", self.follow_latest_buffer_combo)
-
-        autoscale_row = QHBoxLayout()
-        autoscale_row.setContentsMargins(0, 0, 0, 0)
-        autoscale_row.setSpacing(8)
 
         self.autoscale_throttle_combo = QComboBox()
         current_throttle_s = getattr(self._window, "_metric_autoscale_min_interval_s", 1.0)
@@ -555,8 +789,6 @@ class SensorgramPlotSettingsDialog(QDialog):
         self.autoscale_throttle_combo.setToolTip(
             "Limit how often the sensorgram plot may rescale its axes. Higher throttling reduces redraw churn, but the view follows new data more slowly."
         )
-        autoscale_row.addWidget(QLabel("Throttling"))
-        autoscale_row.addWidget(self.autoscale_throttle_combo)
 
         self.skip_tiny_changes_check = QCheckBox("Gate")
         self.skip_tiny_changes_check.setChecked(
@@ -565,19 +797,6 @@ class SensorgramPlotSettingsDialog(QDialog):
         self.skip_tiny_changes_check.setToolTip(
             "Skip autoscale updates when the visible range change is very small. This reduces unnecessary redraws in both display modes."
         )
-        autoscale_row.addSpacing(12)
-        autoscale_row.addWidget(self.skip_tiny_changes_check)
-        autoscale_row.addStretch(1)
-
-        autoscale_row_widget = QWidget(self)
-        autoscale_row_widget.setLayout(autoscale_row)
-        form.addRow("Autoscale", autoscale_row_widget)
-
-        metric_form = QFormLayout()
-        metric_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        points_row = QHBoxLayout()
-        points_row.setContentsMargins(0, 0, 0, 0)
-        points_row.setSpacing(12)
 
         self.metric_display_points_spin = QSpinBox()
         make_compact_spinbox(self.metric_display_points_spin)
@@ -586,7 +805,6 @@ class SensorgramPlotSettingsDialog(QDialog):
         self.metric_display_points_spin.setToolTip(
             "Maximum number of points kept visible in the sensorgram time plot."
         )
-        points_row.addWidget(self.metric_display_points_spin)
 
         self.recent_tail_points_spin = QSpinBox()
         make_compact_spinbox(self.recent_tail_points_spin)
@@ -598,54 +816,103 @@ class SensorgramPlotSettingsDialog(QDialog):
         self.recent_tail_points_spin.setToolTip(
             "Number of newest points kept uncompressed in the absolute sensorgram plot. Older data is shown using compression."
         )
-        points_row.addSpacing(12)
-        points_row.addWidget(QLabel("Live tail"))
-        points_row.addWidget(self.recent_tail_points_spin)
-        points_row.addStretch(1)
 
-        points_row_widget = QWidget(self)
-        points_row_widget.setLayout(points_row)
-        metric_form.addRow("Display points", points_row_widget)
-
-        line_style_row_widget = QWidget(self)
-        line_style_row_widget.setLayout(line_style_row)
-        metric_form.addRow("Line", line_style_row_widget)
-
-        self.envelope_overlay_check = QCheckBox("Show")
+        self.envelope_overlay_check = QCheckBox("")
         self.envelope_overlay_check.setChecked(
             bool(getattr(self._window, "_sensorgram_metric_envelope_overlay_enabled", False))
         )
         self.envelope_overlay_check.setToolTip(
             "Draw the min/max envelope as a faint secondary layer over the trend line."
         )
-        envelope_row = QHBoxLayout()
-        envelope_row.setContentsMargins(0, 0, 0, 0)
-        envelope_row.setSpacing(8)
-        envelope_row.addWidget(self.envelope_overlay_check)
+        self.envelope_overlay_check.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.envelope_overlay_check.setStyleSheet(
+            "QCheckBox { margin: 0px; padding: 0px; spacing: 4px; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; }"
+        )
 
-        self.envelope_overlay_alpha_slider = QSlider(Qt.Orientation.Horizontal)
-        self.envelope_overlay_alpha_slider.setRange(0, 100)
-        self.envelope_overlay_alpha_slider.setSingleStep(1)
-        self.envelope_overlay_alpha_slider.setPageStep(10)
+        self.envelope_overlay_alpha_spin = QSpinBox()
+        make_compact_spinbox(self.envelope_overlay_alpha_spin)
+        self.envelope_overlay_alpha_spin.setRange(0, 100)
+        self.envelope_overlay_alpha_spin.setSuffix("%")
         current_alpha = int(getattr(self._window, "_sensorgram_metric_envelope_overlay_alpha", 16))
         current_alpha = max(0, min(current_alpha, 100))
-        self.envelope_overlay_alpha_slider.setValue(current_alpha)
-        self.envelope_overlay_alpha_value = QLabel(f"{current_alpha}%")
-        self.envelope_overlay_alpha_value.setMinimumWidth(40)
-        self.envelope_overlay_alpha_slider.setToolTip(
+        self.envelope_overlay_alpha_spin.setValue(current_alpha)
+        self.envelope_overlay_alpha_spin.setToolTip(
             "Control how visible the envelope band is. Lower values are more subtle; higher values make the band more obvious."
         )
-        self.envelope_overlay_alpha_slider.valueChanged.connect(
-            lambda value: self.envelope_overlay_alpha_value.setText(f"{int(value)}%")
-        )
-        envelope_row.addWidget(self.envelope_overlay_alpha_slider, 1)
-        envelope_row.addWidget(self.envelope_overlay_alpha_value)
-        envelope_row_widget = QWidget(self)
-        envelope_row_widget.setLayout(envelope_row)
-        metric_form.addRow("Envelope overlay", envelope_row_widget)
+        self.envelope_overlay_alpha_spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.envelope_overlay_alpha_spin.setFixedWidth(74)
 
-        outer.addLayout(metric_form)
-        outer.addLayout(form)
+        plot_grid = QGridLayout()
+        plot_grid.setContentsMargins(0, 0, 0, 0)
+        plot_grid.setHorizontalSpacing(8)
+        plot_grid.setVerticalSpacing(6)
+        plot_grid.setColumnMinimumWidth(0, 136)
+        plot_grid.setColumnMinimumWidth(1, 88)
+        plot_grid.setColumnMinimumWidth(2, 88)
+        plot_grid.setColumnMinimumWidth(3, 84)
+        plot_grid.setColumnStretch(4, 1)
+        plot_grid.addWidget(_make_row_title_label("Display points"), 0, 0, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(self.metric_display_points_spin, 0, 1, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(_make_row_title_label("Live tail"), 0, 2, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(self.recent_tail_points_spin, 0, 3, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(_make_row_title_label("Line"), 1, 0, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(self.line_mode_combo, 1, 1, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(self.line_width_spin, 1, 2, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(_make_row_title_label("Envelope"), 2, 0, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(self.envelope_overlay_check, 2, 1, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(self.envelope_overlay_alpha_spin, 2, 2, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(_make_row_title_label("Right buffer"), 3, 0, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(self.follow_latest_buffer_combo, 3, 1, 1, 3, Qt.AlignmentFlag.AlignVCenter)
+
+        timeline_grid = QGridLayout()
+        timeline_grid.setContentsMargins(0, 0, 0, 0)
+        timeline_grid.setHorizontalSpacing(8)
+        timeline_grid.setVerticalSpacing(6)
+        timeline_grid.setColumnMinimumWidth(0, 136)
+        timeline_grid.setColumnMinimumWidth(1, 24)
+        timeline_grid.setColumnMinimumWidth(2, 92)
+        timeline_grid.setColumnMinimumWidth(3, 28)
+        timeline_grid.setColumnMinimumWidth(4, 92)
+        timeline_grid.setColumnStretch(5, 1)
+        timeline_grid.addWidget(_make_row_title_label("Timeline"), 0, 0, Qt.AlignmentFlag.AlignVCenter)
+        timeline_grid.addWidget(self.control_overlay_check, 0, 1, Qt.AlignmentFlag.AlignVCenter)
+        timeline_grid.addWidget(self.control_overlay_style_combo, 0, 2, Qt.AlignmentFlag.AlignVCenter)
+        timeline_grid.addWidget(self.control_overlay_position_button, 0, 3, Qt.AlignmentFlag.AlignVCenter)
+        timeline_grid.addWidget(self.control_overlay_param_stack, 0, 4, 1, 2, Qt.AlignmentFlag.AlignVCenter)
+
+        performance_grid = QGridLayout()
+        performance_grid.setContentsMargins(0, 0, 0, 0)
+        performance_grid.setHorizontalSpacing(8)
+        performance_grid.setVerticalSpacing(6)
+        performance_grid.setColumnMinimumWidth(0, 136)
+        performance_grid.setColumnMinimumWidth(1, 24)
+        performance_grid.setColumnMinimumWidth(2, 88)
+        performance_grid.setColumnStretch(3, 1)
+        performance_grid.addWidget(_make_row_title_label("Anti-aliasing"), 0, 0, Qt.AlignmentFlag.AlignVCenter)
+        performance_grid.addWidget(self.antialias_check, 0, 1, 1, 2, Qt.AlignmentFlag.AlignVCenter)
+        performance_grid.addWidget(_make_row_title_label("Autoscale"), 1, 0, Qt.AlignmentFlag.AlignVCenter)
+        performance_grid.addWidget(self.skip_tiny_changes_check, 1, 1, Qt.AlignmentFlag.AlignVCenter)
+        performance_grid.addWidget(_make_row_title_label("Throttling"), 1, 2, Qt.AlignmentFlag.AlignVCenter)
+        performance_grid.addWidget(self.autoscale_throttle_combo, 1, 3, Qt.AlignmentFlag.AlignVCenter)
+
+        def _section_title(text: str) -> QLabel:
+            label = QLabel(text)
+            label.setStyleSheet("font-weight: 700; margin-top: 2px; margin-bottom: 0px;")
+            label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            return label
+
+        sections_grid = QGridLayout()
+        sections_grid.setContentsMargins(0, 0, 0, 0)
+        sections_grid.setHorizontalSpacing(0)
+        sections_grid.setVerticalSpacing(6)
+        sections_grid.addWidget(_section_title("Sensorgram plot"), 0, 0, Qt.AlignmentFlag.AlignLeft)
+        sections_grid.addLayout(plot_grid, 1, 0)
+        sections_grid.addWidget(_section_title("Timeline"), 2, 0, Qt.AlignmentFlag.AlignLeft)
+        sections_grid.addLayout(timeline_grid, 3, 0)
+        sections_grid.addWidget(_section_title("Performance"), 4, 0, Qt.AlignmentFlag.AlignLeft)
+        sections_grid.addLayout(performance_grid, 5, 0)
+        outer.addLayout(sections_grid)
         return page
 
     def _build_preview_tab(self) -> QWidget:
@@ -677,7 +944,7 @@ class SensorgramPlotSettingsDialog(QDialog):
         heatmap_points_row_widget.setLayout(heatmap_points_row)
         preview_form.addRow("Points rendered", heatmap_points_row_widget)
 
-        preview_note = QLabel("These settings affect the sensorgram heatmap preview display.")
+        preview_note = QLabel("Coming soon: preview mode settings are still in development.")
         preview_note.setWordWrap(True)
         preview_form.addRow("", preview_note)
 
@@ -695,7 +962,6 @@ class SensorgramPlotSettingsDialog(QDialog):
             else:
                 window._sensorgram_metric_visible_modes = set(state.visible_modes)
                 window._sensorgram_metric_primary_mode = state.primary_mode
-                window._trace_stats_metric_name = state.primary_mode
         window._plot_antialias_enabled = bool(self.antialias_check.isChecked())
         pg.setConfigOptions(antialias=window._plot_antialias_enabled)
         window._plot_display_points = int(self.metric_display_points_spin.value())
@@ -710,11 +976,16 @@ class SensorgramPlotSettingsDialog(QDialog):
         window._metric_autoscale_skip_tiny_changes_enabled = bool(self.skip_tiny_changes_check.isChecked())
         window._sensorgram_compression_recent_tail_points = max(int(self.recent_tail_points_spin.value()), 0)
         window._sensorgram_metric_envelope_overlay_enabled = bool(self.envelope_overlay_check.isChecked())
-        window._sensorgram_metric_envelope_overlay_alpha = max(int(self.envelope_overlay_alpha_slider.value()), 0)
+        window._sensorgram_metric_envelope_overlay_alpha = max(int(self.envelope_overlay_alpha_spin.value()), 0)
+        window._sensorgram_control_step_overlay_enabled = bool(self.control_overlay_check.isChecked())
+        window._sensorgram_control_step_overlay_style = str(self.control_overlay_style_combo.currentData() or "bar")
+        window._sensorgram_control_step_overlay_position = self._control_overlay_position()
+        window._sensorgram_control_step_overlay_opacity = float(self.control_overlay_opacity_spin.value())
+        window._sensorgram_control_step_overlay_bar_height_px = int(self.control_overlay_thickness_spin.value())
         window._spectrum_render_cache_key = None
         if hasattr(window, "_plot_view_cache") and hasattr(window._plot_view_cache, "refresh_live_absolute_metric_cache"):
             try:
-                if bool(getattr(window, "_live_active", False)) and getattr(window, "_normalize_sensorgram_view_mode", lambda value: value)(getattr(window, "_sensorgram_view_mode", "absolute")) == "absolute":
+                if bool(getattr(window, "_live_active", False)):
                     selected_metrics = set(getattr(window, "_selected_trace_metrics", lambda: [])())
                     archive_path = getattr(window, "_metric_archive_path", None)
                     if hasattr(window._plot_view_cache, "set_live_absolute_metric_tail_size"):
@@ -732,6 +1003,16 @@ class SensorgramPlotSettingsDialog(QDialog):
         if hasattr(window, "_apply_sensorgram_display_style"):
             try:
                 window._apply_sensorgram_display_style()
+            except Exception:
+                pass
+        if hasattr(window, "_sync_sensorgram_control_step_overlay"):
+            try:
+                window._sync_sensorgram_control_step_overlay()
+            except Exception:
+                pass
+        if hasattr(window, "_update_trace_stats"):
+            try:
+                window._update_trace_stats()
             except Exception:
                 pass
         if hasattr(window, "_apply_metric_color_styles"):
@@ -758,11 +1039,19 @@ class SensorgramPlotSettingsDialog(QDialog):
         else:
             window._sensorgram_metric_visible_modes = set(visible_modes)
             window._sensorgram_metric_primary_mode = primary_mode
-            window._trace_stats_metric_name = primary_mode
 
     def accept(self) -> None:
         self.apply_settings()
+        self._save_dialog_geometry()
         super().accept()
+
+    def reject(self) -> None:
+        self._save_dialog_geometry()
+        super().reject()
+
+    def closeEvent(self, event) -> None:
+        self._save_dialog_geometry()
+        super().closeEvent(event)
 
     def keyPressEvent(self, event) -> None:
         if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
@@ -774,6 +1063,40 @@ class SensorgramPlotSettingsDialog(QDialog):
 
 
 def show_sensorgram_plot_settings_dialog_for(window) -> None:
+    existing = getattr(window, "_sensorgram_settings_dialog", None)
+    if existing is not None:
+        try:
+            if existing.isVisible():
+                _log_dialog_timing(window, "sensorgram_settings.reuse", "Sensorgram settings dialog reused while already visible.")
+                existing.raise_()
+                existing.activateWindow()
+                return
+            if hasattr(existing, "refresh_from_window"):
+                reuse_started = perf_counter()
+                existing.refresh_from_window()
+                _log_dialog_timing(
+                    window,
+                    "sensorgram_settings.reuse",
+                    f"Sensorgram settings dialog refreshed for reuse in {(perf_counter() - reuse_started) * 1000.0:.2f} ms",
+                )
+            existing.exec()
+            return
+        except Exception:
+            pass
+
+    started = perf_counter()
     dialog = SensorgramPlotSettingsDialog(window)
+    window._sensorgram_settings_dialog = dialog
+
+    def _clear_dialog_reference(*_args) -> None:
+        if getattr(window, "_sensorgram_settings_dialog", None) is dialog:
+            window._sensorgram_settings_dialog = None
+
+    dialog.destroyed.connect(_clear_dialog_reference)
+    _log_dialog_timing(
+        window,
+        "sensorgram_settings.open",
+        f"Sensorgram settings dialog open path completed in {(perf_counter() - started) * 1000.0:.2f} ms before exec()",
+    )
     dialog.exec()
 

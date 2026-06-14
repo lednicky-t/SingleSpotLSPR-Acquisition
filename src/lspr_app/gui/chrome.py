@@ -110,6 +110,15 @@ def build_menu_bar(window) -> QMenuBar:
     )
     debug_mode_action.toggled.connect(window._set_processing_debug_mode_enabled)
 
+    diagnostics_panel_action = help_menu.addAction("Diagnostics panel")
+    diagnostics_panel_action.setCheckable(True)
+    diagnostics_panel_action.setChecked(bool(getattr(window, "_diagnostics_panel_enabled", False)))
+    diagnostics_panel_action.setToolTip(
+        "Show or hide the log and diagnostics panel on the left side of the window."
+    )
+    diagnostics_panel_action.toggled.connect(window._toggle_diagnostics_panel)
+    window._diagnostics_panel_action = diagnostics_panel_action
+
     performance_menu = help_menu.addMenu("Performance switches")
 
     acquisition_autosave_action = performance_menu.addAction("Acquisition-state autosave")
@@ -117,12 +126,6 @@ def build_menu_bar(window) -> QMenuBar:
     acquisition_autosave_action.setChecked(bool(getattr(window, "_acquisition_state_autosave_enabled", True)))
     acquisition_autosave_action.setToolTip("Automatically save acquisition state during UI and acquisition changes.")
     acquisition_autosave_action.toggled.connect(window._set_acquisition_state_autosave_enabled)
-
-    ui_autosave_action = performance_menu.addAction("UI-state autosave")
-    ui_autosave_action.setCheckable(True)
-    ui_autosave_action.setChecked(bool(getattr(window, "_ui_state_autosave_enabled", True)))
-    ui_autosave_action.setToolTip("Automatically save window geometry and UI layout changes.")
-    ui_autosave_action.toggled.connect(window._set_ui_state_autosave_enabled)
 
     log_buffering_action = performance_menu.addAction("Log buffering")
     log_buffering_action.setCheckable(True)

@@ -122,6 +122,25 @@ from lspr_io import (
 _LOGGER = logging.getLogger("lspr_app.experiment_control")
 
 
+def _make_frameless_icon_button(icon: QIcon, tooltip: str, *, size: int = 22, parent: QWidget | None = None) -> QToolButton:
+    button = QToolButton(parent)
+    button.setObjectName("framelessIconButton")
+    button.setIcon(icon)
+    button.setToolTip(tooltip)
+    button.setAutoRaise(True)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setIconSize(QSize(size - 8, size - 8))
+    button.setFixedSize(size, size)
+    button.setStyleSheet(
+        "QToolButton#framelessIconButton { background: transparent; border: none; padding: 0px; }"
+        "QToolButton#framelessIconButton:hover { background: rgba(127, 127, 127, 0.10); border: none; }"
+        "QToolButton#framelessIconButton:checked { background: rgba(127, 127, 127, 0.14); border: none; }"
+        "QToolButton#framelessIconButton:checked:hover { background: rgba(127, 127, 127, 0.18); border: none; }"
+        "QToolButton#framelessIconButton:pressed { background: rgba(127, 127, 127, 0.18); border: none; }"
+    )
+    return button
+
+
 def _safe_float(text: str, default: float = 0.0) -> float:
     try:
         return float(str(text).strip())
@@ -2014,6 +2033,15 @@ class ExperimentControlWindow(QWidget):
             " font-weight: 700;"
             "}"
         )
+        editor_header.setCursor(Qt.CursorShape.PointingHandCursor)
+        editor_header.setToolTip("Double-click to switch to processed spectra.")
+        self._experiment_control_header_label = editor_header
+        editor_hide_button = _make_frameless_icon_button(
+            tint_tabler_icon(flow_tabler_icon("eye_off", "eye-off"), QColor("#8a98a8")),
+            "Hide experimental control.",
+            size=22,
+        )
+        editor_hide_button.clicked.connect(lambda _checked=False: self._activate_spectra_view())
         editor_header_row = QWidget()
         editor_header_row_layout = QHBoxLayout()
         editor_header_row_layout.setContentsMargins(0, 0, 0, 0)
@@ -2029,6 +2057,7 @@ class ExperimentControlWindow(QWidget):
         self._update_experiment_control_view_mode_button()
         editor_header_row_layout.addWidget(self._experiment_control_view_mode_button)
         editor_header_row_layout.addStretch(1)
+        editor_header_row_layout.addWidget(editor_hide_button)
         editor_header_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         editor_header_row.setLayout(editor_header_row_layout)
         self._experiment_control_header_row = editor_header_row
@@ -2617,8 +2646,15 @@ class ExperimentControlWindow(QWidget):
             callback()
         finally:
             elapsed_ms = (perf_counter() - started) * 1000.0
-            if elapsed_ms >= warn_ms:
-                _LOGGER.warning("Experiment control GUI callback %s took %.2f ms", label, elapsed_ms)
+            if elapsed_ms < warn_ms:
+                return
+            controller = getattr(self, "recording_controller", None)
+            source_mode = str(getattr(controller, "_source_mode", "") or "").strip().lower()
+            if source_mode == "simulation":
+                if bool(getattr(self, "_debug_timing_enabled", False)) or bool(getattr(self, "_deep_timing_enabled", False)):
+                    _LOGGER.debug("Experiment control GUI callback %s took %.2f ms", label, elapsed_ms)
+                return
+            _LOGGER.warning("Experiment control GUI callback %s took %.2f ms", label, elapsed_ms)
 
     def _advance_import_plan_busy_indicator(self) -> None:
         def _callback() -> None:

@@ -49,6 +49,14 @@ def build_recording_context_row_for(window) -> QWidget:
     return panel
 
 
+def _make_hide_panel_button(window, tooltip: str):
+    return window._make_frameless_icon_button(
+        tint_tabler_icon(flow_tabler_icon("eye_off", "eye-off"), QColor("#8a98a8")),
+        tooltip,
+        size=22,
+    )
+
+
 def build_main_layout_for(window) -> None:
     measurement_bar = QHBoxLayout()
     measurement_bar.setSpacing(4)
@@ -83,26 +91,18 @@ def build_main_layout_for(window) -> None:
     trace_title = QLabel("Sensorgram")
     trace_title.setObjectName("sensorgramHeaderLabel")
     trace_title.setStyleSheet("color: #8FE3A1;")
-    window.sensorgram_view_mode_button.setObjectName("sensorgramViewModeButton")
-    window.sensorgram_view_mode_button.setAutoRaise(True)
-    window.sensorgram_view_mode_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-    window.sensorgram_view_mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
-    window.sensorgram_view_mode_button.clicked.connect(window._cycle_sensorgram_view_mode)
-    window._update_sensorgram_view_mode_button()
-    window.sensorgram_display_window_button.clicked.connect(window._cycle_sensorgram_display_window_s)
-    window._update_sensorgram_display_window_button()
     window.sensorgram_content_mode_button.clicked.connect(window._cycle_sensorgram_content_mode)
     window._update_sensorgram_content_mode_button()
     window.sensorgram_settings_button.clicked.connect(window._show_sensorgram_plot_settings_dialog)
-    window._update_sensorgram_header_control_visibility()
 
     trace_title_row = QHBoxLayout()
     trace_title_row.setContentsMargins(0, 0, 0, 0)
     trace_title_row.setSpacing(6)
     trace_title_row.addWidget(trace_title)
-    trace_title_row.addWidget(window.sensorgram_view_mode_button)
-    trace_title_row.addWidget(window.sensorgram_display_window_button)
     trace_title_row.addStretch(1)
+    trace_title_hide_button = _make_hide_panel_button(window, "Hide sensorgram.")
+    trace_title_hide_button.clicked.connect(lambda _checked=False: window._toggle_sensorgram(False))
+    trace_title_row.addWidget(trace_title_hide_button)
     trace_title_row_widget = QWidget()
     trace_title_row_widget.setLayout(trace_title_row)
     trace_title_row_widget.setContentsMargins(0, 0, 0, 0)
@@ -175,11 +175,17 @@ def build_main_layout_for(window) -> None:
     trace_body_splitter.setStretchFactor(0, 0)
     trace_body_splitter.setStretchFactor(1, 1)
     trace_body_splitter.setSizes([170, 610])
+    trace_body_splitter.splitterMoved.connect(lambda *_: window._schedule_ui_state_persist())
     window.sensorgram_header_splitter = trace_body_splitter
 
     source_section = CollapsibleSection("Light source", source_block, expanded=True)
     source_section.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-    processing_section = CollapsibleSection("Processing", processing_group, expanded=False)
+    processing_section = CollapsibleSection(
+        "Tool panel",
+        processing_group,
+        expanded=False,
+        header_widgets=[window.save_processing_button, window.load_processing_button],
+    )
     session_top_row = QHBoxLayout()
     session_top_row.setContentsMargins(0, 0, 0, 0)
     session_top_row.setSpacing(6)
@@ -223,6 +229,7 @@ def build_main_layout_for(window) -> None:
     log_layout.addWidget(window.log_terminal)
     log_block.setLayout(log_layout)
     log_section = CollapsibleSection("Log", log_block, expanded=True)
+    log_section.setVisible(bool(getattr(window, "_diagnostics_panel_enabled", False)))
 
     window._source_section = source_section
     window._processing_section = processing_section
@@ -234,6 +241,20 @@ def build_main_layout_for(window) -> None:
     left_panel = QVBoxLayout()
     left_panel.setSpacing(6)
     left_panel.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+    tool_panel_title_row = QWidget()
+    tool_panel_title_layout = QHBoxLayout()
+    tool_panel_title_layout.setContentsMargins(0, 0, 0, 0)
+    tool_panel_title_layout.setSpacing(6)
+    tool_panel_title = QLabel("Tool panel")
+    tool_panel_title.setObjectName("toolPanelTitleLabel")
+    tool_panel_title.setStyleSheet("font-size: 13px; font-weight: 800; letter-spacing: 0.8px; color: #e0a84a;")
+    tool_panel_hide_button = _make_hide_panel_button(window, "Hide left controls.")
+    tool_panel_hide_button.clicked.connect(lambda _checked=False: window._toggle_left_controls(False))
+    tool_panel_title_layout.addWidget(tool_panel_title)
+    tool_panel_title_layout.addStretch(1)
+    tool_panel_title_layout.addWidget(tool_panel_hide_button)
+    tool_panel_title_row.setLayout(tool_panel_title_layout)
+    left_panel.addWidget(tool_panel_title_row)
     left_panel.addLayout(measurement_bar)
     left_panel.addWidget(source_section)
     left_panel.addWidget(processing_section)
@@ -258,9 +279,24 @@ def build_main_layout_for(window) -> None:
     spectrum_layout = QVBoxLayout()
     spectrum_layout.setContentsMargins(0, 0, 0, 0)
     spectrum_layout.setSpacing(4)
-    spectrum_header = QLabel("Processed Spectrum")
+    spectrum_header_row = QWidget()
+    spectrum_header_layout = QHBoxLayout()
+    spectrum_header_layout.setContentsMargins(0, 0, 0, 0)
+    spectrum_header_layout.setSpacing(6)
+    spectrum_header = QLabel("Processed Spectra")
+    spectrum_header.setObjectName("topContentHeaderLabel")
     spectrum_header.setStyleSheet("font-size: 13px; font-weight: 800; letter-spacing: 0.8px; color: #5b6775;")
-    spectrum_layout.addWidget(spectrum_header)
+    spectrum_header.setCursor(Qt.CursorShape.PointingHandCursor)
+    spectrum_header.setToolTip("Double-click to switch to experimental control.")
+    spectrum_header.installEventFilter(window)
+    window._processed_spectra_header_label = spectrum_header
+    spectrum_header_layout.addWidget(spectrum_header)
+    spectrum_header_layout.addStretch(1)
+    spectrum_header_hide_button = _make_hide_panel_button(window, "Hide processed spectra.")
+    spectrum_header_hide_button.clicked.connect(lambda _checked=False: window._activate_flow_view())
+    spectrum_header_layout.addWidget(spectrum_header_hide_button)
+    spectrum_header_row.setLayout(spectrum_header_layout)
+    spectrum_layout.addWidget(spectrum_header_row)
     spectrum_layout.addLayout(plot_bar)
     spectrum_layout.addLayout(spectrum_stats_bar)
     spectrum_layout.addWidget(window.spectrum_plot, 1)
@@ -312,6 +348,7 @@ def build_main_layout_for(window) -> None:
     plot_splitter.setStretchFactor(0, 2)
     plot_splitter.setStretchFactor(1, 3)
     plot_splitter.setSizes([430, 470])
+    plot_splitter.splitterMoved.connect(lambda *_: window._schedule_ui_state_persist())
     window.plot_splitter = plot_splitter
 
     right_panel = QVBoxLayout()
@@ -329,6 +366,7 @@ def build_main_layout_for(window) -> None:
     splitter.setStretchFactor(0, 0)
     splitter.setStretchFactor(1, 1)
     splitter.setSizes([260, 1100])
+    splitter.splitterMoved.connect(lambda *_: window._schedule_ui_state_persist())
     window.left_right_splitter = splitter
 
     recording_context_row = None
@@ -350,4 +388,3 @@ def build_main_layout_for(window) -> None:
     container.installEventFilter(window)
     window.setCentralWidget(container)
     window._sensorgram_header_controls_ready = True
-    window._update_sensorgram_header_control_visibility()

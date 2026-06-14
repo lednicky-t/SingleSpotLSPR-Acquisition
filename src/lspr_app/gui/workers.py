@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
-
 import numpy as np
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 
@@ -21,6 +20,10 @@ from lspr_app.domain.processing import (
     process_spectrum,
     processing_debug_mode_enabled,
     set_processing_debug_mode_enabled,
+)
+from lspr_app.gui.main_window_processing import (
+    sensorgram_metric_archive_names,
+    sensorgram_metric_mode_name,
 )
 from lspr_app.gui.plot_view_cache import build_heatmap_arrays
 from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter, repack_measurement_hdf5_file
@@ -307,12 +310,21 @@ class MetricArchiveReloadTask(QRunnable):
             from lspr_app.storage.hdf5_export import load_processed_metric_history
 
             logger.info(
-                "Metric archive reload started | path=%s | metric_names=%s",
+                "Metric archive reload started | purpose=%s | path=%s | metric_names=%s",
+                "absolute_reload",
                 self._request.path,
                 self._request.metric_names if self._request.metric_names is not None else "all",
             )
-            metric_names = set(self._request.metric_names) if self._request.metric_names is not None else None
-            series = load_processed_metric_history(self._request.path, metric_names=metric_names)
+            metric_names = sensorgram_metric_archive_names(self._request.metric_names) if self._request.metric_names is not None else None
+            series = load_processed_metric_history(
+                self._request.path,
+                metric_names=metric_names,
+            )
+            if series:
+                remapped_series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+                for metric_name, points in series.items():
+                    remapped_series[sensorgram_metric_mode_name(metric_name)] = points
+                series = remapped_series
             load_ms = (perf_counter() - load_started) * 1000.0
             metric_count = int(len(series))
             point_count = int(sum(int(len(points[0])) for points in series.values()))
@@ -321,7 +333,8 @@ class MetricArchiveReloadTask(QRunnable):
             self.signals.failed.emit(str(exc))
             return
         logger.info(
-            "Metric archive reload finished | path=%s | metrics=%s | points=%s",
+            "Metric archive reload finished | purpose=%s | path=%s | metrics=%s | points=%s",
+            "absolute_reload",
             self._request.path,
             metric_count,
             point_count,

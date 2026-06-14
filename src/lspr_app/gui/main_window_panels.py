@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from PyQt6.QtWidgets import (
+    QLayout,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -13,6 +14,11 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 
 from lspr_ui import make_info_button
+
+PROCESSING_SECTION_LABEL_COL_WIDTH = 78
+PROCESSING_CONTROL_COL_WIDTH = 64
+PROCESSING_SECTION_H_SPACING = 5
+PROCESSING_SECTION_V_SPACING = 3
 
 
 def build_spectrometer_page(window) -> QWidget:
@@ -172,40 +178,28 @@ def build_simulation_page(window) -> QWidget:
 
 def build_processing_group(window) -> QGroupBox:
     processing_group = QGroupBox()
-    processing_layout = QFormLayout()
-    processing_layout.setHorizontalSpacing(8)
-    processing_layout.setVerticalSpacing(6)
+    processing_layout = QVBoxLayout()
+    processing_layout.setContentsMargins(0, 0, 0, 0)
+    processing_layout.setSpacing(8)
 
-    processing_layout.addRow(_build_processing_range_widget(window))
-
-    baseline_label = QLabel("Baseline removal")
-    baseline_label.setToolTip("Baseline subtraction method.")
-    processing_layout.addRow(baseline_label, window.baseline_method_combo)
-
-    processing_layout.addRow(_build_processing_smoothing_widget(window))
-    processing_layout.addRow(_build_processing_fitting_widget(window))
-
-    poly_row = QHBoxLayout()
-    poly_row.addWidget(window.poly_order_spin)
-    poly_row.addWidget(window.poly_warning_label)
-    poly_row.addStretch(1)
-    poly_label = QLabel("Poly order")
-    poly_label.setToolTip("Polynomial order used when polynomial fitting is selected.")
-    processing_layout.addRow(poly_label, poly_row)
-
-    processing_buttons = QHBoxLayout()
-    processing_buttons.setSpacing(6)
-    processing_buttons.addWidget(window.save_processing_button)
-    processing_buttons.addWidget(window.load_processing_button)
-    processing_layout.addRow(processing_buttons)
+    processing_layout.addWidget(_build_processing_range_widget(window))
+    processing_layout.addWidget(
+        _build_processing_single_row_widget(
+            "Base removal",
+            window.baseline_method_combo,
+            "Baseline subtraction method.",
+        )
+    )
+    processing_layout.addWidget(_build_processing_smoothing_widget(window))
+    processing_layout.addWidget(_build_processing_fitting_widget(window))
     processing_group.setLayout(processing_layout)
     return processing_group
 
 
 def configure_processing_group_controls(window) -> None:
     range_width = max(window.range_min_spin.sizeHint().width(), window.range_max_spin.sizeHint().width())
-    expanded_range_width = max(int(round(range_width * 1.05)), 40)
-    resolution_width = max(int(round(expanded_range_width * 0.8)), 64)
+    expanded_range_width = max(int(round(range_width * 0.92)), 36)
+    resolution_width = max(int(round(expanded_range_width * 0.78)), 58)
     window.range_min_spin.setFixedWidth(expanded_range_width)
     window.range_max_spin.setFixedWidth(expanded_range_width)
     window.analysis_resolution_spin.setFixedWidth(resolution_width)
@@ -232,112 +226,147 @@ def configure_processing_group_controls(window) -> None:
         control.setFixedWidth(uniform_width)
 
 
+def _build_processing_single_row_widget(title: str, control, tooltip: str) -> QWidget:
+    widget = QWidget()
+    layout = QGridLayout()
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setHorizontalSpacing(PROCESSING_SECTION_H_SPACING)
+    layout.setVerticalSpacing(PROCESSING_SECTION_V_SPACING)
+    layout.setColumnMinimumWidth(0, PROCESSING_SECTION_LABEL_COL_WIDTH)
+    layout.setColumnStretch(1, 1)
+
+    title_widget = QLabel(title)
+    title_widget.setToolTip(tooltip)
+    layout.addWidget(title_widget, 0, 0, alignment=Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+    if isinstance(control, QLayout):
+        control_widget = QWidget()
+        control_layout = QHBoxLayout()
+        control_layout.setContentsMargins(0, 0, 0, 0)
+        control_layout.setSpacing(6)
+        control_layout.addLayout(control)
+        control_layout.addStretch(1)
+        control_widget.setLayout(control_layout)
+        layout.addWidget(control_widget, 0, 1, alignment=Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+    else:
+        layout.addWidget(control, 0, 1, alignment=Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+    widget.setLayout(layout)
+    widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+    return widget
+
+
 def _build_processing_range_widget(window) -> QWidget:
-    range_widget = QWidget()
-    range_layout = QGridLayout()
-    range_layout.setContentsMargins(0, 0, 0, 0)
-    range_layout.setHorizontalSpacing(6)
-    range_layout.setVerticalSpacing(2)
-    title_widget = QLabel("Range (nm)")
-    title_widget.setToolTip("Wavelength range used for processing and fits.")
-    range_layout.addWidget(title_widget, 0, 0, 1, 3, alignment=Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-
-    range_layout.setColumnStretch(0, 0)
-    range_layout.setColumnStretch(1, 0)
-    range_layout.setColumnStretch(2, 0)
-
-    labels = [
-        ("Min", "Minimum wavelength used for processing and fit range.", window.range_min_spin),
-        ("Max", "Maximum wavelength used for processing and fit range.", window.range_max_spin),
-        ("Resolution", "Resolution used for peak and centroid analysis.", window.analysis_resolution_spin),
-    ]
-    for column, (label, tooltip, control) in enumerate(labels):
-        label_widget = QLabel(label)
-        label_widget.setToolTip(tooltip)
-        control.setToolTip(tooltip)
-        range_layout.addWidget(label_widget, 1, column, alignment=Qt.AlignmentFlag.AlignLeft)
-        range_layout.addWidget(control, 2, column)
-
-    range_layout.setRowStretch(0, 0)
-    range_layout.setRowStretch(1, 0)
-    range_layout.setRowStretch(2, 0)
-    range_widget.setLayout(range_layout)
+    range_widget = _build_processing_two_row_grid(
+        "Range",
+        [
+            ("Min", "Minimum wavelength used for processing and fit range.", window.range_min_spin),
+            ("Max", "Maximum wavelength used for processing and fit range.", window.range_max_spin),
+            ("Resolution", "Resolution used for peak and centroid analysis.", window.analysis_resolution_spin),
+        ],
+        section_tooltip="Wavelength range in nm used for processing and fits.",
+        section_label_tooltip="Wavelength range in nm used for processing and fits.",
+    )
     range_widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
     return range_widget
 
 
 def _build_processing_smoothing_widget(window) -> QWidget:
-    smoothing_widget = QWidget()
-    smoothing_layout = QGridLayout()
-    smoothing_layout.setContentsMargins(0, 0, 0, 0)
-    smoothing_layout.setHorizontalSpacing(6)
-    smoothing_layout.setVerticalSpacing(2)
-
-    title_widget = QLabel("Smoothing")
-    title_widget.setToolTip("Smoothing settings for displayed and fitted spectra.")
-    smoothing_layout.addWidget(title_widget, 0, 0, 1, 3, alignment=Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-
-    smoothing_layout.setColumnStretch(0, 0)
-    smoothing_layout.setColumnStretch(1, 0)
-    smoothing_layout.setColumnStretch(2, 0)
-
-    specs = [
-        ("Temporal", "Temporal smoothing of displayed processed spectra.", window.temporal_smoothing_spin),
-        ("Method", "Spectral smoothing method.", window.smoothing_method_combo),
-        ("Window", "Spectral smoothing window size.", window.smoothing_window_spin),
-    ]
-    for column, (label, tooltip, control) in enumerate(specs):
-        label_widget = QLabel(label)
-        label_widget.setToolTip(tooltip)
-        control.setToolTip(tooltip)
-        smoothing_layout.addWidget(label_widget, 1, column, alignment=Qt.AlignmentFlag.AlignLeft)
-        smoothing_layout.addWidget(control, 2, column)
-
-    smoothing_layout.setRowStretch(0, 0)
-    smoothing_layout.setRowStretch(1, 0)
-    smoothing_layout.setRowStretch(2, 0)
-    smoothing_widget.setLayout(smoothing_layout)
+    smoothing_widget = _build_processing_two_row_grid(
+        "Smoothing",
+        [
+            ("Temporal", "Temporal smoothing of displayed processed spectra.", window.temporal_smoothing_spin),
+            ("Spectral", "Spectral smoothing method.", window.smoothing_method_combo),
+            ("Window", "Spectral smoothing window size.", window.smoothing_window_spin),
+        ],
+        section_tooltip="Smoothing settings for displayed and fitted spectra.",
+        section_label_tooltip="Smoothing settings for displayed and fitted spectra.",
+    )
     smoothing_widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
     return smoothing_widget
-
-
 def _build_processing_fitting_widget(window) -> QWidget:
     fitting_widget = QWidget()
     fitting_layout = QGridLayout()
     fitting_layout.setContentsMargins(0, 0, 0, 0)
-    fitting_layout.setHorizontalSpacing(6)
-    fitting_layout.setVerticalSpacing(2)
+    fitting_layout.setHorizontalSpacing(PROCESSING_SECTION_H_SPACING)
+    fitting_layout.setVerticalSpacing(PROCESSING_SECTION_V_SPACING)
+    fitting_layout.setColumnMinimumWidth(0, PROCESSING_SECTION_LABEL_COL_WIDTH)
+    fitting_layout.setColumnMinimumWidth(1, PROCESSING_CONTROL_COL_WIDTH)
+    fitting_layout.setColumnMinimumWidth(2, PROCESSING_CONTROL_COL_WIDTH)
+    fitting_layout.setColumnMinimumWidth(3, PROCESSING_CONTROL_COL_WIDTH)
+    fitting_layout.setColumnMinimumWidth(4, PROCESSING_CONTROL_COL_WIDTH)
+    fitting_layout.setColumnStretch(5, 1)
 
-    title_widget = QLabel("Fitting")
-    title_widget.setToolTip("Peak fitting configuration.")
-    fitting_layout.addWidget(title_widget, 0, 0, 1, 3, alignment=Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+    section_label = QLabel("Fitting")
+    section_label.setToolTip("Peak fitting configuration.")
+    fitting_layout.addWidget(section_label, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-    fitting_layout.setColumnStretch(0, 0)
-    fitting_layout.setColumnStretch(1, 0)
-    fitting_layout.setColumnStretch(2, 0)
+    method_title = QLabel("Method")
+    method_title.setToolTip("Peak fitting model used to estimate the peak position.")
+    fitting_layout.addWidget(method_title, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    fitting_layout.addWidget(window.fit_method_combo, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-    specs = [
-        ("Method", "Peak fitting model used to estimate the peak position.", window.fit_method_combo),
-        ("Crop", "Choose how the fit range is cropped around the detected peak.", window.crop_method_combo),
-        (window.crop_parameter_label, window.crop_parameter_label.toolTip(), window.crop_parameter_stack),
-    ]
-    for column, spec in enumerate(specs):
-        label_or_widget, tooltip, control = spec
-        if isinstance(label_or_widget, QLabel):
-            label_widget = label_or_widget
-        else:
-            label_widget = QLabel(str(label_or_widget))
-        label_widget.setToolTip(tooltip)
-        control.setToolTip(tooltip)
-        fitting_layout.addWidget(label_widget, 1, column, alignment=Qt.AlignmentFlag.AlignLeft)
-        fitting_layout.addWidget(control, 2, column)
+    order_title = QLabel("Order")
+    order_title.setToolTip("Polynomial order used when polynomial fitting is selected.")
+    fitting_layout.addWidget(order_title, 0, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    order_row = QWidget()
+    order_layout = QHBoxLayout()
+    order_layout.setContentsMargins(0, 0, 0, 0)
+    order_layout.setSpacing(6)
+    order_layout.addWidget(window.poly_order_spin)
+    order_layout.addStretch(1)
+    order_row.setLayout(order_layout)
+    fitting_layout.addWidget(order_row, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-    fitting_layout.setRowStretch(0, 0)
-    fitting_layout.setRowStretch(1, 0)
-    fitting_layout.setRowStretch(2, 0)
+    crop_title = QLabel("Crop")
+    crop_title.setToolTip("Choose how the fit range is cropped around the detected peak.")
+    fitting_layout.addWidget(crop_title, 0, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    fitting_layout.addWidget(window.crop_method_combo, 1, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    parameter_title = QLabel("Parameter")
+    parameter_title.setToolTip(window.crop_parameter_label.toolTip())
+    fitting_layout.addWidget(parameter_title, 0, 4, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    fitting_layout.addWidget(window.crop_parameter_stack, 1, 4, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    window._processing_fit_method_title_widget = method_title
+    window._processing_fit_order_title_widget = order_title
+    window._processing_fit_crop_title_widget = crop_title
+    window._processing_fit_parameter_title_widget = parameter_title
+
     fitting_widget.setLayout(fitting_layout)
     fitting_widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
     return fitting_widget
+
+
+def _build_processing_two_row_grid(
+    section_label: str,
+    specs: list[tuple[str | QLabel, str, QWidget]],
+    *,
+    section_tooltip: str = "",
+    section_label_tooltip: str = "",
+) -> QWidget:
+    widget = QWidget()
+    grid = QGridLayout()
+    grid.setContentsMargins(0, 0, 0, 0)
+    grid.setHorizontalSpacing(PROCESSING_SECTION_H_SPACING)
+    grid.setVerticalSpacing(PROCESSING_SECTION_V_SPACING)
+    grid.setColumnMinimumWidth(0, PROCESSING_SECTION_LABEL_COL_WIDTH)
+    for column in range(1, len(specs) + 1):
+        grid.setColumnMinimumWidth(column, PROCESSING_CONTROL_COL_WIDTH)
+    grid.setColumnStretch(len(specs) + 1, 1)
+
+    section_widget = QLabel(section_label)
+    section_widget.setToolTip(section_label_tooltip or section_tooltip)
+    grid.addWidget(section_widget, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    for index, (label, tooltip, control) in enumerate(specs, start=1):
+        label_widget = label if isinstance(label, QLabel) else QLabel(str(label))
+        label_widget.setToolTip(tooltip)
+        control.setToolTip(tooltip)
+        grid.addWidget(label_widget, 0, index, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+        grid.addWidget(control, 1, index, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    widget.setLayout(grid)
+    widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+    return widget
 
 
 def _add_sim_row(

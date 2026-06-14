@@ -7,7 +7,17 @@ import pyqtgraph as pg
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import QLabel, QLayout, QSplitter, QSplitterHandle, QToolButton, QVBoxLayout, QSizePolicy, QWidget
+from PyQt6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QLayout,
+    QSplitter,
+    QSplitterHandle,
+    QToolButton,
+    QVBoxLayout,
+    QSizePolicy,
+    QWidget,
+)
 
 
 class SeparatorStyle:
@@ -180,7 +190,13 @@ class ScientificAxis(pg.AxisItem):
 
 
 class CollapsibleSection(QWidget):
-    def __init__(self, title: str, content: QWidget, expanded: bool = True) -> None:
+    def __init__(
+        self,
+        title: str,
+        content: QWidget,
+        expanded: bool = True,
+        header_widgets: list[QWidget] | None = None,
+    ) -> None:
         super().__init__()
         self._content = content
         self._toggle = QToolButton()
@@ -197,12 +213,29 @@ class CollapsibleSection(QWidget):
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
-        layout.addWidget(self._toggle)
+        header_row = QWidget()
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(4)
+        header_layout.addWidget(self._toggle)
+        self._header_widgets = list(header_widgets or [])
+        if self._header_widgets:
+            header_layout.addStretch(1)
+            header_layout.addWidget(self._header_widgets[0], 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            if len(self._header_widgets) > 1:
+                for widget in self._header_widgets[1:]:
+                    header_layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        else:
+            header_layout.addStretch(1)
+        header_row.setLayout(header_layout)
+        layout.addWidget(header_row)
         layout.addWidget(self._content)
         self.setLayout(layout)
         layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.setMinimumHeight(self.sizeHint().height())
+        for widget in self._header_widgets:
+            widget.setVisible(expanded)
         self._content.setVisible(expanded)
 
     def is_expanded(self) -> bool:
@@ -216,6 +249,8 @@ class CollapsibleSection(QWidget):
 
     def _set_expanded(self, expanded: bool) -> None:
         self._toggle.setIcon(self._make_chevron_icon(expanded))
+        for widget in self._header_widgets:
+            widget.setVisible(expanded)
         self._content.setVisible(expanded)
         self.setMinimumHeight(self.sizeHint().height())
         self.updateGeometry()

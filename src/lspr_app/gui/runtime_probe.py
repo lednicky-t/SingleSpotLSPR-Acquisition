@@ -117,7 +117,20 @@ def _current_process_working_set_mb() -> float | None:
 
 def _sample_runtime_drift(window: Any) -> RuntimeDriftSample:
     scheduler = getattr(window, "_ui_task_scheduler", None)
-    metric_history_buffers = getattr(window, "_metric_history_buffers", None)
+    plot_view_cache = getattr(window, "_plot_view_cache", None)
+    metric_display_points = 0
+    if plot_view_cache is not None and hasattr(plot_view_cache, "metric_cache_debug_snapshot"):
+        try:
+            cache_snapshot = plot_view_cache.metric_cache_debug_snapshot()
+            metric_display_points = max(
+                (
+                    int(entry.get("display_points", 0))
+                    for entry in cache_snapshot.values()
+                ),
+                default=0,
+            )
+        except Exception:
+            metric_display_points = 0
     startup_t0 = float(getattr(window, "_startup_t0", perf_counter()))
     return RuntimeDriftSample(
         captured_at_s=float(perf_counter() - startup_t0),
@@ -135,7 +148,7 @@ def _sample_runtime_drift(window: Any) -> RuntimeDriftSample:
         log_buffer_count=_safe_count(getattr(window, "_log_buffer", None)),
         session_stats_log_count=_safe_count(getattr(window, "_session_stats_log", None)),
         metric_history_points=0,
-        metric_history_buffer_points=_sum_buffer_lengths(metric_history_buffers) if metric_history_buffers else 0,
+        metric_history_buffer_points=metric_display_points,
         temporal_history_count=_safe_count(getattr(window, "_temporal_processed_history", None)),
         sensorgram_rows=_safe_count(getattr(window, "_sensorgram_heatmap_history", None)),
         widget_count=_widget_count(),

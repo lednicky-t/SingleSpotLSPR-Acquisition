@@ -22,7 +22,11 @@ from lspr_app.storage.app_config import save_app_setting
 
 
 def restore_ui_state_for(window) -> None:
-    restore_ui_state(window)
+    setattr(window, "_restoring_ui_state", True)
+    try:
+        restore_ui_state(window)
+    finally:
+        setattr(window, "_restoring_ui_state", False)
 
 
 def save_ui_state_for(window) -> None:
@@ -43,13 +47,18 @@ def save_ui_state_for(window) -> None:
 
 
 def schedule_ui_state_persist_for(window) -> None:
-    if not getattr(window, "_ui_state_autosave_enabled", True):
+    if getattr(window, "_restoring_ui_state", False):
+        return
+    if not getattr(window, "_ui_state_persistence_enabled", True):
         window._ui_state_requested_at = None
         timer = getattr(window, "_ui_state_timer", None)
         if timer is not None:
             timer.stop()
         return
     window._ui_state_requested_at = perf_counter()
+    timer = getattr(window, "_ui_state_timer", None)
+    if timer is not None:
+        timer.start()
 
 
 def collapsible_section_state_for(window) -> dict[str, bool]:
@@ -86,14 +95,15 @@ def schedule_acquisition_state_persist_for(window) -> None:
 
 
 def set_ui_state_autosave_enabled_for(window, enabled: bool) -> None:
+    window._ui_state_persistence_enabled = bool(enabled)
     window._ui_state_autosave_enabled = bool(enabled)
-    save_app_setting("ui_state_autosave_enabled", window._ui_state_autosave_enabled)
+    save_app_setting("ui_state_autosave_enabled", window._ui_state_persistence_enabled)
     timer = getattr(window, "_ui_state_timer", None)
-    if not window._ui_state_autosave_enabled and timer is not None:
+    if not window._ui_state_persistence_enabled and timer is not None:
         timer.stop()
         window._ui_state_requested_at = None
-    state_text = "enabled" if window._ui_state_autosave_enabled else "disabled"
-    window._log_info(f"UI state autosave {state_text}.")
+    state_text = "enabled" if window._ui_state_persistence_enabled else "disabled"
+    window._log_info(f"UI layout persistence {state_text}.")
 
 
 def set_acquisition_state_autosave_enabled_for(window, enabled: bool) -> None:
@@ -144,6 +154,9 @@ def ensure_flow_panel_for(window) -> None:
         if hasattr(window._experiment_control_window, "_set_record_with_flow_recording_active"):
             window._experiment_control_window._set_record_with_flow_recording_active(bool(window._measurement_active))
         window._experiment_control_window._ui_startup_ready = bool(getattr(window, "_ui_startup_ready", False))
+        header_label = getattr(window._experiment_control_window, "_experiment_control_header_label", None)
+        if header_label is not None:
+            header_label.installEventFilter(window)
         sync_experiment_control_startup_ports_for(window)
         if hasattr(window, "_top_content_stack"):
             placeholder = getattr(window, "_experiment_control_panel_placeholder", getattr(window, "_flow_panel_placeholder", None))

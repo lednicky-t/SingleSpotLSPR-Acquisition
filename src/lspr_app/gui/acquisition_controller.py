@@ -25,7 +25,6 @@ from lspr_app.gui.experiment_control_runtime import (
     experiment_runtime_state_name,
 )
 from lspr_app.gui.main_window_headers import update_source_link_buttons
-from lspr_app.gui.trace_history_buffer import MetricHistoryBuffer
 from lspr_app.gui.workers import (
     AcquisitionRequest,
     AcquisitionResult,
@@ -809,8 +808,6 @@ def start_live_acquisition(window) -> None:
     window._metric_archive_started_at = window._live_trace_started_at
     window._sensorgram_axis_started_at = window._live_trace_started_at
     window._last_live_processing_perf = None
-    if hasattr(window, "_metric_history_buffers"):
-        window._metric_history_buffers.clear()
     if hasattr(window, "_plot_view_cache") and hasattr(window._plot_view_cache, "clear_live_absolute_metric_cache"):
         window._plot_view_cache.clear_live_absolute_metric_cache()
     window._reset_live_accumulator()
@@ -1213,19 +1210,17 @@ def start_measurement_run(window) -> None:
     window._session_stats_log.clear()
     window._session_stats_log_last_text = ""
     window._session_stats_log_last_capture_ts = 0.0
+    if hasattr(window, "_sensorgram_control_step_events"):
+        window._sensorgram_control_step_events.clear()
+    if hasattr(window, "_sync_sensorgram_control_step_overlay"):
+        window._sync_sensorgram_control_step_overlay()
     if window._live_worker is not None and window._live_worker.is_alive():
         window._live_worker.update_archive_context(window._measurement_writer, True, window._measurement_started_at)
     set_measurement_ui_locked(window, True)
     if hasattr(window, "_set_recording_blink_indicator"):
         window._set_recording_blink_indicator(True)
-    if hasattr(window, "_sensorgram_view_mode"):
-        window._sensorgram_view_mode = "absolute"
-    if hasattr(window, "_apply_sensorgram_view_mode"):
-        window._apply_sensorgram_view_mode(save=False)
     if hasattr(window, "_apply_sensorgram_content_mode"):
         window._apply_sensorgram_content_mode(save=False)
-    if hasattr(window, "_metric_history_buffers"):
-        window._metric_history_buffers.clear()
     if hasattr(window, "_plot_view_cache") and hasattr(window._plot_view_cache, "clear_live_absolute_metric_cache"):
         window._plot_view_cache.clear_live_absolute_metric_cache()
     if hasattr(window, "_sensorgram_heatmap_history"):
@@ -1331,16 +1326,6 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
         value = metrics.get(metric_name)
         if not isinstance(value, (int, float)) or not np.isfinite(float(value)):
             continue
-        metric_history_buffers = getattr(window, "_metric_history_buffers", None)
-        if not isinstance(metric_history_buffers, dict):
-            metric_history_buffers = {}
-            window._metric_history_buffers = metric_history_buffers
-        buffer = metric_history_buffers.get(metric_name)
-        max_points = int(getattr(window, "_metric_live_buffer_max_points", getattr(window, "_metric_history_max_points", getattr(window, "_trace_history_max_points", 6000))))
-        if buffer is None or buffer.capacity != max_points:
-            buffer = MetricHistoryBuffer(max_points)
-        metric_history_buffers[metric_name] = buffer
-        buffer.append(elapsed_s, float(value))
         plot_view_cache = getattr(window, "_plot_view_cache", None)
         if plot_view_cache is not None and hasattr(plot_view_cache, "append_live_absolute_metric_point"):
             try:
@@ -1354,6 +1339,7 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
             except Exception:
                 pass
         updated = True
+        last_metric_points = max(int(getattr(window, "_trace_display_cursor_s", 0.0) / max(display_step_s, 1e-9)), 0)
 
     window._trace_display_cursor_s = elapsed_s + display_step_s
 
@@ -1392,7 +1378,7 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
             "trace_append",
             (
                 "Metric point appended | points="
-                f"{len(next(iter(getattr(window, '_metric_history_buffers', {}).values()), []))} | "
+                f"{last_metric_points if 'last_metric_points' in locals() else 0} | "
                 f"rate={window.live_rate_spin.value():.2f} Hz"
             ),
             level=logging.DEBUG,
