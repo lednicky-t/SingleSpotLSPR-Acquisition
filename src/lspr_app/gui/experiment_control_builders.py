@@ -29,14 +29,17 @@ def create_direction_button(window, direction: str) -> QToolButton:
     button.setFixedSize(30, 28)
     button.setStyleSheet(
         "QToolButton#directionButton {"
-        " background: %(field)s;"
+        " background: transparent;"
         " border: 1px solid %(border)s;"
         " border-radius: 10px;"
         " padding: 0px;"
         " margin: 0px;"
         " font-size: 15px;"
         " font-weight: 800;"
+        " color: %(fg)s;"
         "}" % window._theme_palette()
+        + "QToolButton#directionButton:hover { background: %(button_hover)s; border-color: %(border_hover)s; }"
+        + "QToolButton#directionButton:pressed { background: %(button_pressed)s; }" % window._theme_palette()
     )
     button.setToolTip("Pump direction")
     set_direction_button(window, button, direction)

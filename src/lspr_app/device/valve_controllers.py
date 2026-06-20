@@ -5,6 +5,7 @@ from time import sleep
 
 import serial
 
+from lspr_app.device.connection_registry import claim_port, release_port, try_claim_port
 from lspr_app.device.serial_controllers import (
     ControllerError,
     ControllerPort,
@@ -22,16 +23,23 @@ class ArduinoValveController(SerialController):
 
     def connect(self, port: str) -> None:
         self.close()
-        self._serial = serial.Serial(
-            port=port,
-            baudrate=115200,
-            bytesize=8,
-            parity="N",
-            stopbits=1,
-            timeout=0.35,
-            write_timeout=0.35,
-        )
+        if not try_claim_port(port, self.controller_type):
+            raise ControllerError(f"Port {port} is busy.")
+        try:
+            self._serial = serial.Serial(
+                port=port,
+                baudrate=115200,
+                bytesize=8,
+                parity="N",
+                stopbits=1,
+                timeout=0.35,
+                write_timeout=0.35,
+            )
+        except Exception:
+            release_port(port, self.controller_type)
+            raise
         self.port = port
+        claim_port(port, self.controller_type)
         sleep(2.0)
 
     def close(self) -> None:
@@ -39,6 +47,8 @@ class ArduinoValveController(SerialController):
             try:
                 self._serial.close()
             finally:
+                if self.port is not None:
+                    release_port(self.port, self.controller_type)
                 self._serial = None
                 self.port = None
 
@@ -84,16 +94,23 @@ class ItsyBitsy32U4ValveController(ArduinoValveController):
 
     def connect(self, port: str) -> None:
         self.close()
-        self._serial = serial.Serial(
-            port=port,
-            baudrate=115200,
-            bytesize=8,
-            parity="N",
-            stopbits=1,
-            timeout=1.0,
-            write_timeout=1.0,
-        )
+        if not try_claim_port(port, self.controller_type):
+            raise ControllerError(f"Port {port} is busy.")
+        try:
+            self._serial = serial.Serial(
+                port=port,
+                baudrate=115200,
+                bytesize=8,
+                parity="N",
+                stopbits=1,
+                timeout=1.0,
+                write_timeout=1.0,
+            )
+        except Exception:
+            release_port(port, self.controller_type)
+            raise
         self.port = port
+        claim_port(port, self.controller_type)
         sleep(3.0)
         if self._serial is not None:
             self._serial.reset_input_buffer()
@@ -137,16 +154,23 @@ class LegacyValveController(SerialController):
 
     def connect(self, port: str) -> None:
         self.close()
-        self._serial = serial.Serial(
-            port=port,
-            baudrate=9600,
-            bytesize=8,
-            parity="N",
-            stopbits=1,
-            timeout=1.0,
-            write_timeout=1.0,
-        )
+        if not try_claim_port(port, self.controller_type):
+            raise ControllerError(f"Port {port} is busy.")
+        try:
+            self._serial = serial.Serial(
+                port=port,
+                baudrate=9600,
+                bytesize=8,
+                parity="N",
+                stopbits=1,
+                timeout=1.0,
+                write_timeout=1.0,
+            )
+        except Exception:
+            release_port(port, self.controller_type)
+            raise
         self.port = port
+        claim_port(port, self.controller_type)
         sleep(0.5)
         self.query("vi", max_wait_s=1.0)
 
@@ -155,6 +179,8 @@ class LegacyValveController(SerialController):
             try:
                 self._serial.close()
             finally:
+                if self.port is not None:
+                    release_port(self.port, self.controller_type)
                 self._serial = None
                 self.port = None
 

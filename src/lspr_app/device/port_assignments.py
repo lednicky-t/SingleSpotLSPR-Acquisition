@@ -55,6 +55,16 @@ def get_port_assignment(port: str) -> DeviceAssignment:
     return _load_port_assignments().get(normalized_port, "auto")
 
 
+def should_probe_port_for_role(port: str, role: str) -> bool:
+    assignment = get_port_assignment(port)
+    role_name = str(role or "").strip().casefold()
+    if role_name not in {"pump", "valve"}:
+        return True
+    if assignment == "auto":
+        return True
+    return assignment == role_name
+
+
 def set_port_assignment(port: str, assignment: object) -> DeviceAssignment:
     normalized_port = str(port or "").strip().upper()
     normalized_assignment = normalize_device_assignment(assignment)

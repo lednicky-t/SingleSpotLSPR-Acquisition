@@ -30,14 +30,15 @@ class _HardwareInventorySignals(QObject):
 
 
 class _HardwareInventoryTask(QRunnable):
-    def __init__(self, generation: int) -> None:
+    def __init__(self, generation: int, *, passive: bool = False) -> None:
         super().__init__()
         self._generation = generation
+        self._passive = bool(passive)
         self.signals = _HardwareInventorySignals()
 
     def run(self) -> None:
         try:
-            inventory = scan_connected_serial_devices()
+            inventory = scan_connected_serial_devices(passive=self._passive)
         except Exception as exc:
             self.signals.failed.emit(self._generation, str(exc))
             return
@@ -112,8 +113,19 @@ class HardwareInventoryDialog(QDialog):
         self._scan_generation += 1
         generation = self._scan_generation
         self._refresh_button.setEnabled(False)
-        self._status_label.setText("Scanning connected COM ports...")
         self._populate_table([])
+        parent = self.parent()
+        hardware_init_running = bool(getattr(parent, "_hardware_init_task", None)) if parent is not None else False
+        if hardware_init_running:
+            self._status_label.setText("Hardware initialization is running. Showing passive COM inventory.")
+            inventory = scan_connected_serial_devices(passive=True)
+            self._inventory = [record for record in inventory if isinstance(record, ConnectedSerialDevice)]
+            self._populate_table(self._inventory)
+            self._status_label.setText(f"Passive inventory completed. {len(self._inventory)} port(s) found.")
+            self._refresh_button.setEnabled(True)
+            self._active_task = None
+            return
+        self._status_label.setText("Scanning connected COM ports...")
         task = _HardwareInventoryTask(generation)
         task.signals.finished.connect(self._handle_scan_finished)
         task.signals.failed.connect(self._handle_scan_failed)

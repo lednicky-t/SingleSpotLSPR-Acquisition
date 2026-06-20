@@ -30,10 +30,12 @@ from PyQt6.QtGui import (
     QFontMetricsF,
     QPainter,
     QPixmap,
+    QTransform,
     QShortcut,
     QTextCursor,
 )
 from PyQt6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -68,7 +70,8 @@ from lspr_app.diagnostics import DiagnosticsConfig
 from lspr_app.device.base import Spectrometer, SpectrometerCapabilities
 from lspr_app.device.amf_mswitch import detect_amf_mswitch_devices
 from lspr_app.device.reglo_icc import RegloICCClient, is_probable_reglo_port
-from lspr_app.device.port_assignments import get_port_assignment
+from lspr_app.device.port_assignments import get_port_assignment, should_probe_port_for_role
+from lspr_app.device.probe_diagnostics import record_port_probe_event
 from lspr_app.device.serial_controllers import SerialController, controller_port_priority
 from lspr_app.device.valve_controllers import detect_valve_controller
 from lspr_app.device.simulated import SimulationParameters, SimulatedSpectrometer
@@ -125,6 +128,7 @@ from lspr_app.gui.main_window_panels import (
     configure_processing_group_controls,
 )
 from lspr_app.gui.main_window_plot_settings import show_sensorgram_plot_settings_dialog_for
+from lspr_app.gui.main_window_preferences import show_preferences_dialog_for
 from lspr_app.gui.main_window_runtime import (
     build_runtime_drift_lines as build_runtime_drift_lines_for_runtime,
     drain_gui_housekeeping_tasks as drain_gui_housekeeping_tasks_for,
@@ -165,8 +169,58 @@ from lspr_app.gui.main_window_lifecycle import (
 )
 from lspr_app.gui.main_window_layout import build_main_layout_for, build_recording_context_row_for
 from lspr_app.gui.main_window_logging_ui import initialize_logging_ui_for
+from lspr_app.gui.main_window_sensorgram import (
+    apply_sensorgram_content_mode,
+    apply_sensorgram_metric_selection,
+    apply_sensorgram_time_axis_mode,
+    append_sensorgram_heatmap_history,
+    cycle_sensorgram_content_mode,
+    cycle_trace_stats_metric,
+    normalize_sensorgram_content_mode,
+    normalize_sensorgram_line_mode,
+    primary_trace_metric as primary_trace_metric_for_sensorgram,
+    sensorgram_content_mode_tooltip as sensorgram_content_mode_tooltip_for_sensorgram,
+    sensorgram_metric_selection as sensorgram_metric_selection_for_sensorgram,
+    trace_stats_metric as trace_stats_metric_for_sensorgram,
+    toggle_sensorgram_time_axis_mode,
+    update_sensorgram_content_mode_button,
+)
+from lspr_app.gui.main_window_sensorgram_archive import (
+    apply_sensorgram_display_style,
+    handle_sensorgram_heatmap_archive_failed,
+    handle_sensorgram_heatmap_archive_result,
+    sensorgram_heatmap_lookup_table,
+    request_absolute_sensorgram_metric_archive_reload,
+    request_sensorgram_heatmap_archive,
+    request_sensorgram_metric_archive_reload,
+    set_sensorgram_heatmap_notice,
+    start_sensorgram_heatmap_archive_task,
+    start_sensorgram_metric_archive_reload_task,
+)
+from lspr_app.gui.main_window_sensorgram_overlay import (
+    handle_trace_view_range_changed as handle_trace_view_range_changed_for_sensorgram,
+    normalize_sensorgram_control_step_overlay_position as normalize_sensorgram_control_step_overlay_position_for_sensorgram,
+    normalize_sensorgram_control_step_overlay_style as normalize_sensorgram_control_step_overlay_style_for_sensorgram,
+    record_sensorgram_control_step_event as record_sensorgram_control_step_event_for_sensorgram,
+    sensorgram_control_step_overlay_bar_rect as sensorgram_control_step_overlay_bar_rect_for_sensorgram,
+    sensorgram_control_step_overlay_brush as sensorgram_control_step_overlay_brush_for_sensorgram,
+    sensorgram_control_step_overlay_clip_segment as sensorgram_control_step_overlay_clip_segment_for_sensorgram,
+    sensorgram_control_step_overlay_current_elapsed_s as sensorgram_control_step_overlay_current_elapsed_s_for_sensorgram,
+    sensorgram_control_step_overlay_label_font as sensorgram_control_step_overlay_label_font_for_sensorgram,
+    sensorgram_control_step_overlay_remove_items as sensorgram_control_step_overlay_remove_items_for_sensorgram,
+    sensorgram_control_step_overlay_reserved_y_padding as sensorgram_control_step_overlay_reserved_y_padding_for_sensorgram,
+    sensorgram_control_step_overlay_set_tooltip as sensorgram_control_step_overlay_set_tooltip_for_sensorgram,
+    sensorgram_control_step_overlay_set_visible as sensorgram_control_step_overlay_set_visible_for_sensorgram,
+    sensorgram_control_step_overlay_text_color as sensorgram_control_step_overlay_text_color_for_sensorgram,
+    sensorgram_control_step_overlay_view_bounds as sensorgram_control_step_overlay_view_bounds_for_sensorgram,
+    sync_sensorgram_control_step_overlay as sync_sensorgram_control_step_overlay_for_sensorgram,
+)
 from lspr_app.gui.main_window_state import (
     acquisition_state_payload,
+    activate_experiment_control_view,
+    activate_experimental_control_view,
+    activate_flow_view,
+    activate_spectra_view,
     apply_acquisition_state_to_widgets,
     collapsible_section_state,
     persist_acquisition_state,
@@ -174,6 +228,24 @@ from lspr_app.gui.main_window_state import (
     restore_ui_state,
     save_ui_state,
     schedule_acquisition_state_persist,
+    set_gui_housekeeping_enabled,
+    set_diagnostics_panel_visible,
+    set_metric_plot_enabled,
+    set_sensorgram_heatmap_enabled,
+    show_experimental_control_only,
+    show_flow_only,
+    show_plots_only,
+    show_split_view,
+    sync_diagnostics_panel_action,
+    sync_main_view_visibility,
+    sync_view_actions,
+    toggle_diagnostics_panel,
+    toggle_experimental_control_panel_visibility,
+    toggle_flow_panel_visibility,
+    toggle_left_controls,
+    toggle_sensorgram,
+    launch_profile_settings,
+    apply_launch_profile_layout,
 )
 from lspr_app.gui.main_window_processing import (
     apply_processing_settings_to_widgets,
@@ -202,7 +274,6 @@ from lspr_app.gui.main_window_plotting import (
     autoscale_metric_plot_for,
     build_summary_text_for,
     clear_trace_history_for,
-    build_sensorgram_control_step_overlay_segments,
     compute_centroid_nm_for,
     compute_metric_nm_for,
     compute_peak_metric_nm_for,
@@ -226,7 +297,9 @@ from lspr_app.gui.main_window_plotting import (
     processing_cache_token_for,
     refresh_plot_for,
     refresh_telemetry_for,
+    refresh_spectrometer_stats_for,
     refresh_metric_plot_for,
+    start_plot_processing_task_for,
     reference_peak_nm_for_shift_for,
     render_metric_series_for,
     request_metric_autoscale_for,
@@ -250,7 +323,6 @@ from lspr_app.gui.plot_view_cache import (
     PlotViewCache,
     build_active_trace_series_token,
     derive_heatmap_levels_from_matrix,
-    expand_heatmap_levels,
 )
 from lspr_app.gui.update_scheduler import GuiTaskScheduler
 from lspr_app.resources import app_icon_path
@@ -341,6 +413,7 @@ from lspr_app.gui.hardware_initializer import (
     HardwareInitTask,
 )
 from lspr_app.gui.hardware_inventory_dialog import show_hardware_inventory_dialog
+from lspr_app.gui.usb_probe_diagnostics_dialog import show_usb_probe_diagnostics_dialog
 from lspr_app.gui.workers import (
     AcquisitionResult,
     HeatmapArchiveLoadRequest,
@@ -1067,6 +1140,7 @@ class MainWindow(QMainWindow):
         self.integration_spin.setSuffix(" ms")
         self.integration_spin.setDecimals(3)
         self.integration_spin.setSingleStep(1.0)
+        self.integration_spin.setStepType(QAbstractSpinBox.StepType.AdaptiveDecimalStepType)
 
         self.averages_spin = QSpinBox()
         make_compact_spinbox(self.averages_spin)
@@ -1126,6 +1200,13 @@ class MainWindow(QMainWindow):
             "src = source acquisition rate; disp = GUI display rate; proc = processing time per spectrum; "
             "head = display-period / processing-time; skip = dropped GUI updates per second."
         )
+        self.spectrometer_stats_label = QLabel()
+        self.spectrometer_stats_label.setWordWrap(False)
+        self.spectrometer_stats_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.spectrometer_stats_label.setText("spacing - | rate - | ovh -")
+        self.spectrometer_stats_label.setToolTip(
+            "Spectrometer acquisition stats: last frame spacing, effective source rate, and acquisition overhead."
+        )
         self.telemetry_label = ElidingLabel()
         self.telemetry_label.setWordWrap(False)
         self.telemetry_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -1138,6 +1219,7 @@ class MainWindow(QMainWindow):
         footer_font = QFont("Consolas", 9)
         self.status_label.setFont(footer_font)
         self.live_estimate.setFont(footer_font)
+        self.spectrometer_stats_label.setFont(footer_font)
         self.telemetry_label.setFont(footer_font)
         self.spectrum_stats_label = QLabel("peak: - | centroid: - | FWHM: - | MSE: - | R: - | S/N: -")
         self.spectrum_stats_label.setWordWrap(True)
@@ -1213,6 +1295,11 @@ class MainWindow(QMainWindow):
             "Reload sensorgram history from the temp measurement file into the live display cache.",
             size=30,
         )
+        self._sensorgram_reload_button_base_icon = reload_icon()
+        self._sensorgram_reload_button_spinner_angle = 0
+        self._sensorgram_reload_button_spinner_timer = QTimer(self)
+        self._sensorgram_reload_button_spinner_timer.setInterval(80)
+        self._sensorgram_reload_button_spinner_timer.timeout.connect(self._advance_sensorgram_reload_spinner)
         self.sensorgram_reload_button.clicked.connect(self._reload_sensorgram_history)
         self.trace_record_button = self._make_icon_button(
             transport_icon(self._theme_mode, "record"),
@@ -1418,6 +1505,13 @@ class MainWindow(QMainWindow):
         self._residual_axis_autoscaled = False
         self._residual_y_range: list[float] | None = None
         spectrum_plot_item.scene().addItem(self.residual_view)
+        self.residual_zero_line = pg.InfiniteLine(
+            angle=0,
+            pos=0,
+            pen=pg.mkPen("#9aa3ad", width=1.0, style=Qt.PenStyle.DashLine),
+        )
+        self.residual_zero_line.setZValue(-10)
+        self.residual_view.addItem(self.residual_zero_line)
         self.residual_curve = pg.PlotDataItem(pen=pg.mkPen("#888888", width=1))
         self.residual_curve._diagnostics_owner = self
         self.residual_curve._diagnostics_prefix = "spectrum_plot"
@@ -1436,7 +1530,11 @@ class MainWindow(QMainWindow):
         self.residual_curve.setClipToView(True)
         self.residual_curve.setDownsampling(auto=False, ds=1)
         self.residual_curve.setSkipFiniteCheck(True)
-        self.residual_curve.setPen(pg.mkPen((0, 0, 0, 0), width=0))
+        self.residual_curve.setPen(pg.mkPen("#8a8a8a", width=1.0))
+        self.residual_curve.setSymbol("o")
+        self.residual_curve.setSymbolSize(4)
+        self.residual_curve.setSymbolBrush(pg.mkBrush("#c7c7c7"))
+        self.residual_curve.setSymbolPen(pg.mkPen("#666666", width=0.8))
         self.processing_region_item = pg.LinearRegionItem(values=(0, 1), movable=False, brush=pg.mkBrush(90, 160, 255, 30), pen=pg.mkPen(None))
         self.fit_region_item = pg.LinearRegionItem(values=(0, 1), movable=False, brush=pg.mkBrush(255, 180, 80, 40), pen=pg.mkPen(None))
         self.spectrum_plot.addItem(self.processing_region_item)
@@ -1670,6 +1768,7 @@ class MainWindow(QMainWindow):
         self.freeze_plots_button.toggled.connect(lambda _checked: self._schedule_acquisition_state_persist())
         self.trace_noise_window_spin.valueChanged.connect(self._handle_processing_setting_change)
         self._update_live_estimate()
+        self._refresh_spectrometer_stats()
         self._refresh_telemetry()
         self._refresh_session_statistics(force=True)
         self._refresh_session_summary(force=True)
@@ -1695,9 +1794,9 @@ class MainWindow(QMainWindow):
         self._ui_startup_ready = True
         if self._experiment_control_window is not None:
             self._experiment_control_window._ui_startup_ready = True
-        if getattr(self, "_pending_top_view_mode", None) == "flow":
+        if getattr(self, "_pending_top_view_mode", None) in {"flow", "experimental_control"}:
             self._pending_top_view_mode = None
-            QTimer.singleShot(0, self._activate_flow_view)
+            QTimer.singleShot(0, self._activate_experimental_control_view)
         _startup_mark("startup wiring complete")
 
     def _initialize_logging_ui(self) -> None:
@@ -2416,40 +2515,10 @@ class MainWindow(QMainWindow):
         self._update_dark_reference_button_icons()
 
     def _sensorgram_heatmap_lookup_table(self) -> np.ndarray:
-        try:
-            return pg.colormap.get("viridis").getLookupTable(0.0, 1.0, 256)
-        except Exception:
-            try:
-                color_map = pg.ColorMap(
-                    [0.0, 0.25, 0.5, 0.75, 1.0],
-                    [
-                        (68, 1, 84, 255),
-                        (59, 82, 139, 255),
-                        (33, 145, 140, 255),
-                        (94, 201, 98, 255),
-                        (253, 231, 37, 255),
-                    ],
-                )
-                return color_map.getLookupTable(0.0, 1.0, 256)
-            except Exception:
-                return pg.colormap.get("plasma").getLookupTable(0.0, 1.0, 256)
+        return sensorgram_heatmap_lookup_table(self)
 
     def _apply_sensorgram_display_style(self) -> None:
-        mode = self._normalize_sensorgram_content_mode(getattr(self, "_sensorgram_content_mode", "metric"))
-        if mode == "heatmap":
-            self.trace_heatmap_image.setLookupTable(self._sensorgram_heatmap_lookup_table())
-            for curve in self.trace_curves.values():
-                curve.setPen(pg.mkPen("#8A5CFF", width=2.2))
-            return
-
-        for metric_name, curve in self.trace_curves.items():
-            curve.setPen(pg.mkPen(self.SENSORGRAM_TIME_PLOT_COLORS.get(metric_name, "#1F77B4"), width=2.2))
-        for metric_name, band in getattr(self, "trace_metric_envelope_bands", {}).items():
-            base_color = QColor(self.SENSORGRAM_TIME_PLOT_COLORS.get(metric_name, "#1F77B4"))
-            band_color = QColor(base_color)
-            band_alpha = int(round(max(min(float(getattr(self, "_sensorgram_metric_envelope_overlay_alpha", 16)), 100.0), 0.0) * 2.55))
-            band_color.setAlpha(max(min(band_alpha, 255), 0))
-            band.setBrush(pg.mkBrush(band_color))
+        apply_sensorgram_display_style(self)
 
     def _set_log_following(self, enabled: bool) -> None:
         set_log_following(self, enabled)
@@ -2718,10 +2787,78 @@ class MainWindow(QMainWindow):
                 f"stack_pages=[{' ; '.join(stack_pages) if stack_pages else '-'}] | "
                 f"top_levels=[{' ; '.join(top_level_summary) if top_level_summary else '-'}]"
             )
+            self._log_info(f"Top content diagnostics | {self._top_content_stack_diagnostics()}")
             if deep_enabled:
                 self._log_startup_widget_trace(top_level_widgets)
         except Exception as exc:
             self._log_warning(f"Startup widget snapshot failed: {exc}")
+
+    def _top_content_stack_diagnostics(self) -> dict[str, object]:
+        stack = getattr(self, "_top_content_stack", None)
+        flow_widget = getattr(self, "_experiment_control_window", None)
+        placeholder = getattr(self, "_experiment_control_panel_placeholder", None)
+        spectra_block = getattr(self, "_spectra_block", None)
+        pages: list[dict[str, object]] = []
+        if stack is not None:
+            try:
+                current_index = int(stack.currentIndex())
+                count = int(stack.count())
+            except Exception:
+                current_index = -1
+                count = 0
+            for index in range(count):
+                page = stack.widget(index)
+                if page is None:
+                    continue
+                if page is spectra_block:
+                    label = "spectra"
+                elif page is flow_widget:
+                    label = "experimental_control"
+                elif page is placeholder:
+                    label = "placeholder"
+                else:
+                    label = "unknown"
+                pages.append(
+                    {
+                        "index": index,
+                        "label": label,
+                        "class": page.__class__.__name__,
+                        "visible": bool(page.isVisible()),
+                        "is_current": index == current_index,
+                        "parent": page.parent().__class__.__name__ if page.parent() is not None else None,
+                    }
+                )
+        else:
+            current_index = -1
+            count = 0
+        flow_index = -1
+        placeholder_index = -1
+        spectra_index = -1
+        if stack is not None:
+            try:
+                if flow_widget is not None:
+                    flow_index = int(stack.indexOf(flow_widget))
+                if placeholder is not None:
+                    placeholder_index = int(stack.indexOf(placeholder))
+                if spectra_block is not None:
+                    spectra_index = int(stack.indexOf(spectra_block))
+            except Exception:
+                pass
+        return {
+            "top_content_mode": getattr(self, "_top_view_mode", "-"),
+            "top_content_stack_current_index": current_index,
+            "top_content_stack_current_widget": (
+                f"{stack.currentWidget().__class__.__name__}(objectName={stack.currentWidget().objectName()!r})"
+                if stack is not None and stack.currentWidget() is not None
+                else None
+            ),
+            "top_content_stack_page_count": count,
+            "top_content_stack_pages": pages,
+            "experiment_control_window_exists": flow_widget is not None,
+            "experiment_control_window_index": flow_index,
+            "placeholder_index": placeholder_index,
+            "spectra_block_index": spectra_index,
+        }
 
     def _log_startup_widget_trace(self, widgets: list[QWidget]) -> None:
         if not widgets:
@@ -2899,34 +3036,13 @@ class MainWindow(QMainWindow):
         set_log_buffering_enabled_for(self, enabled)
 
     def _set_gui_housekeeping_enabled(self, enabled: bool) -> None:
-        self._gui_housekeeping_enabled = bool(enabled)
-        save_app_setting("gui_housekeeping_enabled", self._gui_housekeeping_enabled)
-        state_text = "enabled" if self._gui_housekeeping_enabled else "disabled"
-        self.status_label.setText(f"GUI housekeeping {state_text}.")
-        self._log_info(f"GUI housekeeping {state_text}.")
-        self._request_deferred_ui_refresh(stats=True)
+        set_gui_housekeeping_enabled(self, enabled)
 
     def _set_sensorgram_heatmap_enabled(self, enabled: bool) -> None:
-        self._sensorgram_heatmap_enabled = bool(enabled)
-        save_app_setting("sensorgram_heatmap_enabled", self._sensorgram_heatmap_enabled)
-        state_text = "enabled" if self._sensorgram_heatmap_enabled else "disabled"
-        self.status_label.setText(f"Sensorgram heatmap {state_text}.")
-        self._log_info(f"Sensorgram heatmap {state_text}.")
-        if hasattr(self, "trace_heatmap_notice_item"):
-            self.trace_heatmap_notice_item.setVisible(False)
-        self._refresh_trace_plot("Metric position (nm)")
-        self._request_deferred_ui_refresh(trace_plot=True)
+        set_sensorgram_heatmap_enabled(self, enabled)
 
     def _set_metric_plot_enabled(self, enabled: bool) -> None:
-        self._metric_plot_enabled = bool(enabled)
-        save_app_setting("metric_plot_enabled", self._metric_plot_enabled)
-        state_text = "enabled" if self._metric_plot_enabled else "disabled"
-        self.status_label.setText(f"Metric plot {state_text}.")
-        self._log_info(f"Metric plot {state_text}.")
-        if hasattr(self, "trace_heatmap_notice_item"):
-            self.trace_heatmap_notice_item.setVisible(False)
-        self._refresh_trace_plot("Metric position (nm)")
-        self._request_deferred_ui_refresh(trace_plot=True)
+        set_metric_plot_enabled(self, enabled)
 
     def _apply_acquisition_state_to_widgets(self, state: dict[str, object]) -> None:
         apply_acquisition_state_to_widgets(self, state)
@@ -2938,15 +3054,10 @@ class MainWindow(QMainWindow):
         self._open_experiment_control_window()
 
     def _toggle_flow_panel_visibility(self, checked: bool | None = None) -> None:
-        if checked is None:
-            self._activate_flow_view() if self._top_view_mode != "flow" else self._activate_spectra_view()
-        elif checked:
-            self._activate_flow_view()
-        else:
-            self._activate_spectra_view()
+        toggle_flow_panel_visibility(self, checked)
 
     def _toggle_experimental_control_panel_visibility(self, checked: bool | None = None) -> None:
-        self._toggle_flow_panel_visibility(checked)
+        toggle_experimental_control_panel_visibility(self, checked)
 
     def _ensure_flow_panel(self) -> None:
         ensure_flow_panel_for(self)
@@ -2955,126 +3066,53 @@ class MainWindow(QMainWindow):
         self._ensure_flow_panel()
 
     def _sync_main_view_visibility(self) -> None:
-        if self._main_content_widget is None:
-            return
-        self._main_content_widget.setVisible(True)
-        refresh_hw_device_status_strip(self)
+        sync_main_view_visibility(self)
 
     def _show_flow_only(self) -> None:
-        self._activate_flow_view()
+        show_flow_only(self)
 
     def _show_experimental_control_only(self) -> None:
-        self._show_flow_only()
+        show_experimental_control_only(self)
 
     def _show_plots_only(self) -> None:
-        self._activate_spectra_view()
-        self._schedule_ui_state_persist()
+        show_plots_only(self)
 
     def _show_split_view(self) -> None:
-        self._left_controls_scroll.setVisible(True)
-        self._sensorgram_block.setVisible(True)
-        self._activate_spectra_view()
-        self._schedule_ui_state_persist()
+        show_split_view(self)
 
     def _activate_spectra_view(self) -> None:
-        if hasattr(self, "_top_content_stack"):
-            self._top_content_stack.setCurrentWidget(self._spectra_block)
-        self._top_view_mode = "spectra"
-        self._sync_view_actions()
-        self._schedule_ui_state_persist()
+        activate_spectra_view(self)
 
     def _activate_flow_view(self) -> None:
         self._ensure_flow_panel()
-        if hasattr(self, "_top_content_stack") and self._experiment_control_window is not None:
-            self._top_content_stack.setCurrentWidget(self._experiment_control_window)
-        self._top_view_mode = "flow"
-        self._sync_view_actions()
-        self._schedule_ui_state_persist()
+        activate_flow_view(self)
 
     def _activate_experiment_control_view(self) -> None:
-        self._activate_flow_view()
+        activate_experiment_control_view(self)
 
     def _activate_experimental_control_view(self) -> None:
-        self._activate_flow_view()
+        activate_experimental_control_view(self)
 
     def _toggle_left_controls(self, checked: bool | None = None) -> None:
-        visible = self._left_controls_scroll.isVisible() if checked is None else bool(checked)
-        self._left_controls_scroll.setVisible(visible)
-        self._sync_view_actions()
-        self._schedule_ui_state_persist()
+        toggle_left_controls(self, checked)
 
     def _toggle_sensorgram(self, checked: bool | None = None) -> None:
-        visible = self._sensorgram_block.isVisible() if checked is None else bool(checked)
-        self._sensorgram_block.setVisible(visible)
-        self._sync_view_actions()
-        self._schedule_ui_state_persist()
+        toggle_sensorgram(self, checked)
 
     def _set_diagnostics_panel_visible(self, visible: bool) -> None:
-        visible = bool(visible)
-        self._diagnostics_panel_enabled = visible
-        if hasattr(self, "_log_section"):
-            self._log_section.setVisible(visible)
-        if hasattr(self, "log_terminal"):
-            self.log_terminal.setVisible(visible)
-        action = getattr(self, "_diagnostics_panel_action", None)
-        if action is not None:
-            action.blockSignals(True)
-            action.setChecked(visible)
-            action.blockSignals(False)
-        self._schedule_ui_state_persist()
+        set_diagnostics_panel_visible(self, visible)
 
     def _toggle_diagnostics_panel(self, checked: bool | None = None) -> None:
-        visible = self._diagnostics_panel_enabled if checked is None else bool(checked)
-        self._set_diagnostics_panel_visible(visible)
+        toggle_diagnostics_panel(self, checked)
 
     def _sync_view_actions(self) -> None:
-        actions = getattr(self, "_view_menu_actions", None)
-        if not isinstance(actions, dict):
-            return
-        top = actions.get("top_view")
-        if isinstance(top, dict):
-            for mode, action in top.items():
-                action.blockSignals(True)
-                action.setChecked(self._top_view_mode == mode)
-                action.blockSignals(False)
-        left_action = actions.get("left_controls")
-        if left_action is not None:
-            left_action.blockSignals(True)
-            left_action.setChecked(not self._left_controls_scroll.isHidden())
-            left_action.blockSignals(False)
-        sensor_action = actions.get("sensorgram")
-        if sensor_action is not None:
-            sensor_action.blockSignals(True)
-            sensor_action.setChecked(not self._sensorgram_block.isHidden())
-            sensor_action.blockSignals(False)
+        sync_view_actions(self)
 
     def _sync_diagnostics_panel_action(self) -> None:
-        action = getattr(self, "_diagnostics_panel_action", None)
-        if action is None:
-            return
-        action.blockSignals(True)
-        action.setChecked(bool(getattr(self, "_diagnostics_panel_enabled", False)))
-        action.blockSignals(False)
-
-    def _launch_profile_settings(self):
-        try:
-            return object.__getattribute__(self, "_launch_profile_spec")
-        except Exception:
-            return launch_profile_spec(DEFAULT_LAUNCH_PROFILE)
+        sync_diagnostics_panel_action(self)
 
     def _apply_launch_profile_layout(self) -> None:
-        profile = self._launch_profile_settings()
-        if hasattr(self, "_recording_context_row") and self._recording_context_row is not None:
-            self._recording_context_row.setVisible(bool(profile.show_recording_context))
-        if hasattr(self, "_left_controls_scroll"):
-            self._left_controls_scroll.setVisible(bool(profile.show_left_controls))
-        if hasattr(self, "_sensorgram_block"):
-            self._sensorgram_block.setVisible(bool(profile.show_sensorgram))
-        if profile.initial_top_view_mode == "flow":
-            self._show_flow_only()
-        else:
-            self._show_plots_only()
-        self._sync_view_actions()
+        apply_launch_profile_layout(self)
 
     def _suppress_hardware_disconnect_warning(self) -> bool:
         return str(getattr(self, "_source_mode", "")).strip().lower() == "simulation"
@@ -3381,26 +3419,10 @@ class MainWindow(QMainWindow):
         return selected_trace_metrics(self)
 
     def _sensorgram_metric_selection(self) -> tuple[list[str], str]:
-        return sensorgram_metric_selection(self)
+        return sensorgram_metric_selection_for_sensorgram(self)
 
     def _apply_sensorgram_metric_selection(self, visible_modes: list[str] | set[str], primary_mode: str, *, save: bool = False) -> None:
-        ordered = [mode for mode in sensorgram_metric_order(self) if mode in {normalize_sensorgram_metric_name(name) for name in visible_modes}]
-        if not ordered:
-            ordered = ["smoothed_max"]
-        primary = normalize_sensorgram_metric_name(primary_mode)
-        if primary not in ordered:
-            primary = ordered[0]
-        self._sensorgram_metric_visible_modes = set(ordered)
-        self._sensorgram_metric_primary_mode = primary
-        current_stats = normalize_sensorgram_metric_name(getattr(self, "_trace_stats_metric_name", ordered[0]))
-        self._trace_stats_metric_name = current_stats if current_stats in ordered else ordered[0]
-        sync_legacy_metric_widgets_from_state(self)
-        if hasattr(self, "trace_stats_label"):
-            self._update_trace_stats()
-        if hasattr(self, "_request_deferred_ui_refresh"):
-            self._request_deferred_ui_refresh(trace_plot=True, summary=True)
-        if save:
-            self._schedule_acquisition_state_persist()
+        apply_sensorgram_metric_selection(self, visible_modes, primary_mode, save=save)
 
     def _apply_metric_color_styles(self) -> None:
         colors = getattr(self, "TRACE_METRIC_COLORS", {})
@@ -3802,10 +3824,46 @@ class MainWindow(QMainWindow):
             payload=name,
         )
 
+    def _record_port_probe_event(
+        self,
+        *,
+        role: str,
+        port: str,
+        assignment: str,
+        action: str,
+        result: str,
+        message: str,
+        owner: str,
+        command: str | None = None,
+        duration_ms: float | None = None,
+    ) -> None:
+        record_port_probe_event(
+            phase="startup",
+            port=port,
+            owner=owner,
+            role=role,
+            assignment=assignment,
+            action=action,
+            command=command,
+            result=result,
+            duration_ms=duration_ms,
+            message=message,
+        )
+
     def _pump_init_step(self) -> HardwareInitStepResult:
         all_ports = RegloICCClient.list_ports()
-        preferred_ports = [port for port in all_ports if get_port_assignment(port.device) == "pump"]
-        probable_ports = [port for port in all_ports if is_probable_reglo_port(port)]
+        preferred_ports = [
+            port
+            for port in all_ports
+            if get_port_assignment(port.device) == "pump" and should_probe_port_for_role(port.device, "pump")
+        ]
+        probable_ports = [
+            port
+            for port in all_ports
+            if get_port_assignment(port.device) == "auto"
+            and is_probable_reglo_port(port)
+            and should_probe_port_for_role(port.device, "pump")
+        ]
         ports = preferred_ports + [port for port in probable_ports if port not in preferred_ports]
         if not ports:
             return HardwareInitStepResult(
@@ -3817,25 +3875,66 @@ class MainWindow(QMainWindow):
                 payload=[],
             )
         last_error: str | None = None
+        assigned_error: str | None = None
         for port in ports:
+            assignment = get_port_assignment(port.device)
+            if not should_probe_port_for_role(port.device, "pump"):
+                self._record_port_probe_event(
+                    role="pump",
+                    port=port.device,
+                    assignment=assignment,
+                    action="skip",
+                    result="skipped",
+                    message=f"Port {port.device} is assigned to {assignment} and is excluded from pump probing.",
+                    owner="startup:pump",
+                )
+                continue
+            started = perf_counter()
             try:
                 probe = RegloICCClient.probe_port(port.device)
-                return HardwareInitStepResult(
-                    key="pump",
-                    label="Pump controller",
-                    state="discovered",
-                    message=f"Pump controller discovered on {probe.port}.",
-                    connected=False,
-                    probe=probe,
-                    payload=probe,
-                )
             except Exception as exc:
                 last_error = str(exc)
+                if assignment == "pump" and assigned_error is None:
+                    assigned_error = f"Assigned pump port {port.device} did not respond as Reglo ICC: {exc}"
+                self._record_port_probe_event(
+                    role="pump",
+                    port=port.device,
+                    assignment=assignment,
+                    action="probe",
+                    result="fail",
+                    message=str(exc),
+                    owner="startup:pump",
+                    command="0x!",
+                    duration_ms=(perf_counter() - started) * 1000.0,
+                )
+                continue
+            self._record_port_probe_event(
+                role="pump",
+                port=port.device,
+                assignment=assignment,
+                action="probe",
+                result="success",
+                message=probe.model or "Pump controller",
+                owner="startup:pump",
+                command="0x!",
+                duration_ms=(perf_counter() - started) * 1000.0,
+            )
+            return HardwareInitStepResult(
+                key="pump",
+                label="Pump controller",
+                state="discovered",
+                message=f"Pump controller discovered on {probe.port}.",
+                connected=False,
+                probe=probe,
+                payload=probe,
+            )
+        if assigned_error is not None:
+            last_error = assigned_error if last_error is None else f"{assigned_error}; {last_error}"
         return HardwareInitStepResult(
             key="pump",
             label="Pump controller",
             state="error",
-            message="Pump controller scan completed with no usable device.",
+            message=last_error or "Pump controller scan completed with no usable device.",
             connected=False,
             error=last_error,
             payload=[],
@@ -3877,8 +3976,18 @@ class MainWindow(QMainWindow):
 
     def _valve_init_step(self) -> HardwareInitStepResult:
         all_ports = SerialController.list_ports()
-        preferred_ports = [port for port in all_ports if get_port_assignment(port.device) == "valve"]
-        likely_ports = [port for port in all_ports if controller_port_priority(port) > 0]
+        preferred_ports = [
+            port
+            for port in all_ports
+            if get_port_assignment(port.device) == "valve" and should_probe_port_for_role(port.device, "valve")
+        ]
+        likely_ports = [
+            port
+            for port in all_ports
+            if get_port_assignment(port.device) == "auto"
+            and controller_port_priority(port) > 0
+            and should_probe_port_for_role(port.device, "valve")
+        ]
         ports = preferred_ports + [port for port in likely_ports if port not in preferred_ports]
         if not ports:
             return HardwareInitStepResult(
@@ -3891,16 +4000,52 @@ class MainWindow(QMainWindow):
             )
         ports = sorted(ports, key=controller_port_priority, reverse=True)
         last_error: str | None = None
+        assigned_error: str | None = None
         for port in ports:
+            assignment = get_port_assignment(port.device)
+            if not should_probe_port_for_role(port.device, "valve"):
+                self._record_port_probe_event(
+                    role="valve",
+                    port=port.device,
+                    assignment=assignment,
+                    action="skip",
+                    result="skipped",
+                    message=f"Port {port.device} is assigned to {assignment} and is excluded from valve probing.",
+                    owner="startup:valve",
+                )
+                continue
+            started = perf_counter()
             try:
                 client, probe = detect_valve_controller(port.device)
             except Exception as exc:
                 last_error = str(exc)
+                if assignment == "valve" and assigned_error is None:
+                    assigned_error = f"Assigned valve port {port.device} did not respond as a valve controller: {exc}"
+                self._record_port_probe_event(
+                    role="valve",
+                    port=port.device,
+                    assignment=assignment,
+                    action="probe",
+                    result="fail",
+                    message=str(exc),
+                    owner="startup:valve",
+                    duration_ms=(perf_counter() - started) * 1000.0,
+                )
                 continue
             try:
                 client.close()
             except Exception:
                 pass
+            self._record_port_probe_event(
+                role="valve",
+                port=port.device,
+                assignment=assignment,
+                action="probe",
+                result="success",
+                message=getattr(probe, "model", "Valve controller") or "Valve controller",
+                owner="startup:valve",
+                duration_ms=(perf_counter() - started) * 1000.0,
+            )
             return HardwareInitStepResult(
                 key="valve",
                 label="Valve controller",
@@ -3914,9 +4059,9 @@ class MainWindow(QMainWindow):
             key="valve",
             label="Valve controller",
             state="error",
-            message="Valve controller scan completed with no usable device.",
+            message=assigned_error or last_error or "Valve controller scan completed with no usable device.",
             connected=False,
-            error=last_error,
+            error=assigned_error or last_error,
             payload=None,
         )
 
@@ -4064,7 +4209,7 @@ class MainWindow(QMainWindow):
         if obj is getattr(self, "_processed_spectra_header_label", None):
             event_type = event.type()
             if event_type == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
-                self._activate_flow_view()
+                self._activate_experimental_control_view()
                 return True
         experiment_header = getattr(getattr(self, "_experiment_control_window", None), "_experiment_control_header_label", None)
         if obj is experiment_header:
@@ -4165,6 +4310,9 @@ class MainWindow(QMainWindow):
             "This view is optimized for fast acquisition first, display second.",
         )
 
+    def _show_preferences_dialog(self) -> None:
+        show_preferences_dialog_for(self)
+
     def _show_shortcuts_dialog(self) -> None:
         QMessageBox.information(
             self,
@@ -4192,6 +4340,9 @@ class MainWindow(QMainWindow):
 
     def _show_connected_devices_dialog(self) -> None:
         show_hardware_inventory_dialog(self)
+
+    def _show_usb_probe_diagnostics_dialog(self) -> None:
+        show_usb_probe_diagnostics_dialog(self)
 
     def _set_processing_debug_mode_enabled(self, enabled: bool) -> None:
         self._processing_debug_mode_enabled = bool(enabled)
@@ -4340,208 +4491,64 @@ class MainWindow(QMainWindow):
         )
 
     def _enqueue_plot_processing(self) -> None:
-        if self._plots_frozen:
-            return
-
-        plot_mode = self.PLOT_MODES[self.plot_selector.currentText()]
-        raw_spectrum = self._session.get_plot_data(plot_mode)
-        settings = self._current_processing_settings()
-        self._plot_processing_epoch += 1
-        request = ProcessingRequest(
-            spectrum=raw_spectrum,
-            settings=settings,
-            epoch=self._plot_processing_epoch,
-        )
-        if self._plot_processing_running:
-            self._pending_plot_request = request
-            return
-        self._start_plot_processing_task(request)
+        enqueue_plot_processing_for(self)
 
     def _start_plot_processing_task(self, request: ProcessingRequest) -> None:
-        self._plot_processing_running = True
-        self._active_plot_processing_epoch = request.epoch
-        task = ProcessingTask(request)
-        task.signals.finished.connect(self._handle_plot_processing_result)
-        self._thread_pool.start(task)
+        start_plot_processing_task_for(self, request)
 
     def _handle_plot_processing_result(self, result: ProcessingResult) -> None:
-        if self._closing:
-            self._plot_processing_running = False
-            self._pending_plot_request = None
-            return
-
-        self._plot_processing_running = False
-        if result.epoch != self._active_plot_processing_epoch:
-            if self._pending_plot_request is not None:
-                pending = self._pending_plot_request
-                self._pending_plot_request = None
-                self._start_plot_processing_task(pending)
-            return
-
-        processed = self._apply_temporal_smoothing(result.processed)
-        fit = result.fit
-        if processed is not None and fit is not None and processed is not result.processed:
-            fit = fit_processed_spectrum(processed, self._current_processing_settings())
-        self._last_processing_ms = result.processing_ms
-        if result.processing_ms > 0:
-            self._processing_rate_hz = 1000.0 / result.processing_ms
-            display_period_ms = max(1000.0 / max(self.live_rate_spin.value(), 1e-9), 1.0)
-            self._processing_headroom_ratio = display_period_ms / result.processing_ms
-        else:
-            self._processing_rate_hz = None
-            self._processing_headroom_ratio = None
-        self._last_processed_plot = processed
-        self._last_fit_plot = fit
-        self._processed_cache_key = None
-        self._processed_cache_result = (processed, fit)
-        self._analysis_cache_key = None
-        self._analysis_cache_result = (
-            np.empty(0, dtype=np.float64),
-            np.empty(0, dtype=np.float64),
-            {},
-        )
-        self._analysis_metrics_cache_key = None
-        self._analysis_metrics_cache_result = {}
-        self._update_poly_warning_indicator(fit)
-        self._request_deferred_ui_refresh(trace_plot=True, trace_label="Metric position (nm)")
-        if self._pending_plot_request is not None:
-            pending = self._pending_plot_request
-            self._pending_plot_request = None
-            self._start_plot_processing_task(pending)
+        handle_plot_processing_result_for(self, result)
 
     def _sensorgram_heatmap_archive_request_signature(self) -> tuple[object, ...] | None:
-        archive_path = getattr(self, "_metric_archive_path", None)
-        if archive_path is None:
-            return None
-        path = Path(archive_path).expanduser()
-        if not path.exists():
-            return None
-        try:
-            mtime_ns = path.stat().st_mtime_ns
-        except OSError:
-            mtime_ns = 0
-        time_range = getattr(self, "_sensorgram_heatmap_requested_time_range_s", None)
-        wavelength_range = getattr(self, "_sensorgram_heatmap_requested_wavelength_range_nm", None)
-        if wavelength_range is not None:
-            try:
-                wavelength_range = tuple(float(value) for value in list(wavelength_range)[:2])
-                if len(wavelength_range) != 2:
-                    wavelength_range = None
-            except (TypeError, ValueError):
-                wavelength_range = None
-        if time_range is not None:
-            try:
-                time_range = float(time_range)
-            except (TypeError, ValueError):
-                time_range = None
-        return (
-            str(path),
-            int(mtime_ns),
-            int(getattr(self, "_sensorgram_heatmap_history_max_rows", 800)),
-            time_range,
-            wavelength_range,
-            "sample",
-        )
+        return sensorgram_heatmap_archive_request_signature(self)
 
     def _set_sensorgram_heatmap_notice(self, title: str, detail: str) -> None:
-        if not hasattr(self, "trace_heatmap_notice_item"):
+        set_sensorgram_heatmap_notice(self, title, detail)
+
+    def _start_sensorgram_reload_spinner(self) -> None:
+        timer = getattr(self, "_sensorgram_reload_button_spinner_timer", None)
+        if timer is None or not hasattr(self, "sensorgram_reload_button"):
             return
-        notice = self.trace_heatmap_notice_item
-        if hasattr(notice, "setText"):
-            notice.setText(f"{title}\n{detail}")
-        notice.setVisible(True)
-        sync_overlay = getattr(self, "_sync_trace_heatmap_notice_overlay", None)
-        if callable(sync_overlay):
-            sync_overlay()
+        self._sensorgram_reload_button_spinner_angle = 0
+        self._advance_sensorgram_reload_spinner()
+        timer.start()
+
+    def _stop_sensorgram_reload_spinner(self) -> None:
+        timer = getattr(self, "_sensorgram_reload_button_spinner_timer", None)
+        if timer is not None:
+            timer.stop()
+        base_icon = getattr(self, "_sensorgram_reload_button_base_icon", None)
+        if base_icon is not None and hasattr(self, "sensorgram_reload_button"):
+            self.sensorgram_reload_button.setIcon(base_icon)
+
+    def _advance_sensorgram_reload_spinner(self) -> None:
+        button = getattr(self, "sensorgram_reload_button", None)
+        base_icon = getattr(self, "_sensorgram_reload_button_base_icon", None)
+        if button is None or base_icon is None:
+            return
+        try:
+            size = max(int(button.iconSize().width()), int(button.iconSize().height()), 24)
+            pixmap = base_icon.pixmap(size, size)
+            if pixmap.isNull():
+                return
+            transform = QTransform().rotate(float(getattr(self, "_sensorgram_reload_button_spinner_angle", 0)))
+            rotated = pixmap.transformed(transform, Qt.TransformationMode.SmoothTransformation)
+            button.setIcon(QIcon(rotated))
+            self._sensorgram_reload_button_spinner_angle = (int(self._sensorgram_reload_button_spinner_angle) + 30) % 360
+        except Exception:
+            pass
 
     def _start_sensorgram_heatmap_archive_task(self, request_token: tuple[object, ...]) -> None:
-        archive_path = getattr(self, "_metric_archive_path", None)
-        if archive_path is None:
-            return
-        archive_path = Path(archive_path).expanduser()
-        self._sensorgram_heatmap_archive_request_token = request_token
-        self._sensorgram_heatmap_archive_loading = True
-        self._sensorgram_heatmap_archive_times = None
-        self._sensorgram_heatmap_archive_matrix = None
-        self._sensorgram_heatmap_archive_rows = 0
-        self._sensorgram_heatmap_archive_load_ms = None
-        self._sensorgram_heatmap_archive_build_ms = None
-        self._set_sensorgram_heatmap_notice(
-            "Heatmap loading",
-            "Preparing heatmap from the saved measurement file in the background.",
-        )
-        task = HeatmapArchiveLoadTask(
-            HeatmapArchiveLoadRequest(
-                path=archive_path,
-                source_epoch=self._source_epoch,
-                request_token=request_token,
-                max_rows=int(getattr(self, "_sensorgram_heatmap_history_max_rows", 800)),
-                time_range_s=getattr(self, "_sensorgram_heatmap_requested_time_range_s", None),
-                wavelength_range_nm=getattr(self, "_sensorgram_heatmap_requested_wavelength_range_nm", None),
-                spectrum_group_name="sample",
-            )
-        )
-        self._sensorgram_heatmap_archive_task = task
-        task.signals.finished.connect(self._handle_sensorgram_heatmap_archive_result)
-        task.signals.failed.connect(self._handle_sensorgram_heatmap_archive_failed)
-        self._thread_pool.start(task)
+        start_sensorgram_heatmap_archive_task(self, request_token)
 
     def _request_sensorgram_heatmap_archive(self) -> None:
-        if self._closing or bool(getattr(self, "_live_active", False)):
-            return
-        request_token = self._sensorgram_heatmap_archive_request_signature()
-        if request_token is None:
-            return
-        self._sensorgram_heatmap_archive_pending_token = request_token
-        if self._sensorgram_heatmap_archive_loading:
-            return
-        self._start_sensorgram_heatmap_archive_task(request_token)
+        request_sensorgram_heatmap_archive(self)
 
     def _handle_sensorgram_heatmap_archive_result(self, result: HeatmapArchiveLoadResult) -> None:
-        self._sensorgram_heatmap_archive_loading = False
-        self._sensorgram_heatmap_archive_task = None
-        if self._closing:
-            self._sensorgram_heatmap_archive_pending_token = None
-            return
-        if result.request_token != self._sensorgram_heatmap_archive_request_token:
-            next_token = self._sensorgram_heatmap_archive_pending_token
-            if next_token is not None and next_token != result.request_token:
-                self._sensorgram_heatmap_archive_pending_token = None
-                self._start_sensorgram_heatmap_archive_task(next_token)
-            return
-
-        self._sensorgram_heatmap_wavelengths = np.asarray(result.wavelengths, dtype=np.float64)
-        self._sensorgram_heatmap_archive_times = np.asarray(result.times, dtype=np.float64)
-        self._sensorgram_heatmap_archive_matrix = np.asarray(result.matrix, dtype=np.float64)
-        self._sensorgram_heatmap_archive_rows = int(result.row_count)
-        self._sensorgram_heatmap_archive_load_ms = float(result.load_ms)
-        self._sensorgram_heatmap_archive_build_ms = float(result.build_ms)
-        self._sensorgram_heatmap_history.clear()
-        self._sensorgram_heatmap_history_revision += 1
-        if hasattr(self, "_plot_view_cache"):
-            try:
-                self._plot_view_cache.clear()
-            except Exception:
-                pass
-        self._set_sensorgram_heatmap_notice(
-            "Heatmap ready",
-            "Use Freeze/Review to inspect the saved-file heatmap.",
-        )
-        self._request_deferred_ui_refresh(trace_plot=True, trace_label="Metric position (nm)")
-        next_token = self._sensorgram_heatmap_archive_pending_token
-        self._sensorgram_heatmap_archive_pending_token = None
-        if next_token is not None and next_token != result.request_token:
-            self._start_sensorgram_heatmap_archive_task(next_token)
+        handle_sensorgram_heatmap_archive_result(self, result)
 
     def _handle_sensorgram_heatmap_archive_failed(self, message: str) -> None:
-        self._sensorgram_heatmap_archive_loading = False
-        self._sensorgram_heatmap_archive_task = None
-        self._sensorgram_heatmap_archive_pending_token = None
-        self._set_sensorgram_heatmap_notice(
-            "Heatmap unavailable",
-            f"Saved-file heatmap load failed: {message}",
-        )
-        self._log_error(f"Heatmap saved-file load failed: {message}")
+        handle_sensorgram_heatmap_archive_failed(self, message)
 
     def _sensorgram_metric_archive_reload_request_signature(
         self,
@@ -4565,117 +4572,28 @@ class MainWindow(QMainWindow):
         self,
         request_token: tuple[object, ...],
     ) -> None:
-        archive_path = getattr(self, "_metric_archive_path", None)
-        if archive_path is None:
-            return
-        archive_path = Path(archive_path).expanduser()
-        self._sensorgram_metric_archive_reload_request_token = request_token
-        self._sensorgram_metric_archive_reload_loading = True
-        self._sensorgram_metric_archive_reload_pending_token = None
-        self._set_sensorgram_heatmap_notice(
-            "Sensorgram reload",
-            "Rebuilding the live sensorgram from the saved measurement file in the background.",
-        )
-        task = MetricArchiveReloadTask(
-            MetricArchiveReloadRequest(
-                path=archive_path,
-                source_epoch=self._source_epoch,
-                request_token=request_token,
-                metric_names=tuple(self._selected_trace_metrics()),
-            )
-        )
-        self._sensorgram_metric_archive_reload_task = task
-        task.signals.finished.connect(self._handle_sensorgram_metric_archive_reload_result)
-        task.signals.failed.connect(self._handle_sensorgram_metric_archive_reload_failed)
-        self._thread_pool.start(task)
+        self._start_sensorgram_reload_spinner()
+        start_sensorgram_metric_archive_reload_task(self, request_token)
 
     def _request_sensorgram_metric_archive_reload(self) -> None:
-        self._request_absolute_sensorgram_metric_archive_reload()
+        request_sensorgram_metric_archive_reload(self)
 
     def _request_absolute_sensorgram_metric_archive_reload(self) -> None:
-        if self._closing:
-            return
-        request_token = self._sensorgram_metric_archive_reload_request_signature()
-        if request_token is None:
-            self.status_label.setText("No saved measurement file is available to reload.")
-            return
-        archive_path = Path(request_token[0])
-        if not archive_path.exists():
-            self.status_label.setText("Sensorgram measurement file is missing.")
-            self._log_warning(f"Sensorgram measurement file not found: {archive_path}")
-            return
-        self._sensorgram_metric_archive_reload_pending_token = request_token
-        if self._sensorgram_metric_archive_reload_loading:
-            return
-        self._start_sensorgram_metric_archive_reload_task(request_token)
+        request_absolute_sensorgram_metric_archive_reload(self)
 
     def _start_next_pending_metric_reload_if_any(self, result: MetricArchiveReloadResult) -> None:
         next_token = self._sensorgram_metric_archive_reload_pending_token
         self._sensorgram_metric_archive_reload_pending_token = None
         if next_token is not None and next_token != result.request_token:
-            self._start_sensorgram_metric_archive_reload_task(next_token)
+            start_sensorgram_metric_archive_reload_task(self, next_token)
 
     def _handle_absolute_sensorgram_metric_archive_reload_result(self, result: MetricArchiveReloadResult) -> None:
-        if int(result.point_count) <= 0:
-            self.status_label.setText("Reloaded sensorgram measurement file returned no data; keeping the current absolute cache.")
-            self._log_warning(
-                f"Sensorgram measurement file reload returned no data | purpose=absolute_reload | path={result.path}"
-            )
-            return
-        plot_view_cache = getattr(self, "_plot_view_cache", None)
-        display_points = max(int(getattr(self, "_plot_display_points", 512)), 1)
-        if plot_view_cache is not None and hasattr(plot_view_cache, "clear_live_absolute_metric_cache"):
-            try:
-                plot_view_cache.clear_live_absolute_metric_cache()
-            except Exception:
-                pass
-        if plot_view_cache is not None and hasattr(plot_view_cache, "clear_active_trace_series_cache"):
-            try:
-                plot_view_cache.clear_active_trace_series_cache()
-            except Exception:
-                pass
-        total_points = 0
-        for metric_name, (times, values) in result.series.items():
-            x_values = np.asarray(times, dtype=np.float64)
-            y_values = np.asarray(values, dtype=np.float64)
-            if len(x_values) == 0 or len(y_values) == 0:
-                continue
-            total_points += int(min(len(x_values), len(y_values)))
-            if plot_view_cache is not None and hasattr(plot_view_cache, "seed_live_absolute_metric_cache"):
-                try:
-                    plot_view_cache.seed_live_absolute_metric_cache(
-                        metric_name,
-                        x_values,
-                        y_values,
-                        target_points=display_points,
-                        recent_tail_points=max(int(getattr(self, "_sensorgram_compression_recent_tail_points", 300)), 0),
-                    )
-                except Exception:
-                    pass
-        if hasattr(self, "_metric_render_display_cache"):
-            self._metric_render_display_cache.clear()
-        if hasattr(self, "_metric_render_state_cache"):
-            self._metric_render_state_cache.clear()
-        self._trace_view_locked = False
-        self._last_metric_absolute_source_text = "saved_file_reload"
-        self._last_metric_absolute_cache_invalidation_text = "reload"
-        self._last_metric_absolute_cache_rebuild_count_text = str(int(result.metric_count))
-        self._last_metric_absolute_hdf5_read_count_text = "1"
-        self._last_metric_absolute_archive_points_text = str(int(result.point_count))
-        self._last_metric_absolute_display_points_text = str(int(total_points))
-        self._last_metric_absolute_view_prep_text = f"{float(result.load_ms):.2f} ms"
-        self._last_metric_absolute_append_text = "-"
-        self.status_label.setText(
-            f"Reloaded sensorgram measurement file ({result.metric_count} metrics, {result.point_count} points)."
-        )
-        self._log_success(
-            f"Sensorgram measurement file reloaded | purpose=absolute_reload | metrics={result.metric_count} | points={result.point_count} | load_ms={float(result.load_ms):.2f}"
-        )
-        self._refresh_trace_plot("Metric position (nm)")
-        self._request_trace_autoscale()
-        self._update_trace_stats()
+        from lspr_app.gui.main_window_sensorgram_archive import handle_absolute_sensorgram_metric_archive_reload_result
+
+        handle_absolute_sensorgram_metric_archive_reload_result(self, result)
 
     def _handle_sensorgram_metric_archive_reload_result(self, result: MetricArchiveReloadResult) -> None:
+        self._stop_sensorgram_reload_spinner()
         self._sensorgram_metric_archive_reload_loading = False
         self._sensorgram_metric_archive_reload_task = None
         if self._closing:
@@ -4688,6 +4606,7 @@ class MainWindow(QMainWindow):
         self._start_next_pending_metric_reload_if_any(result)
 
     def _handle_sensorgram_metric_archive_reload_failed(self, message: str) -> None:
+        self._stop_sensorgram_reload_spinner()
         self._sensorgram_metric_archive_reload_loading = False
         self._sensorgram_metric_archive_reload_task = None
         self._sensorgram_metric_archive_reload_pending_token = None
@@ -4705,6 +4624,8 @@ class MainWindow(QMainWindow):
                 return
             self._request_sensorgram_heatmap_archive()
             return
+        if hasattr(self, "trace_heatmap_notice_item"):
+            self.trace_heatmap_notice_item.setVisible(False)
         self._request_absolute_sensorgram_metric_archive_reload()
 
     def _flush_deferred_ui_refreshes(self) -> None:
@@ -4975,15 +4896,7 @@ class MainWindow(QMainWindow):
         render_metric_series_for(self, history, clock_mode)
 
     def _handle_trace_view_range_changed(self, *_args) -> None:
-        if self._trace_view_autoscaling:
-            return
-        self._trace_view_locked = True
-        sync_overlay = getattr(self, "_sync_sensorgram_control_step_overlay", None)
-        if callable(sync_overlay):
-            try:
-                sync_overlay()
-            except Exception:
-                pass
+        handle_trace_view_range_changed_for_sensorgram(self, *_args)
 
     def _sync_trace_heatmap_notice_overlay(self) -> None:
         notice = getattr(self, "trace_heatmap_notice_item", None)
@@ -5012,114 +4925,28 @@ class MainWindow(QMainWindow):
             return
 
     def _sensorgram_control_step_overlay_current_elapsed_s(self) -> float | None:
-        if self._measurement_started_at is not None and self._measurement_active:
-            try:
-                return max((datetime.now(timezone.utc) - self._measurement_started_at).total_seconds(), 0.0)
-            except Exception:
-                return None
-        events = getattr(self, "_sensorgram_control_step_events", None)
-        if isinstance(events, list) and events:
-            last_event = events[-1]
-            try:
-                return max(float(last_event.get("elapsed_s", last_event.get("t_ms", 0.0) / 1000.0)), 0.0)
-            except Exception:
-                return None
-        return None
+        return sensorgram_control_step_overlay_current_elapsed_s_for_sensorgram(self)
 
     def _sensorgram_control_step_overlay_brush(self, segment: dict[str, object]) -> object:
-        state = str(segment.get("state") or "").upper()
-        color_text = str(segment.get("color") or "").strip()
-        style = self._normalize_sensorgram_control_step_overlay_style(getattr(self, "_sensorgram_control_step_overlay_style", "bar"))
-        base_color = QColor("#5fa8ff" if state == "RUN" else "#7f8a99")
-        if color_text:
-            candidate = QColor(color_text)
-            if candidate.isValid():
-                base_color = candidate
-        if style == "background":
-            opacity = max(min(float(getattr(self, "_sensorgram_control_step_overlay_opacity", 25.0)), 100.0), 0.0) / 100.0
-            alpha = int(round(255 * opacity))
-            if bool(segment.get("active")):
-                alpha = min(alpha + 24, 255)
-            base_color.setAlpha(alpha)
-            return pg.mkBrush(base_color)
-        if state in {"HOLD", "PAUSE"} and not color_text:
-            base_color = QColor("#7f8a99")
-        base_color.setAlpha(255)
-        return pg.mkBrush(base_color)
+        return sensorgram_control_step_overlay_brush_for_sensorgram(self, segment)
 
     def _normalize_sensorgram_control_step_overlay_style(self, value: object | None = None) -> str:
-        current = self._sensorgram_control_step_overlay_style if value is None else value
-        normalized = str(current or "").strip().lower()
-        return normalized if normalized in {"background", "bar"} else "bar"
+        return normalize_sensorgram_control_step_overlay_style_for_sensorgram(self, value)
 
     def _normalize_sensorgram_control_step_overlay_position(self, value: object | None = None) -> str:
-        current = self._sensorgram_control_step_overlay_position if value is None else value
-        normalized = str(current or "").strip().lower()
-        return normalized if normalized in {"top", "bottom"} else "top"
+        return normalize_sensorgram_control_step_overlay_position_for_sensorgram(self, value)
 
     def _sensorgram_control_step_overlay_view_bounds(self) -> tuple[float, float, float, float] | None:
-        trace_plot = getattr(self, "trace_plot", None)
-        if trace_plot is None:
-            return None
-        plot_item = getattr(trace_plot, "getPlotItem", lambda: None)()
-        if plot_item is None or getattr(plot_item, "vb", None) is None:
-            return None
-        try:
-            x_range, y_range = plot_item.vb.viewRange()
-            x_min = float(min(x_range[0], x_range[1]))
-            x_max = float(max(x_range[0], x_range[1]))
-            y_min = float(min(y_range[0], y_range[1]))
-            y_max = float(max(y_range[0], y_range[1]))
-        except Exception:
-            return None
-        if not all(np.isfinite(value) for value in (x_min, x_max, y_min, y_max)):
-            return None
-        if x_max <= x_min or y_max <= y_min:
-            return None
-        return x_min, x_max, y_min, y_max
+        return sensorgram_control_step_overlay_view_bounds_for_sensorgram(self)
 
     def _sensorgram_control_step_overlay_remove_items(self, trace_plot, items: list[object]) -> None:
-        for item in list(items):
-            try:
-                if isinstance(item, dict):
-                    for value in item.values():
-                        if hasattr(trace_plot, "removeItem") and hasattr(value, "scene"):
-                            trace_plot.removeItem(value)
-                else:
-                    trace_plot.removeItem(item)
-            except Exception:
-                pass
-        items.clear()
+        sensorgram_control_step_overlay_remove_items_for_sensorgram(self, trace_plot, items)
 
     def _sensorgram_control_step_overlay_set_visible(self, item: object, visible: bool) -> None:
-        if isinstance(item, dict):
-            for value in item.values():
-                if hasattr(value, "setVisible"):
-                    try:
-                        value.setVisible(visible)
-                    except Exception:
-                        pass
-            return
-        if hasattr(item, "setVisible"):
-            try:
-                item.setVisible(visible)
-            except Exception:
-                pass
+        sensorgram_control_step_overlay_set_visible_for_sensorgram(item, visible)
 
     def _sensorgram_control_step_overlay_set_tooltip(self, item: object, tooltip: str) -> None:
-        if isinstance(item, dict):
-            for value in item.values():
-                if hasattr(value, "setToolTip"):
-                    try:
-                        value.setToolTip(tooltip)
-                    except Exception:
-                        pass
-            return
-        if hasattr(item, "setToolTip"):
-            try:
-                item.setToolTip(tooltip)
-            except Exception:
-                pass
+        sensorgram_control_step_overlay_set_tooltip_for_sensorgram(item, tooltip)
 
     def _sensorgram_control_step_overlay_clip_segment(
         self,
@@ -5127,14 +4954,7 @@ class MainWindow(QMainWindow):
         x_min: float,
         x_max: float,
     ) -> dict[str, object] | None:
-        start_s = max(float(segment.get("start_s", 0.0)), x_min)
-        end_s = min(float(segment.get("end_s", 0.0)), x_max)
-        if end_s <= start_s:
-            return None
-        clipped = dict(segment)
-        clipped["start_s"] = start_s
-        clipped["end_s"] = end_s
-        return clipped
+        return sensorgram_control_step_overlay_clip_segment_for_sensorgram(self, segment, x_min, x_max)
 
     def _sensorgram_control_step_overlay_bar_rect(
         self,
@@ -5145,429 +4965,59 @@ class MainWindow(QMainWindow):
         y_min: float,
         y_max: float,
     ) -> QRectF:
-        plot_item = getattr(getattr(self, "trace_plot", None), "getPlotItem", lambda: None)()
-        pixel_size_y = 0.0
-        try:
-            if plot_item is not None and getattr(plot_item, "vb", None) is not None:
-                pixel_size = plot_item.vb.viewPixelSize()
-                pixel_size_y = abs(float(pixel_size[1]))
-        except Exception:
-            pixel_size_y = 0.0
-        bar_height_px = max(int(getattr(self, "_sensorgram_control_step_overlay_bar_height_px", 8)), 1)
-        bar_height_data = pixel_size_y * float(bar_height_px) if pixel_size_y > 0.0 else max((y_max - y_min) * 0.04, 1e-6)
-        bar_height_data = max(bar_height_data, max((y_max - y_min) * 0.01, 1e-6))
-        position = self._normalize_sensorgram_control_step_overlay_position()
-        if position == "bottom":
-            y0 = y_min
-        else:
-            y0 = y_max - bar_height_data
-        y1 = y0 + bar_height_data
-        x0 = max(float(segment.get("start_s", x_min)), x_min)
-        x1 = min(float(segment.get("end_s", x_max)), x_max)
-        if x1 <= x0:
-            x1 = x0 + max((x_max - x_min) * 0.001, 1e-6)
-        return QRectF(x0, y0, x1 - x0, y1 - y0)
+        return sensorgram_control_step_overlay_bar_rect_for_sensorgram(
+            self,
+            segment=segment,
+            x_min=x_min,
+            x_max=x_max,
+            y_min=y_min,
+            y_max=y_max,
+        )
 
     def _sensorgram_control_step_overlay_label_font(self) -> QFont:
-        bar_height_px = max(int(getattr(self, "_sensorgram_control_step_overlay_bar_height_px", 18)), 1)
-        font = QFont(self.font())
-        font.setPixelSize(max(8, min(40, int(round(float(bar_height_px) * 0.66)))))
-        font.setBold(False)
-        return font
+        return sensorgram_control_step_overlay_label_font_for_sensorgram(self)
 
     def _sensorgram_control_step_overlay_text_color(self, color_text: str) -> QColor:
-        color = QColor(str(color_text or "").strip())
-        if not color.isValid():
-            return QColor("#f8fbff")
-        luminance = 0.2126 * color.redF() + 0.7152 * color.greenF() + 0.0722 * color.blueF()
-        return QColor("#0f1720" if luminance > 0.58 else "#f8fbff")
+        return sensorgram_control_step_overlay_text_color_for_sensorgram(self, color_text)
 
     def _sensorgram_control_step_overlay_reserved_y_padding(self, y_min: float, y_max: float) -> tuple[float, float]:
-        enabled = bool(getattr(self, "_sensorgram_control_step_overlay_enabled", True))
-        style = self._normalize_sensorgram_control_step_overlay_style(getattr(self, "_sensorgram_control_step_overlay_style", "bar"))
-        content_mode = self._normalize_sensorgram_content_mode(getattr(self, "_sensorgram_content_mode", "metric"))
-        if not enabled or style != "bar" or content_mode == "heatmap":
-            return 0.0, 0.0
-        bounds = self._sensorgram_control_step_overlay_view_bounds()
-        if bounds is None:
-            return 0.0, 0.0
-        y_span = max(float(y_max) - float(y_min), 1e-9)
-        plot_item = getattr(getattr(self, "trace_plot", None), "getPlotItem", lambda: None)()
-        pixel_size_y = 0.0
-        try:
-            if plot_item is not None and getattr(plot_item, "vb", None) is not None:
-                pixel_size = plot_item.vb.viewPixelSize()
-                pixel_size_y = abs(float(pixel_size[1]))
-        except Exception:
-            pixel_size_y = 0.0
-        bar_height_px = max(int(getattr(self, "_sensorgram_control_step_overlay_bar_height_px", 18)), 1)
-        reserve = pixel_size_y * float(bar_height_px)
-        if not np.isfinite(reserve) or reserve <= 0.0:
-            reserve = y_span * 0.02
-        reserve = max(reserve * 1.15, y_span * 0.02, 1e-6)
-        position = self._normalize_sensorgram_control_step_overlay_position()
-        if position == "bottom":
-            return reserve, 0.0
-        return 0.0, reserve
+        return sensorgram_control_step_overlay_reserved_y_padding_for_sensorgram(self, y_min, y_max)
 
     def _record_sensorgram_control_step_event(self, payload: dict[str, object]) -> None:
-        events = getattr(self, "_sensorgram_control_step_events", None)
-        if not isinstance(events, list):
-            events = []
-            self._sensorgram_control_step_events = events
-        try:
-            elapsed_s = float(payload.get("t_ms", 0.0)) / 1000.0
-        except Exception:
-            elapsed_s = 0.0
-        step_index = payload.get("step_index")
-        try:
-            step_index_value = max(int(float(step_index)), 0) if step_index not in {None, ""} else None
-        except Exception:
-            step_index_value = None
-        state = str(payload.get("plan_state") or "").strip().upper()
-        if state not in {"RUN", "HOLD", "PAUSE", "STOP"}:
-            state = "STOP"
-        color = ""
-        label = ""
-        experiment_control_window = getattr(self, "_experiment_control_window", None)
-        if step_index_value is not None and experiment_control_window is not None:
-            try:
-                steps = experiment_control_window._read_experiment_control_steps()
-            except Exception:
-                steps = []
-            if 1 <= step_index_value <= len(steps):
-                step = steps[step_index_value - 1]
-                color = normalize_sensorgram_control_step_overlay_color(getattr(step, "color", ""))
-                label = resolve_sensorgram_control_step_overlay_palette_label(
-                    color,
-                    getattr(experiment_control_window, "_color_palette_entries", None),
-                    step_index=step_index_value,
-                )
-        if not color:
-            palette = getattr(self, "SENSORGRAM_TIME_PLOT_COLORS", {})
-            color = normalize_sensorgram_control_step_overlay_color(
-                palette.get("smoothed_max", "#5fa8ff"),
-                fallback="#5fa8ff",
-            )
-        if not label:
-            label = normalize_sensorgram_control_step_overlay_label("", step_index=step_index_value)
-        events.append(
-            {
-                "elapsed_s": max(float(elapsed_s), 0.0),
-                "step_index": step_index_value,
-                "state": state,
-                "event": str(payload.get("event") or ""),
-                "status": str(payload.get("status") or ""),
-                "color": color,
-                "label": label,
-            }
-        )
+        record_sensorgram_control_step_event_for_sensorgram(self, payload)
 
     def _sync_sensorgram_control_step_overlay(self) -> None:
-        trace_plot = getattr(self, "trace_plot", None)
-        if trace_plot is None:
-            return
-        items = getattr(self, "_sensorgram_control_step_overlay_items", None)
-        if not isinstance(items, list):
-            items = []
-            self._sensorgram_control_step_overlay_items = items
-        enabled = bool(getattr(self, "_sensorgram_control_step_overlay_enabled", True))
-        style = self._normalize_sensorgram_control_step_overlay_style(getattr(self, "_sensorgram_control_step_overlay_style", "bar"))
-        content_mode = self._normalize_sensorgram_content_mode(getattr(self, "_sensorgram_content_mode", "metric"))
-        if not enabled or content_mode == "heatmap":
-            for item in items:
-                try:
-                    item.setVisible(False)
-                except Exception:
-                    pass
-            return
-        events = getattr(self, "_sensorgram_control_step_events", [])
-        if not isinstance(events, list) or not events:
-            for item in items:
-                try:
-                    item.setVisible(False)
-                except Exception:
-                    pass
-            return
-        bounds = self._sensorgram_control_step_overlay_view_bounds()
-        if bounds is None:
-            for item in items:
-                try:
-                    item.setVisible(False)
-                except Exception:
-                    pass
-            return
-        x_min, x_max, y_min, y_max = bounds
-        current_elapsed_s = self._sensorgram_control_step_overlay_current_elapsed_s()
-        segments = build_sensorgram_control_step_overlay_segments(
-            events,
-            current_elapsed_s=current_elapsed_s,
-        )
-        if not segments:
-            for item in items:
-                try:
-                    item.setVisible(False)
-                except Exception:
-                    pass
-            return
-
-        visible_segments: list[dict[str, object]] = []
-        for segment in segments:
-            clipped = self._sensorgram_control_step_overlay_clip_segment(segment, x_min, x_max)
-            if clipped is not None:
-                visible_segments.append(clipped)
-        if not visible_segments:
-            for item in items:
-                try:
-                    item.setVisible(False)
-                except Exception:
-                    pass
-            return
-
-        if items:
-            current_style = getattr(items[0], "_sensorgram_control_step_overlay_style", None)
-            if current_style != style:
-                self._sensorgram_control_step_overlay_remove_items(trace_plot, items)
-
-        while len(items) < len(visible_segments):
-            if style == "background":
-                region = pg.LinearRegionItem(
-                    values=(0.0, 0.0),
-                    orientation=pg.LinearRegionItem.Vertical,
-                    movable=False,
-                    brush=pg.mkBrush(0, 0, 0, 0),
-                    pen=pg.mkPen(None),
-                )
-                region._sensorgram_control_step_overlay_style = "background"
-                region.setZValue(-30)
-                region._diagnostics_owner = self
-                region._diagnostics_prefix = "trace_plot"
-                trace_plot.addItem(region, ignoreBounds=True)
-                label_item = pg.TextItem(text="", anchor=(0.5, 0.5), color="#ffffff")
-                label_item.setZValue(-29)
-                label_item.setFont(self._sensorgram_control_step_overlay_label_font())
-                label_item._diagnostics_owner = self
-                label_item._diagnostics_prefix = "trace_plot"
-                trace_plot.addItem(label_item, ignoreBounds=True)
-                items.append({"bar": region, "label": label_item})
-                continue
-
-            rect_item = QGraphicsRectItem(0.0, 0.0, 0.0, 0.0)
-            rect_item._sensorgram_control_step_overlay_style = "bar"
-            rect_item.setPen(pg.mkPen(None))
-            rect_item.setBrush(pg.mkBrush(0, 0, 0, 0))
-            rect_item.setZValue(-31)
-            rect_item._diagnostics_owner = self
-            rect_item._diagnostics_prefix = "trace_plot"
-            trace_plot.addItem(rect_item, ignoreBounds=True)
-
-            label_item = pg.TextItem(text="", anchor=(0.5, 0.5), color="#ffffff")
-            label_item.setZValue(-29)
-            label_item.setFont(self._sensorgram_control_step_overlay_label_font())
-            label_item._diagnostics_owner = self
-            label_item._diagnostics_prefix = "trace_plot"
-            trace_plot.addItem(label_item, ignoreBounds=True)
-
-            items.append({"bar": rect_item, "label": label_item})
-
-        for index, segment in enumerate(visible_segments):
-            item = items[index]
-            try:
-                if style == "background":
-                    bar_item = item.get("bar") if isinstance(item, dict) else item
-                    label_item = item.get("label") if isinstance(item, dict) else None
-                    tooltip = (
-                        " | ".join(
-                            part
-                            for part in (
-                                f"Step {int(segment['step_index'])}" if segment.get("step_index") is not None else "Step -",
-                                str(segment.get("label") or "").strip(),
-                                str(segment.get("state") or "").title(),
-                                str(segment.get("event") or "").replace("_", " "),
-                                str(segment.get("status") or "").strip(),
-                            )
-                            if part
-                        )
-                    )
-                    if bar_item is not None:
-                        bar_item.setRegion((float(segment["start_s"]), float(segment["end_s"])))
-                        bar_item.setBrush(self._sensorgram_control_step_overlay_brush(segment))
-                        bar_item.setToolTip(tooltip)
-                        bar_item.setVisible(True)
-
-                bar_item = item.get("bar") if isinstance(item, dict) else None
-                label_item = item.get("label") if isinstance(item, dict) else None
-                bar_rect = self._sensorgram_control_step_overlay_bar_rect(
-                    segment=segment,
-                    x_min=x_min,
-                    x_max=x_max,
-                    y_min=y_min,
-                    y_max=y_max,
-                )
-                tooltip = " | ".join(
-                    part
-                    for part in (
-                        f"Step {int(segment['step_index'])}" if segment.get("step_index") is not None else "Step -",
-                        str(segment.get("label") or "").strip(),
-                        str(segment.get("state") or "").title(),
-                        str(segment.get("event") or "").replace("_", " "),
-                        str(segment.get("status") or "").strip(),
-                    )
-                    if part
-                )
-                if bar_item is not None:
-                    bar_item.setRect(bar_rect)
-                    bar_item.setBrush(self._sensorgram_control_step_overlay_brush(segment))
-                    bar_item.setToolTip(tooltip)
-                    bar_item.setVisible(True)
-                if label_item is not None:
-                    label_text = str(segment.get("label") or "").strip()
-                    if not label_text and segment.get("step_index") is not None:
-                        experiment_control_window = getattr(self, "_experiment_control_window", None)
-                        if experiment_control_window is not None:
-                            label_text = resolve_sensorgram_control_step_overlay_palette_label(
-                                segment.get("color"),
-                                getattr(experiment_control_window, "_color_palette_entries", None),
-                                step_index=int(segment["step_index"]),
-                            )
-                        if not label_text:
-                            label_text = f"Step {int(segment['step_index'])}"
-                    label_font = self._sensorgram_control_step_overlay_label_font()
-                    label_item.setFont(label_font)
-                    label_item.setToolTip(tooltip)
-                    if not label_text:
-                        label_item.setVisible(False)
-                        continue
-                    try:
-                        plot_item = trace_plot.getPlotItem()
-                        pixel_size = plot_item.vb.viewPixelSize() if plot_item is not None and getattr(plot_item, "vb", None) is not None else None
-                        pixel_width = abs(float(pixel_size[0])) if pixel_size is not None else 0.0
-                    except Exception:
-                        pixel_width = 0.0
-                    available_width = max(float(bar_rect.width()) / pixel_width - 8.0, 0.0) if pixel_width > 0.0 else 0.0
-                    if available_width < 40.0:
-                        label_item.setVisible(False)
-                        continue
-                    metrics = QFontMetricsF(label_font)
-                    fitted_text = metrics.elidedText(label_text, Qt.TextElideMode.ElideRight, int(available_width))
-                    label_item.setText(fitted_text)
-                    center_x = bar_rect.left() + bar_rect.width() / 2.0
-                    center_y = bar_rect.top() + bar_rect.height() / 2.0
-                    label_item.setPos(center_x, center_y)
-                    label_item.setColor(self._sensorgram_control_step_overlay_text_color(str(segment.get("color") or "")))
-                    label_item.setVisible(True)
-            except Exception:
-                self._sensorgram_control_step_overlay_set_visible(item, False)
-
-        for item in items[len(visible_segments):]:
-            self._sensorgram_control_step_overlay_set_visible(item, False)
+        sync_sensorgram_control_step_overlay_for_sensorgram(self)
 
     def _primary_trace_metric(self) -> str:
-        return primary_trace_metric(self)
+        return primary_trace_metric_for_sensorgram(self)
 
     def _trace_stats_metric(self) -> str:
-        selected, primary = self._sensorgram_metric_selection()
-        current = self._trace_stats_metric_name
-        if current in selected:
-            return current
-        if selected:
-            self._trace_stats_metric_name = selected[0]
-            return selected[0]
-        self._trace_stats_metric_name = primary
-        return primary
+        return trace_stats_metric_for_sensorgram(self)
 
     def _cycle_trace_stats_metric(self) -> None:
-        selected, _primary = self._sensorgram_metric_selection()
-        if not selected:
-            return
-        current = normalize_sensorgram_metric_name(getattr(self, "_trace_stats_metric_name", selected[0]))
-        if current not in selected:
-            current = selected[0]
-        try:
-            index = selected.index(current)
-        except ValueError:
-            index = 0
-        next_metric = selected[(index + 1) % len(selected)]
-        self._trace_stats_metric_name = next_metric
-        if hasattr(self, "trace_stats_label"):
-            self._update_trace_stats()
-        if hasattr(self, "_request_deferred_ui_refresh"):
-            self._request_deferred_ui_refresh(summary=True)
+        cycle_trace_stats_metric(self)
 
     def _normalize_sensorgram_line_mode(self, value: object | None = None) -> str | None:
-        current = self._sensorgram_line_step_mode if value is None else value
-        if current is None:
-            return None
-        if not isinstance(current, str):
-            return None
-        normalized = current.strip().lower()
-        return normalized if normalized in {"left", "right", "center", "spline"} else None
+        return normalize_sensorgram_line_mode(self, value)
 
     def _normalize_sensorgram_content_mode(self, mode: object) -> str:
-        normalized = str(mode or "").strip().lower()
-        return normalized if normalized in {"metric", "heatmap"} else "metric"
+        return normalize_sensorgram_content_mode(mode)
 
     def _sensorgram_content_mode_tooltip(self, mode: str | None = None) -> str:
-        normalized = self._normalize_sensorgram_content_mode(mode or self._sensorgram_content_mode)
-        if normalized == "metric":
-            return (
-                "Current display: Metric time plot. Click to switch to Heatmap. "
-                "The plot will change from time-tracked metrics to a wavelength-vs-time heatmap."
-            )
-        return (
-            "Current display: Heatmap. Click to switch to Metric time plot. "
-            "The plot will change from a heatmap back to time-tracked metrics."
-        )
+        return sensorgram_content_mode_tooltip_for_sensorgram(self, mode)
 
     def _update_sensorgram_content_mode_button(self) -> None:
-        if not hasattr(self, "sensorgram_content_mode_button"):
-            return
-        normalized = self._normalize_sensorgram_content_mode(self._sensorgram_content_mode)
-        self.sensorgram_content_mode_button.setChecked(normalized == "heatmap")
-        self.sensorgram_content_mode_button.setIcon(heatmap_icon())
-        self.sensorgram_content_mode_button.setToolTip(self._sensorgram_content_mode_tooltip())
+        update_sensorgram_content_mode_button(self)
 
     def _apply_sensorgram_content_mode(self, *, save: bool = False) -> None:
-        self._sensorgram_content_mode = self._normalize_sensorgram_content_mode(self._sensorgram_content_mode)
-        self._trace_view_locked = False
-        self._update_sensorgram_content_mode_button()
-        self._apply_sensorgram_display_style()
-        self._request_trace_autoscale()
-        self._request_deferred_ui_refresh(trace_plot=True)
-        if save:
-            self._schedule_acquisition_state_persist()
+        apply_sensorgram_content_mode(self, save=save)
 
     def _cycle_sensorgram_content_mode(self) -> None:
-        current = self._normalize_sensorgram_content_mode(self._sensorgram_content_mode)
-        self._sensorgram_content_mode = "heatmap" if current == "metric" else "metric"
-        self._apply_sensorgram_content_mode(save=True)
-        self._schedule_ui_state_persist()
+        cycle_sensorgram_content_mode(self)
 
     def _append_sensorgram_heatmap_history(self, spectrum: Spectrum | None) -> None:
-        if spectrum is None or len(spectrum.wavelengths_nm) == 0 or len(spectrum.values) == 0:
-            return
-        if self._measurement_active and self._measurement_started_at is not None:
-            time_value = max((spectrum.acquired_at - self._measurement_started_at).total_seconds(), 0.0)
-        elif self._live_trace_started_at is not None:
-            time_value = max((spectrum.acquired_at - self._live_trace_started_at).total_seconds(), 0.0)
-        else:
-            time_value = float(getattr(self, "_trace_display_cursor_s", 0.0) or 0.0)
-        wavelengths = np.asarray(spectrum.wavelengths_nm, dtype=np.float64)
-        values = np.asarray(spectrum.values, dtype=np.float64)
-        axis_key = (
-            len(wavelengths),
-            round(float(wavelengths[0]), 9),
-            round(float(wavelengths[-1]), 9),
-        )
-        if self._sensorgram_heatmap_axis_key != axis_key:
-            self._sensorgram_heatmap_wavelengths = wavelengths.copy()
-            self._sensorgram_heatmap_axis_key = axis_key
-            self._sensorgram_heatmap_history.clear()
-            self._sensorgram_heatmap_history_revision += 1
-            self._sensorgram_heatmap_levels = None
-        self._sensorgram_heatmap_history.append((float(time_value), values.copy()))
-        self._sensorgram_heatmap_history_revision += 1
-        self._sensorgram_heatmap_levels = expand_heatmap_levels(self._sensorgram_heatmap_levels, values)
+        append_sensorgram_heatmap_history(self, spectrum)
 
     def _active_trace_series(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
         cache = getattr(self, "_plot_view_cache", None)
@@ -5629,6 +5079,9 @@ class MainWindow(QMainWindow):
     def _refresh_telemetry(self) -> None:
         refresh_telemetry_for(self)
 
+    def _refresh_spectrometer_stats(self) -> None:
+        refresh_spectrometer_stats_for(self)
+
     def _live_skip_rate_hz(self) -> float:
         return live_skip_rate_hz_for(self)
 
@@ -5659,24 +5112,10 @@ class MainWindow(QMainWindow):
         self._request_deferred_ui_refresh(summary=True)
 
     def _apply_sensorgram_time_axis_mode(self, *, redraw: bool = True) -> None:
-        mode = str(getattr(self, "_sensorgram_time_axis_mode", "elapsed") or "elapsed").strip().lower()
-        if mode not in {"elapsed", "clock"}:
-            mode = "elapsed"
-        self._sensorgram_time_axis_mode = mode
-        axis = getattr(self, "trace_time_axis", None)
-        if axis is not None and hasattr(axis, "set_time_mode"):
-            axis.set_time_mode(mode, start_datetime=getattr(self, "_sensorgram_axis_started_at", None))
-        if hasattr(self, "trace_plot"):
-            self.trace_plot.setLabel("bottom", "Time (local)" if mode == "clock" else "Elapsed time")
-        if redraw:
-            self._request_plot_refresh()
+        apply_sensorgram_time_axis_mode(self, redraw=redraw)
 
     def _toggle_sensorgram_time_axis_mode(self) -> None:
-        current_mode = str(getattr(self, "_sensorgram_time_axis_mode", "elapsed") or "elapsed").strip().lower()
-        self._sensorgram_time_axis_mode = "clock" if current_mode != "clock" else "elapsed"
-        mode_text = "local" if self._sensorgram_time_axis_mode == "clock" else "elapsed"
-        self._apply_sensorgram_time_axis_mode()
-        self._schedule_ui_state_persist()
+        toggle_sensorgram_time_axis_mode(self)
 
     def _schedule_processing_refresh(self) -> None:
         schedule_processing_refresh(self)

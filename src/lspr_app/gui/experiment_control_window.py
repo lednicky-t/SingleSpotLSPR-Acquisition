@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - optional dependency guard
     yaml = None
 
 from PyQt6.QtCore import QByteArray, QObject, QRectF, QRunnable, QSize, QThreadPool, QTimer, Qt, QEvent, QModelIndex, QItemSelectionModel, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap
+from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -56,15 +56,16 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from lspr_app.device.amf_mswitch import AMFSwitchController, amf_tools_available, detect_amf_mswitch_devices
+from lspr_app.device.device_comm_service import (
+    PortRefreshData,
+    connect_mswitch_port,
+    connect_valve_port,
+    probe_pump_port,
+    refresh_device_ports,
+)
 from lspr_app.device.connection_registry import claim_port, release_port
 from lspr_app.device.port_assignments import get_port_assignment
-from lspr_app.device.serial_controllers import (
-    ControllerProbe,
-    SerialController,
-    controller_port_priority,
-)
-from lspr_app.device.valve_controllers import detect_valve_controller
+from lspr_app.device.serial_controllers import ControllerProbe, SerialController, controller_port_priority
 from lspr_app.device.reglo_icc import PumpProbe, RegloICCClient, is_probable_reglo_port
 from lspr_app import __version__
 from lspr_app.gui.experiment_control_runtime import ExperimentRuntimeSnapshot, experiment_runtime_snapshot
@@ -251,7 +252,7 @@ class PumpConnectTask(QRunnable):
 
     def run(self) -> None:
         try:
-            probe = RegloICCClient.probe_port(self._port)
+            probe = probe_pump_port(self._port)
         except Exception as exc:
             self.signals.failed.emit(self._generation, str(exc))
             return
@@ -270,7 +271,7 @@ class ValveConnectTask(QRunnable):
 
     def run(self) -> None:
         try:
-            client, probe = detect_valve_controller(self._port)
+            client, probe = connect_valve_port(self._port)
         except Exception as exc:
             self.signals.finished.emit((self._port, None, None, str(exc)))
             return
@@ -289,22 +290,11 @@ class MSwitchConnectTask(QRunnable):
 
     def run(self) -> None:
         try:
-            client = AMFSwitchController()
-            client.connect(self._port)
-            probe = client.get_probe()
+            client, probe = connect_mswitch_port(self._port)
         except Exception as exc:
             self.signals.finished.emit((self._port, None, None, str(exc)))
             return
         self.signals.finished.emit((self._port, client, probe, None))
-
-
-@dataclass(slots=True)
-class PortRefreshData:
-    generation: int
-    pump_ports: list[object]
-    valve_ports: list[object]
-    mswitch_devices: list[object]
-    amf_tools_available: bool
 
 
 class PortRefreshSignals(QObject):
@@ -320,20 +310,7 @@ class PortRefreshTask(QRunnable):
 
     def run(self) -> None:
         try:
-            pump_ports = RegloICCClient.list_ports()
-            valve_ports = SerialController.list_ports()
-            amf_available = amf_tools_available()
-            if amf_available:
-                mswitch_devices = detect_amf_mswitch_devices()
-            else:
-                mswitch_devices = []
-            payload = PortRefreshData(
-                generation=self._generation,
-                pump_ports=list(pump_ports),
-                valve_ports=list(valve_ports),
-                mswitch_devices=list(mswitch_devices),
-                amf_tools_available=amf_available,
-            )
+            payload = refresh_device_ports(self._generation)
         except Exception as exc:
             self.signals.failed.emit(self._generation, str(exc))
             return
@@ -963,6 +940,7 @@ class PumpPlanTimelineWidget(QWidget):
     step_activated = pyqtSignal(int)
     step_double_activated = pyqtSignal(int)
     step_reordered = pyqtSignal(int, int)
+    label_mode_toggled = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -989,9 +967,19 @@ class PumpPlanTimelineWidget(QWidget):
         self._theme_mode = "light"
         self._time_unit_mode = "s"
         self._theme_palette: dict[str, str] = {}
+        self._color_palette_entries: list[tuple[str, str]] = []
+        self._label_mode = "comment"
+        self._title_button_gap_px = 10
+        self._title_button = QToolButton(self)
+        self._title_button.setObjectName("flowViewModeButton")
+        self._title_button.setAutoRaise(True)
+        self._title_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self._title_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._title_button.clicked.connect(lambda _checked=False: self.label_mode_toggled.emit())
         self.setMinimumHeight(64)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setMouseTracking(True)
+        self._update_label_mode_button()
 
     def set_theme(self, theme_mode: str) -> None:
         self._theme_mode = theme_mode if theme_mode in {"light", "dark"} else "light"
@@ -1004,6 +992,59 @@ class PumpPlanTimelineWidget(QWidget):
     def set_time_unit_mode(self, mode: str) -> None:
         self._time_unit_mode = mode if mode in {"s", "min", "h"} else "s"
         self.update()
+
+    def set_color_palette_entries(self, entries: list[tuple[str, str]] | list[dict[str, str]]) -> None:
+        normalized: list[tuple[str, str]] = []
+        for entry in list(entries or []):
+            if isinstance(entry, dict):
+                name = str(entry.get("name", "") or "").strip()
+                color = str(entry.get("color", "") or "").strip()
+            elif isinstance(entry, (tuple, list)) and len(entry) >= 2:
+                name = str(entry[0] or "").strip()
+                color = str(entry[1] or "").strip()
+            else:
+                continue
+            if name and color:
+                normalized.append((name, color))
+        self._color_palette_entries = normalized
+        self.update()
+
+    def set_label_mode(self, mode: str) -> None:
+        normalized = str(mode or "").strip().lower()
+        if normalized not in {"comment", "color_name"}:
+            normalized = "comment"
+        if self._label_mode != normalized:
+            self._label_mode = normalized
+        self._update_label_mode_button()
+        self.update()
+
+    def _label_mode_button_text(self) -> str:
+        return {
+            "comment": "[Label: Comment]",
+            "color_name": "[Label: ColorName]",
+        }.get(self._label_mode, "[Label: Comment]")
+
+    def _label_mode_button_tooltip(self) -> str:
+        current = self._label_mode_button_text().strip("[]")
+        return f"Current timeline label mode: {current}. Click to switch label source."
+
+    def _update_label_mode_button(self) -> None:
+        if not hasattr(self, "_title_button"):
+            return
+        self._title_button.setText(self._label_mode_button_text())
+        self._title_button.setToolTip(self._label_mode_button_tooltip())
+        self._position_title_button()
+
+    def _position_title_button(self) -> None:
+        if not hasattr(self, "_title_button"):
+            return
+        title_font = self._scaled_font(self.font(), delta=-1.0, minimum=10.0)
+        metrics = QFontMetricsF(title_font)
+        title_width = int(round(metrics.horizontalAdvance("Timeline")))
+        x = self._left_pad() + title_width + self._title_button_gap_px
+        y = 4
+        size = self._title_button.sizeHint()
+        self._title_button.setGeometry(x, y, max(size.width(), 120), max(size.height(), 20))
 
     def _contrast_text_color(self, color: QColor) -> QColor:
         if not color.isValid():
@@ -1057,6 +1098,7 @@ class PumpPlanTimelineWidget(QWidget):
         self._pan_px = self._pan_for_time(anchor_t, anchor_x, total=total, content_width=new_content_width)
         self._clamp_pan()
         self._ensure_visible_target()
+        self._position_title_button()
         self.update()
 
     def reset_zoom(self) -> None:
@@ -1064,6 +1106,7 @@ class PumpPlanTimelineWidget(QWidget):
         self._zoom_factor = 1.0
         self._pan_px = 0.0
         self._ensure_visible_target()
+        self._position_title_button()
         self.update()
 
     def _status_time_text(self, label: str, value_s: float | None) -> str:
@@ -1074,6 +1117,15 @@ class PumpPlanTimelineWidget(QWidget):
     def _timeline_status_text(self) -> str:
         parts = self._timeline_status_parts()
         return " | ".join(part["text"] for part in parts)
+
+    def _step_label_text(self, step: PumpPlanStep) -> str:
+        if self._label_mode == "color_name":
+            color_text = str(step.color or "").strip()
+            for name, color in self._color_palette_entries:
+                if str(color or "").strip().casefold() == color_text.casefold() and name:
+                    return name
+            return color_text or "-"
+        return str(step.description or "").strip() or "-"
 
     def _timeline_status_parts(self) -> list[dict[str, object]]:
         total_end_s = self._steps[-1].end_s if self._steps else 0.0
@@ -1161,7 +1213,7 @@ class PumpPlanTimelineWidget(QWidget):
             title_y = 18
             left_pad = 6
             painter.drawText(left_pad, title_y, "Timeline")
-            title_width = painter.fontMetrics().horizontalAdvance("Timeline")
+            title_width = painter.fontMetrics().horizontalAdvance("Timeline") + self._title_button.width() + self._title_button_gap_px
 
             status_parts = self._timeline_status_parts()
             x = max(left_pad + title_width + 12, 120)
@@ -1211,8 +1263,9 @@ class PumpPlanTimelineWidget(QWidget):
                     painter.drawRoundedRect(rect.adjusted(1, 1, -2, -2), 4, 4)
                 if step.description and width >= 32:
                     text_rect = rect.adjusted(3, 3, -3, -3)
+                    label_value = self._step_label_text(step)
                     label_text = painter.fontMetrics().elidedText(
-                        step.description,
+                        label_value,
                         Qt.TextElideMode.ElideRight,
                         max(int(text_rect.width()), 10),
                     )
@@ -1322,6 +1375,7 @@ class PumpPlanTimelineWidget(QWidget):
 
     def resizeEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
         super().resizeEvent(event)
+        self._position_title_button()
         self._recalculate_zoom_floor()
         self._zoom_factor = max(1.0, min(float(self._zoom_factor), self._max_zoom))
         self._clamp_pan()
@@ -1396,7 +1450,7 @@ class PumpPlanTimelineWidget(QWidget):
                 (
                     max(
                         fm.horizontalAdvance(f"Step {step.step}"),
-                        fm.horizontalAdvance(step.description or ""),
+                        fm.horizontalAdvance(self._step_label_text(step)),
                     )
                     for step in self._steps
                 ),
@@ -1589,7 +1643,7 @@ class ExperimentControlWindow(QWidget):
         self._plan_paused = False
         self._plan_hold_blink_frame = 0
         self._plan_hold_blink_timer = QTimer(self)
-        self._plan_hold_blink_timer.setInterval(180)
+        self._plan_hold_blink_timer.setInterval(110)
         self._plan_hold_blink_timer.timeout.connect(self._advance_plan_hold_blink_indicator)
         self._paused_plan_step: PumpPlanStep | None = None
         self._plan_elapsed_s = 0.0
@@ -1599,6 +1653,7 @@ class ExperimentControlWindow(QWidget):
         self._plan_started_monotonic: float | None = None
         self._step_started_monotonic: float | None = None
         self._measurement_started_monotonic: float | None = None
+        self._pending_experiment_control_start_after_recording: tuple[bool, int | None] | None = None
         self._plan_active_row: int | None = None
         self._applied_plan_step: PumpPlanStep | None = None
         self._status_message_base = "Pump not connected."
@@ -1672,6 +1727,9 @@ class ExperimentControlWindow(QWidget):
         self._experiment_control_view_mode_panel_sizes = self._load_experiment_control_view_mode_panel_sizes(ui_state)
         self._experiment_control_view_mode = self._normalize_experiment_control_view_mode(
             ui_state.get("experiment_control_view_mode", "full")
+        )
+        self._experiment_control_timeline_label_mode = self._normalize_experiment_control_timeline_label_mode(
+            ui_state.get("timeline_label_mode", "comment")
         )
         legacy_sizes = ui_state.get("flow_editor_splitter_sizes")
         if not self._experiment_control_view_mode_sizes and isinstance(legacy_sizes, list):
@@ -1955,6 +2013,7 @@ class ExperimentControlWindow(QWidget):
             "Toggle table edit mode.",
         )
         self.apply_step_button.setCheckable(True)
+        self.apply_step_button.toggled.connect(lambda checked: self._set_experiment_control_edit_mode_button_icon(bool(checked)))
         self._experiment_control_edit_controller = ExperimentControlEditingController(self, self.plan_table, self.apply_step_button)
         self.import_plan_button = create_flow_step_action_button(
             tint_tabler_icon(flow_tabler_icon("file_import"), QColor("#66d48a")),
@@ -1999,6 +2058,9 @@ class ExperimentControlWindow(QWidget):
         self.timeline_widget.set_theme(self._theme_mode)
         self.timeline_widget.set_theme_palette(self._theme_palette())
         self.timeline_widget.set_time_unit_mode(self._time_unit_mode)
+        self.timeline_widget.set_color_palette_entries(self._color_palette_entries)
+        self.timeline_widget.set_label_mode(self._experiment_control_timeline_label_mode)
+        self.timeline_widget.label_mode_toggled.connect(self._cycle_experiment_control_timeline_label_mode)
         self.timeline_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._startup_ui_pending = True
         self._build_ui()
@@ -2295,7 +2357,7 @@ class ExperimentControlWindow(QWidget):
         editor_container.setLayout(editor_layout)
 
         content_layout = QVBoxLayout()
-        content_layout.setContentsMargins(8, 8, 8, 8)
+        content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(2)
         content_layout.addWidget(editor_container, 1)
 
@@ -2402,12 +2464,12 @@ class ExperimentControlWindow(QWidget):
 
     def _hold_plan_button_icon(self, *, active: bool) -> QIcon:
         if active:
-            alpha_steps = [255, 228, 198, 168, 138, 168, 198, 228]
+            alpha_steps = [255, 255, 220, 160, 90, 40, 90, 160]
             frame_index = int(getattr(self, "_plan_hold_blink_frame", 0)) % len(alpha_steps)
-            color = QColor("#4f88ff")
+            color = QColor("#66a7ff")
             color.setAlpha(alpha_steps[frame_index])
         elif self._plan_running:
-            color = QColor("#4f88ff")
+            color = QColor("#66a7ff")
         else:
             color = QColor("#8a98a8")
         try:
@@ -2417,12 +2479,12 @@ class ExperimentControlWindow(QWidget):
 
     def _runtime_pause_button_icon(self, *, active: bool = False) -> QIcon:
         if active:
-            alpha_steps = [255, 228, 198, 168, 138, 168, 198, 228]
+            alpha_steps = [255, 255, 220, 160, 90, 40, 90, 160]
             frame_index = int(getattr(self, "_plan_hold_blink_frame", 0)) % len(alpha_steps)
-            color = QColor("#e8d85f")
+            color = QColor("#ffbf3f")
             color.setAlpha(alpha_steps[frame_index])
         else:
-            color = QColor("#e8d85f")
+            color = QColor("#ffbf3f")
         return tint_tabler_icon(flow_tabler_icon("player_pause", "pause"), color)
 
     def _switch_solution_label(self, position: int) -> str:
@@ -3287,6 +3349,7 @@ class ExperimentControlWindow(QWidget):
                 self._color_palette_entries = payload_entries
                 self._sync_custom_plan_colors_from_palette()
                 self._refresh_color_palette_widgets()
+                self._update_experiment_control_timeline_label_mode()
         if payload.native_document is not None:
             unsupported_devices = self._native_experiment_plan_unsupported_devices(payload.native_document)
             if unsupported_devices:
@@ -3468,6 +3531,7 @@ class ExperimentControlWindow(QWidget):
         self._color_palette_entries = updated_entries
         self._sync_custom_plan_colors_from_palette()
         self._save_color_palette_entries()
+        self._update_experiment_control_timeline_label_mode()
         self._refresh_experiment_control_view()
         self._update_timeline_selection()
         return
@@ -4135,12 +4199,12 @@ class ExperimentControlWindow(QWidget):
 
     def _play_plan_button_icon(self, *, active: bool) -> QIcon:
         if active:
-            alpha_steps = [255, 228, 198, 168, 138, 168, 198, 228]
+            alpha_steps = [255, 255, 220, 160, 90, 40, 90, 160]
             frame_index = int(getattr(self, "_plan_hold_blink_frame", 0)) % len(alpha_steps)
-            color = QColor("#2fb344")
+            color = QColor("#38d862")
             color.setAlpha(alpha_steps[frame_index])
         else:
-            color = QColor("#2fb344")
+            color = QColor("#38d862")
         try:
             return tint_tabler_icon(flow_tabler_icon("player_play", "play"), color)
         except Exception:
@@ -4187,6 +4251,8 @@ class ExperimentControlWindow(QWidget):
         self._record_with_flow_recording_active = bool(active)
         if active:
             self._record_with_flow_locked_checked = bool(self.record_with_flow_button.isChecked())
+            if self._pending_experiment_control_start_after_recording is not None:
+                QTimer.singleShot(0, self._run_pending_experiment_control_start_after_recording)
         if not active:
             if self._measurement_started_monotonic is not None:
                 self._plan_runtime_s = self._plan_runtime_for_display()
@@ -4194,6 +4260,7 @@ class ExperimentControlWindow(QWidget):
                 self._plan_resume_runtime_s = self._step_runtime_for_display()
             self._measurement_started_monotonic = None
             self._step_started_monotonic = None
+            self._pending_experiment_control_start_after_recording = None
             self._refresh_status_line()
             if self._read_experiment_control_steps():
                 self.timeline_widget.set_steps(
@@ -4368,6 +4435,60 @@ class ExperimentControlWindow(QWidget):
         if self._plan_active_row is not None and 0 <= self._plan_active_row < len(steps):
             self._emit_experimental_control_state("plan_pause", self._applied_plan_step, status="started in pause state")
 
+    def _resume_experiment_control_after_manual_step_change(
+        self,
+        row: int,
+        *,
+        status_message: str,
+        log_message: str,
+        emit_event: str,
+    ) -> None:
+        steps = self._read_experiment_control_steps()
+        if row < 0 or row >= len(steps):
+            return
+        if not self._apply_experiment_control_step_to_pump(steps[row], start=True):
+            return
+        self._paused_plan_step = None
+        self._reset_plan_runtime_counters()
+        self._ensure_measurement_started()
+        self._set_plan_runtime_flags(running=True, holding=False, paused=False)
+        self._plan_active_row = row
+        self._plan_elapsed_s = 0.0
+        self._plan_resume_elapsed_s = 0.0
+        self._plan_started_monotonic = monotonic()
+        self._step_started_monotonic = monotonic()
+        if self._plan_timer.isActive():
+            self._plan_timer.stop()
+        self._plan_timer.start()
+        self._update_experiment_control_toggle_button()
+        self._sync_experiment_control_timeline(steps, row, refresh_status=True)
+        self._set_status_message(status_message)
+        _LOGGER.info(log_message)
+        self._emit_experimental_control_state(emit_event, steps[row])
+
+    def _queue_experiment_control_start_after_recording(self, *, paused: bool, row: int | None) -> None:
+        self._pending_experiment_control_start_after_recording = (bool(paused), row)
+
+    def _run_pending_experiment_control_start_after_recording(self) -> None:
+        pending = self._pending_experiment_control_start_after_recording
+        if pending is None:
+            return
+        self._pending_experiment_control_start_after_recording = None
+        paused, row = pending
+        steps = self._read_experiment_control_steps()
+        if not steps:
+            self._set_status_message("Experiment plan is empty.")
+            return
+        if row is None or not (0 <= int(row) < len(steps)):
+            row = self._selected_experiment_control_row()
+            if row is None:
+                row = 0
+                self._select_experiment_control_plan_row(0)
+        if paused:
+            self._begin_paused_experiment_plan_run(int(row), steps)
+        else:
+            self._begin_experiment_plan_run(int(row), steps)
+
     def _enter_hold_state(self) -> None:
         if not self._plan_running:
             return
@@ -4442,8 +4563,17 @@ class ExperimentControlWindow(QWidget):
         if not steps:
             self._set_status_message("Experiment plan is empty.")
             return
+        recording_active = bool(getattr(getattr(self, "recording_controller", None), "_measurement_active", False))
+        if self.record_with_flow_button.isChecked() and not recording_active:
+            row = self._selected_experiment_control_row()
+            if row is None:
+                row = 0
+            self._queue_experiment_control_start_after_recording(paused=True, row=row)
         if not self._request_recording_control("start"):
+            self._pending_experiment_control_start_after_recording = None
             self._set_status_message("Experiment plan start cancelled because recording was not started.")
+            return
+        if self._pending_experiment_control_start_after_recording is not None:
             return
         row = self._selected_experiment_control_row()
         if row is None:
@@ -5134,6 +5264,9 @@ class ExperimentControlWindow(QWidget):
                 self.step_color_combo.setCurrentIndex(editor_index)
         self._plan_model.set_color_options(self._color_palette_entries)
         self._plan_model.set_theme_palette(self._theme_palette())
+        if hasattr(self, "timeline_widget"):
+            self.timeline_widget.set_color_palette_entries(self._color_palette_entries)
+            self.timeline_widget.update()
         self._update_timeline_selection()
 
     def _save_color_palette_entries(self) -> None:
@@ -5746,9 +5879,7 @@ class ExperimentControlWindow(QWidget):
         self._set_mswitch_connection_visual(False, f"Connecting M-Switch on {port}...")
         _LOGGER.info("Connecting M-Switch on %s", port)
         try:
-            client = AMFSwitchController()
-            client.connect(port)
-            probe = client.get_probe()
+            client, probe = connect_mswitch_port(port)
         except Exception as exc:
             if self._mswitch_client is not None:
                 self._mswitch_client.close()
@@ -5906,7 +6037,7 @@ class ExperimentControlWindow(QWidget):
             self._show_info("Select a serial port first.")
             return
         try:
-            probe = RegloICCClient.probe_port(port)
+            probe = probe_pump_port(port)
         except Exception as exc:
             self._probe = None
             self._clear_probe_labels()
@@ -6457,15 +6588,17 @@ class ExperimentControlWindow(QWidget):
         controller = getattr(self, "_experiment_control_edit_controller", None)
         if controller is not None:
             self._experiment_control_edit_mode = bool(controller.edit_mode)
-        active = QColor("#e8d85f")
-        inactive = QColor("#8a98a8")
-        self.apply_step_button.setIcon(tint_tabler_icon(flow_tabler_icon("edit"), active if self._experiment_control_edit_mode else inactive))
         self.apply_step_button.setChecked(self._experiment_control_edit_mode)
+        self._set_experiment_control_edit_mode_button_icon(self._experiment_control_edit_mode)
         self.apply_step_button.setToolTip(
             "Table edit mode is active. Copy, paste, and multi-selection are enabled."
             if self._experiment_control_edit_mode
             else "Enable table edit mode for multi-cell selection, copy/paste, and row moves."
         )
+
+    def _set_experiment_control_edit_mode_button_icon(self, active: bool) -> None:
+        color = QColor("#ffd84d" if active else "#8a98a8")
+        self.apply_step_button.setIcon(tint_tabler_icon(flow_tabler_icon("edit"), color))
 
 
     def _widget_or_ancestor_has_focus(self, widget: QWidget, types: tuple[type, ...]) -> bool:
@@ -6619,10 +6752,18 @@ class ExperimentControlWindow(QWidget):
         self._experiment_control_view_mode_panel_sizes[normalized] = splitter_sizes
 
     def _apply_experiment_control_parent_splitter_sizes(self, mode: str | None = None) -> None:
+        from lspr_app.gui.main_window_state import ensure_visible_top_content_splitter, normalize_top_content_mode
+
         splitter = self._experiment_control_parent_splitter()
         if splitter is None:
             return
         normalized = self._normalize_experiment_control_view_mode(mode or self._experiment_control_view_mode)
+        window = self.window()
+        if normalize_top_content_mode(getattr(window, "_top_view_mode", "spectra")) != "experimental_control":
+            return
+        stack = getattr(window, "_top_content_stack", None)
+        if stack is None or stack.currentWidget() is not self:
+            return
         cached_sizes = self._experiment_control_view_mode_panel_sizes.get(normalized)
         if cached_sizes is None:
             cached_sizes = self._experiment_control_default_parent_splitter_sizes(normalized)
@@ -6631,6 +6772,7 @@ class ExperimentControlWindow(QWidget):
         top = max(int(cached_sizes[0]), 120)
         bottom = max(int(cached_sizes[1]), 180)
         splitter.setSizes([top, bottom])
+        ensure_visible_top_content_splitter(window, mode=normalized)
 
     def _persist_experiment_control_view_mode_layout(self) -> None:
         self._apply_experiment_control_parent_splitter_sizes()
@@ -6660,7 +6802,33 @@ class ExperimentControlWindow(QWidget):
         self._experiment_control_view_mode_button.setText(f"[{label}]")
         self._experiment_control_view_mode_button.setToolTip(self._experiment_control_view_mode_tooltip())
 
+    def _normalize_experiment_control_timeline_label_mode(self, mode: object) -> str:
+        normalized = str(mode or "").strip().lower()
+        return normalized if normalized in {"comment", "color_name"} else "comment"
+
+    def _experiment_control_timeline_label_mode_label(self, mode: str | None = None) -> str:
+        normalized = self._normalize_experiment_control_timeline_label_mode(mode or self._experiment_control_timeline_label_mode)
+        return {
+            "comment": "Comment",
+            "color_name": "ColorName",
+        }[normalized]
+
+    def _update_experiment_control_timeline_label_mode(self) -> None:
+        if not hasattr(self, "timeline_widget"):
+            return
+        self.timeline_widget.set_label_mode(self._experiment_control_timeline_label_mode)
+        self.timeline_widget.set_color_palette_entries(self._color_palette_entries)
+        self.timeline_widget.update()
+
+    def _cycle_experiment_control_timeline_label_mode(self) -> None:
+        current = self._normalize_experiment_control_timeline_label_mode(self._experiment_control_timeline_label_mode)
+        self._experiment_control_timeline_label_mode = "color_name" if current == "comment" else "comment"
+        self._update_experiment_control_timeline_label_mode()
+        self.save_ui_state()
+
     def _apply_experiment_control_view_mode(self, *, save: bool = False) -> None:
+        from lspr_app.gui.main_window_state import ensure_visible_top_content_splitter
+
         mode = self._normalize_experiment_control_view_mode(self._experiment_control_view_mode)
         self._experiment_control_view_mode = mode
         show_matrix = mode == "full"
@@ -6700,6 +6868,7 @@ class ExperimentControlWindow(QWidget):
         self.updateGeometry()
         if self.parentWidget() is not None:
             self.parentWidget().updateGeometry()
+        ensure_visible_top_content_splitter(self.window(), mode=getattr(self.window(), "_top_view_mode", "spectra"))
         if save:
             QTimer.singleShot(0, self._persist_experiment_control_view_mode_layout)
         else:
@@ -6949,6 +7118,18 @@ class ExperimentControlWindow(QWidget):
         _ = previous
         if not current.isValid():
             return
+        if self._plan_holding or self._plan_paused:
+            row = self._selected_experiment_control_row()
+            if row is None:
+                row = self._plan_active_row if self._plan_active_row is not None else self._plan_row_from_table_row(current.row())
+            if row is not None and row >= 0:
+                self._resume_experiment_control_after_manual_step_change(
+                    int(row),
+                    status_message=f"Running experiment plan from step {int(row) + 1}.",
+                    log_message=f"Experiment plan resumed on step {int(row) + 1} after table selection.",
+                    emit_event="plan_resume",
+                )
+                return
         self._update_timeline_selection()
         self._load_selected_step_into_editor()
         self._experiment_control_edit_controller.sync_overlay()
@@ -7321,22 +7502,26 @@ class ExperimentControlWindow(QWidget):
         if row < 0 or row >= len(steps):
             return
         if self._plan_running or self._plan_holding or self._plan_paused:
-            self._plan_active_row = row
-            self._plan_elapsed_s = 0.0
-            self._plan_resume_elapsed_s = 0.0
             if self._plan_running:
+                self._plan_active_row = row
+                self._plan_elapsed_s = 0.0
+                self._plan_resume_elapsed_s = 0.0
                 self._plan_started_monotonic = monotonic()
                 self._step_started_monotonic = monotonic()
-            else:
-                self._plan_started_monotonic = None
-                self._step_started_monotonic = None
-            self._set_experiment_control_runtime_row(
+                self._set_experiment_control_runtime_row(
+                    row,
+                    event="step_jump",
+                    apply_step=True,
+                )
+                self._plan_runtime_s = self._step_runtime_for_display()
+                self._plan_resume_runtime_s = self._plan_runtime_s
+                return
+            self._resume_experiment_control_after_manual_step_change(
                 row,
-                event="step_jump",
-                apply_step=self._plan_running,
+                status_message=f"Running experiment plan from step {row + 1}.",
+                log_message=f"Experiment plan resumed on step {row + 1} after manual step change.",
+                emit_event="plan_resume",
             )
-            self._plan_runtime_s = self._step_runtime_for_display() if self._plan_running else self._plan_runtime_s
-            self._plan_resume_runtime_s = self._plan_runtime_s
             return
         self._select_experiment_control_plan_row(row)
         self._load_selected_step_into_editor()
@@ -7354,11 +7539,20 @@ class ExperimentControlWindow(QWidget):
                 apply_step=True,
             )
             return
-        if self._plan_holding or self._plan_paused:
-            self._set_experiment_control_runtime_row(
+        if self._plan_holding:
+            self._resume_experiment_control_after_manual_step_change(
                 row,
-                event="step_select",
-                apply_step=False,
+                status_message=f"Running experiment plan from step {row + 1}.",
+                log_message=f"Experiment plan resumed on step {row + 1} after manual step apply.",
+                emit_event="plan_resume",
+            )
+            return
+        if self._plan_paused:
+            self._resume_experiment_control_after_manual_step_change(
+                row,
+                status_message=f"Running experiment plan from step {row + 1}.",
+                log_message=f"Experiment plan resumed on step {row + 1} after manual step apply.",
+                emit_event="plan_resume",
             )
             return
         self._jump_to_experiment_control_step(row)
@@ -7386,8 +7580,18 @@ class ExperimentControlWindow(QWidget):
                 emit_event="plan_resume",
             )
             return
+        recording_active = bool(getattr(getattr(self, "recording_controller", None), "_measurement_active", False))
+        if self.record_with_flow_button.isChecked() and not recording_active:
+            row = self._selected_experiment_control_row()
+            if row is None:
+                row = 0
+                self._select_experiment_control_plan_row(0)
+            self._queue_experiment_control_start_after_recording(paused=False, row=row)
         if not self._request_recording_control("start"):
+            self._pending_experiment_control_start_after_recording = None
             self._set_status_message("Experiment plan start cancelled because recording was not started.")
+            return
+        if self._pending_experiment_control_start_after_recording is not None:
             return
         row = self._selected_experiment_control_row()
         if row is None:
@@ -7414,15 +7618,22 @@ class ExperimentControlWindow(QWidget):
             row = 0
         target = min(max(row + delta, 0), len(steps) - 1)
         if self._plan_running or self._plan_holding or self._plan_paused:
-            self._set_experiment_control_runtime_row(
-                target,
-                event="step_jump",
-                apply_step=running,
-            )
             if running:
+                self._set_experiment_control_runtime_row(
+                    target,
+                    event="step_jump",
+                    apply_step=True,
+                )
                 self._step_started_monotonic = monotonic()
                 self._plan_runtime_s = self._step_runtime_for_display()
                 self._plan_resume_runtime_s = self._plan_runtime_s
+            else:
+                self._resume_experiment_control_after_manual_step_change(
+                    target,
+                    status_message=f"Running experiment plan from step {target + 1}.",
+                    log_message=f"Experiment plan resumed on step {target + 1} after step navigation.",
+                    emit_event="plan_resume",
+                )
         else:
             self._jump_to_experiment_control_step(target)
         if not (self._plan_running or self._plan_holding or self._plan_paused):
@@ -7455,6 +7666,8 @@ class ExperimentControlWindow(QWidget):
             "event": event,
             "plan_state": plan_state,
             "step_index": int(step.step) if step is not None else "",
+            "color": str(step.color or "") if step is not None else "",
+            "label": str(step.description or "").strip() if step is not None else "",
             "elapsed_in_step_ms": int(round(max(float(self._plan_elapsed_s), 0.0) * 1000.0)),
             "pump_running": bool(self._plan_running),
             "valve_position": str(step.valve or "") if step is not None else "",
@@ -7777,11 +7990,18 @@ class ExperimentControlWindow(QWidget):
         saved_view_mode = state.get("experiment_control_view_mode")
         if isinstance(saved_view_mode, str):
             self._experiment_control_view_mode = self._normalize_experiment_control_view_mode(saved_view_mode)
+        saved_timeline_label_mode = state.get("timeline_label_mode")
+        if isinstance(saved_timeline_label_mode, str):
+            self._experiment_control_timeline_label_mode = self._normalize_experiment_control_timeline_label_mode(
+                saved_timeline_label_mode
+            )
         saved_view_mode_panel_sizes = state.get("experiment_control_view_mode_panel_sizes")
         if isinstance(saved_view_mode_panel_sizes, dict):
             self._experiment_control_view_mode_panel_sizes = self._load_experiment_control_view_mode_panel_sizes(
                 {"experiment_control_view_mode_panel_sizes": saved_view_mode_panel_sizes}
             )
+        if hasattr(self, "timeline_widget"):
+            self._update_experiment_control_timeline_label_mode()
         self._experiment_control_view_mode_apply_pending = True
 
         self._experiment_control_bootstrap_pending_state = dict(state)
@@ -8025,6 +8245,7 @@ class ExperimentControlWindow(QWidget):
                     "manual_uniform": self.manual_uniform_button.isChecked(),
                     "show_plan_details": self._show_plan_details,
                     "experiment_control_view_mode": self._experiment_control_view_mode,
+                    "timeline_label_mode": self._experiment_control_timeline_label_mode,
                     "experiment_control_view_mode_sizes": dict(self._experiment_control_view_mode_sizes),
                     "experiment_control_view_mode_panel_sizes": dict(self._experiment_control_view_mode_panel_sizes),
                     "plan_table_column_widths": self._plan_table_column_widths(),
@@ -8057,14 +8278,21 @@ class ExperimentControlWindow(QWidget):
         self._run_gui_callback_timed("experiment_control_save_ui_state", _callback)
 
     def showEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
-        super().showEvent(event)
+        self.setUpdatesEnabled(False)
+        try:
+            if self._experiment_control_view_mode_apply_pending:
+                self._experiment_control_view_mode_apply_pending = False
+                self._apply_experiment_control_view_mode()
+            super().showEvent(event)
+        finally:
+            self.setUpdatesEnabled(True)
         if self._start_maximized and self.isWindow():
             self.showMaximized()
             self._start_maximized = False
         if self._plan_table_initial_fit_pending:
             self._plan_table_initial_fit_pending = False
             QTimer.singleShot(0, self._fit_plan_table_columns_to_viewport)
-        QTimer.singleShot(0, self._apply_pending_experiment_control_view_mode)
+        QTimer.singleShot(0, self._apply_experiment_control_parent_splitter_sizes)
 
     def closeEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
         _LOGGER.info("Experiment control window closed.")

@@ -201,6 +201,7 @@ class ExperimentControlEditingController(QObject):
             self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
             self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
             self._window._plan_table_layout_locked = True
+            self._release_table_focus_if_runtime_active()
         else:
             self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
             self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -210,6 +211,14 @@ class ExperimentControlEditingController(QObject):
             self._selection_anchor = None
         self._window._update_experiment_control_edit_mode_button()
         self._sync_overlay()
+
+    def _release_table_focus_if_runtime_active(self) -> None:
+        if not self._runtime_active():
+            return
+        self._table.clearFocus()
+        viewport = self._table.viewport()
+        if viewport is not None:
+            viewport.clearFocus()
 
     def toggle_edit_mode(self, enabled: bool) -> None:
         self.set_edit_mode(enabled)

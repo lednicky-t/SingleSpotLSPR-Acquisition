@@ -8,7 +8,6 @@ from typing import ClassVar
 import serial
 from serial.tools import list_ports
 
-
 @dataclass(slots=True)
 class ControllerPort:
     device: str

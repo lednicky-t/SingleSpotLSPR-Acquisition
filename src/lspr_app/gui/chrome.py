@@ -10,15 +10,9 @@ def build_menu_bar(window) -> QMenuBar:
     menu_bar.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
 
     file_menu = menu_bar.addMenu("File")
-    save_processing_action = file_menu.addAction("Save processing settings")
-    save_processing_action.triggered.connect(window._save_processing_settings_dialog)
-
-    load_processing_action = file_menu.addAction("Load processing settings")
-    load_processing_action.triggered.connect(window._load_processing_settings_dialog)
-
-    file_menu.addSeparator()
-    export_action = file_menu.addAction("Export current plot")
-    export_action.triggered.connect(window._export_current_plot)
+    preferences_action = file_menu.addAction("Preferences")
+    preferences_action.setToolTip("Open the application preferences dialog.")
+    preferences_action.triggered.connect(window._show_preferences_dialog)
 
     file_menu.addSeparator()
     exit_action = file_menu.addAction("Exit")
@@ -41,9 +35,9 @@ def build_menu_bar(window) -> QMenuBar:
     experimental_control_action.setCheckable(True)
     experimental_control_action.setActionGroup(top_view_group)
     experimental_control_action.triggered.connect(lambda _checked=False: window._activate_experimental_control_view())
-    view_menu_actions["top_view"]["flow"] = experimental_control_action
+    view_menu_actions["top_view"]["experimental_control"] = experimental_control_action
 
-    left_controls_action = view_menu.addAction("Left controls")
+    left_controls_action = view_menu.addAction("Tool panel")
     left_controls_action.setCheckable(True)
     left_controls_action.setChecked(True)
     left_controls_action.triggered.connect(window._toggle_left_controls)
@@ -55,9 +49,14 @@ def build_menu_bar(window) -> QMenuBar:
     sensorgram_action.triggered.connect(window._toggle_sensorgram)
     view_menu_actions["sensorgram"] = sensorgram_action
 
-    view_menu.addSeparator()
-    refresh_action = view_menu.addAction("Refresh plots")
-    refresh_action.triggered.connect(window._refresh_plot)
+    diagnostics_panel_action = view_menu.addAction("Diagnostic panel")
+    diagnostics_panel_action.setCheckable(True)
+    diagnostics_panel_action.setChecked(bool(getattr(window, "_diagnostics_panel_enabled", False)))
+    diagnostics_panel_action.setToolTip(
+        "Show or hide the log and diagnostics panel on the left side of the window."
+    )
+    diagnostics_panel_action.toggled.connect(window._toggle_diagnostics_panel)
+    window._diagnostics_panel_action = diagnostics_panel_action
 
     view_menu.addSeparator()
     spectra_preset_action = view_menu.addAction("Spectra preset")
@@ -74,6 +73,10 @@ def build_menu_bar(window) -> QMenuBar:
     hw_inventory_action = hw_menu.addAction("Connected devices")
     hw_inventory_action.setToolTip("Show connected COM ports and the device type recognized for each port.")
     hw_inventory_action.triggered.connect(window._show_connected_devices_dialog)
+
+    usb_probe_action = hw_menu.addAction("USB probe diagnostics")
+    usb_probe_action.setToolTip("Show the recent USB/COM probe history, including skipped ports and probe results.")
+    usb_probe_action.triggered.connect(window._show_usb_probe_diagnostics_dialog)
 
     hw_disconnect_all_action = hw_menu.addAction("Disconnect all devices")
     hw_disconnect_all_action.setToolTip("Stop the active devices and release all app-owned hardware connections.")
@@ -109,15 +112,6 @@ def build_menu_bar(window) -> QMenuBar:
         "This is the developer path behind the Debug/Deep diagnostics profiles."
     )
     debug_mode_action.toggled.connect(window._set_processing_debug_mode_enabled)
-
-    diagnostics_panel_action = help_menu.addAction("Diagnostics panel")
-    diagnostics_panel_action.setCheckable(True)
-    diagnostics_panel_action.setChecked(bool(getattr(window, "_diagnostics_panel_enabled", False)))
-    diagnostics_panel_action.setToolTip(
-        "Show or hide the log and diagnostics panel on the left side of the window."
-    )
-    diagnostics_panel_action.toggled.connect(window._toggle_diagnostics_panel)
-    window._diagnostics_panel_action = diagnostics_panel_action
 
     performance_menu = help_menu.addMenu("Performance switches")
 

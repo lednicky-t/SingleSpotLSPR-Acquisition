@@ -7,7 +7,129 @@ from time import perf_counter
 from lspr_app.domain.pump_plan import to_core_experiment_plan
 from lspr_app.gui.main_window_processing import normalize_sensorgram_metric_name, sensorgram_metric_order, sync_legacy_metric_widgets_from_state
 from lspr_app.storage.app_config import save_acquisition_state, save_window_ui_state
-from lspr_core import LAUNCH_PROFILE_CONTROL_EDITOR, LAUNCH_PROFILE_FULL, LAUNCH_PROFILE_SIMULATION
+from lspr_core import LAUNCH_PROFILE_CONTROL_EDITOR, LAUNCH_PROFILE_FULL, LAUNCH_PROFILE_SIMULATION, launch_profile_spec, DEFAULT_LAUNCH_PROFILE
+
+
+def normalize_top_content_mode(mode: str | None) -> str:
+    text = str(mode or "spectra").strip().lower()
+    if text in {"flow", "experiment", "experimental", "experimental_control", "control"}:
+        return "experimental_control"
+    return "spectra"
+
+
+def ensure_visible_top_content_splitter(window, mode: str | None = None) -> None:
+    splitter = getattr(window, "plot_splitter", None)
+    if splitter is None:
+        return
+
+    try:
+        sizes = [max(int(size), 0) for size in splitter.sizes()]
+    except Exception:
+        return
+    if len(sizes) != 2:
+        return
+
+    normalized = normalize_top_content_mode(mode or getattr(window, "_top_view_mode", "spectra"))
+    top_min = 160 if normalized == "experimental_control" else 120
+    bottom_min = 180
+    if sizes[0] >= top_min and sizes[1] >= bottom_min:
+        return
+
+    total = sum(sizes)
+    if total <= 0:
+        try:
+            total = max(int(splitter.height()), int(splitter.sizeHint().height()), top_min + bottom_min)
+        except Exception:
+            total = top_min + bottom_min
+
+    top_hint = 0
+    bottom_hint = 0
+    try:
+        top_widget = splitter.widget(0)
+        if top_widget is not None:
+            top_hint = max(
+                int(top_widget.sizeHint().height()),
+                int(top_widget.minimumSizeHint().height()),
+                int(top_widget.minimumHeight()),
+            )
+        bottom_widget = splitter.widget(1)
+        if bottom_widget is not None:
+            bottom_hint = max(
+                int(bottom_widget.sizeHint().height()),
+                int(bottom_widget.minimumSizeHint().height()),
+                int(bottom_widget.minimumHeight()),
+            )
+    except Exception:
+        pass
+
+    top_target = max(top_min, top_hint, sizes[0])
+    bottom_target = max(bottom_min, bottom_hint, sizes[1])
+    if top_target + bottom_target > total:
+        top_target = min(top_target, max(total - bottom_min, top_min))
+        bottom_target = max(total - top_target, bottom_min)
+    if top_target <= 0 or bottom_target <= 0:
+        top_target = top_min
+        bottom_target = bottom_min
+    splitter.setSizes([int(top_target), int(bottom_target)])
+
+
+def ensure_experimental_control_stack_page(window):
+    stack = getattr(window, "_top_content_stack", None)
+    if stack is None:
+        return None
+    if getattr(window, "_experiment_control_window", None) is None:
+        from lspr_app.gui.main_window_lifecycle import ensure_flow_panel_for
+
+        ensure_flow_panel_for(window)
+    flow_widget = getattr(window, "_experiment_control_window", None)
+    if flow_widget is None:
+        return None
+    placeholder = getattr(window, "_experiment_control_panel_placeholder", None)
+    flow_index = stack.indexOf(flow_widget)
+    placeholder_index = stack.indexOf(placeholder) if placeholder is not None else -1
+    if flow_index < 0:
+        if placeholder_index >= 0:
+            was_current = stack.currentIndex() == placeholder_index
+            stack.removeWidget(placeholder)
+            placeholder.setParent(None)
+            stack.insertWidget(placeholder_index, flow_widget)
+            if was_current:
+                stack.setCurrentWidget(flow_widget)
+        else:
+            stack.addWidget(flow_widget)
+    else:
+        if placeholder_index >= 0:
+            stack.removeWidget(placeholder)
+            placeholder.setParent(None)
+    flow_widget.setVisible(True)
+    return flow_widget
+
+
+def set_top_content_mode(window, mode: str, *, save: bool = True) -> None:
+    normalized = normalize_top_content_mode(mode)
+    stack = getattr(window, "_top_content_stack", None)
+    if stack is None:
+        window._top_view_mode = normalized
+        return
+    if normalized == "spectra":
+        if hasattr(window, "_spectra_block"):
+            stack.setCurrentWidget(window._spectra_block)
+    else:
+        widget = ensure_experimental_control_stack_page(window)
+        if widget is not None:
+            stack.setCurrentWidget(widget)
+            ensure_visible_top_content_splitter(window, mode=normalized)
+            apply_view_mode = getattr(widget, "_apply_experiment_control_view_mode", None)
+            if callable(apply_view_mode):
+                try:
+                    apply_view_mode(save=False)
+                except Exception:
+                    pass
+    ensure_visible_top_content_splitter(window, mode=normalized)
+    window._top_view_mode = normalized
+    window._sync_view_actions()
+    if save:
+        window._schedule_ui_state_persist()
 
 
 def restore_ui_state(window) -> None:
@@ -107,14 +229,18 @@ def restore_ui_state(window) -> None:
         and getattr(window, "session_stats_splitter", None) is not None
     ):
         window.session_stats_splitter.setSizes(session_stats_splitter_sizes)
-    if isinstance(top_view_mode, str) and top_view_mode in {"spectra", "flow"}:
-        if top_view_mode == "flow" and not bool(getattr(window, "_ui_startup_ready", False)):
-            window._top_view_mode = "flow"
-            window._pending_top_view_mode = "flow"
-        elif top_view_mode == "flow":
-            window._activate_flow_view()
+    if isinstance(top_view_mode, str):
+        mode = normalize_top_content_mode(top_view_mode)
+        if mode == "experimental_control" and not bool(getattr(window, "_ui_startup_ready", False)):
+            window._top_view_mode = "experimental_control"
+            window._pending_top_view_mode = "experimental_control"
+        elif mode == "experimental_control":
+            window._activate_experimental_control_view()
         else:
             window._activate_spectra_view()
+        ensure_visible_top_content_splitter(window, mode=mode)
+    else:
+        ensure_visible_top_content_splitter(window, mode=getattr(window, "_top_view_mode", "spectra"))
     if isinstance(left_controls_visible, bool):
         window._left_controls_scroll.setVisible(left_controls_visible)
     if isinstance(sensorgram_visible, bool):
@@ -437,6 +563,202 @@ def restore_collapsible_section_state(window) -> None:
         value = saved.get(key)
         if section is not None and isinstance(value, bool):
             section.set_expanded(value)
+
+
+def set_gui_housekeeping_enabled(window, enabled: bool) -> None:
+    from lspr_app.storage.app_config import save_app_setting
+
+    window._gui_housekeeping_enabled = bool(enabled)
+    save_app_setting("gui_housekeeping_enabled", window._gui_housekeeping_enabled)
+    state_text = "enabled" if window._gui_housekeeping_enabled else "disabled"
+    window.status_label.setText(f"GUI housekeeping {state_text}.")
+    window._log_info(f"GUI housekeeping {state_text}.")
+    window._request_deferred_ui_refresh(stats=True)
+
+
+def set_sensorgram_heatmap_enabled(window, enabled: bool) -> None:
+    from lspr_app.storage.app_config import save_app_setting
+
+    window._sensorgram_heatmap_enabled = bool(enabled)
+    save_app_setting("sensorgram_heatmap_enabled", window._sensorgram_heatmap_enabled)
+    state_text = "enabled" if window._sensorgram_heatmap_enabled else "disabled"
+    window.status_label.setText(f"Sensorgram heatmap {state_text}.")
+    window._log_info(f"Sensorgram heatmap {state_text}.")
+    if hasattr(window, "trace_heatmap_notice_item"):
+        window.trace_heatmap_notice_item.setVisible(False)
+    window._refresh_trace_plot("Metric position (nm)")
+    window._request_deferred_ui_refresh(trace_plot=True)
+
+
+def set_metric_plot_enabled(window, enabled: bool) -> None:
+    from lspr_app.storage.app_config import save_app_setting
+
+    window._metric_plot_enabled = bool(enabled)
+    save_app_setting("metric_plot_enabled", window._metric_plot_enabled)
+    state_text = "enabled" if window._metric_plot_enabled else "disabled"
+    window.status_label.setText(f"Metric plot {state_text}.")
+    window._log_info(f"Metric plot {state_text}.")
+    if hasattr(window, "trace_heatmap_notice_item"):
+        window.trace_heatmap_notice_item.setVisible(False)
+    window._refresh_trace_plot("Metric position (nm)")
+    window._request_deferred_ui_refresh(trace_plot=True)
+
+
+def toggle_flow_panel_visibility(window, checked: bool | None = None) -> None:
+    if checked is None:
+        window._activate_experimental_control_view() if normalize_top_content_mode(getattr(window, "_top_view_mode", "spectra")) != "experimental_control" else window._activate_spectra_view()
+    elif checked:
+        window._activate_experimental_control_view()
+    else:
+        window._activate_spectra_view()
+
+
+def toggle_experimental_control_panel_visibility(window, checked: bool | None = None) -> None:
+    if checked is None:
+        window._activate_experimental_control_view() if normalize_top_content_mode(getattr(window, "_top_view_mode", "spectra")) != "experimental_control" else window._activate_spectra_view()
+    elif checked:
+        window._activate_experimental_control_view()
+    else:
+        window._activate_spectra_view()
+
+
+def sync_main_view_visibility(window) -> None:
+    if window._main_content_widget is None:
+        return
+    window._main_content_widget.setVisible(True)
+    from lspr_app.gui.main_window_titlebar import refresh_hw_device_status_strip
+
+    refresh_hw_device_status_strip(window)
+
+
+def show_flow_only(window) -> None:
+    window._activate_experimental_control_view()
+
+
+def show_experimental_control_only(window) -> None:
+    window._activate_experimental_control_view()
+
+
+def show_plots_only(window) -> None:
+    window._activate_spectra_view()
+    window._schedule_ui_state_persist()
+
+
+def show_split_view(window) -> None:
+    window._left_controls_scroll.setVisible(True)
+    window._sensorgram_block.setVisible(True)
+    window._activate_spectra_view()
+    window._schedule_ui_state_persist()
+
+
+def activate_spectra_view(window) -> None:
+    set_top_content_mode(window, "spectra")
+
+
+def activate_flow_view(window) -> None:
+    set_top_content_mode(window, "experimental_control")
+
+
+def activate_experiment_control_view(window) -> None:
+    set_top_content_mode(window, "experimental_control")
+
+
+def activate_experimental_control_view(window) -> None:
+    set_top_content_mode(window, "experimental_control")
+
+
+def toggle_left_controls(window, checked: bool | None = None) -> None:
+    visible = window._left_controls_scroll.isVisible() if checked is None else bool(checked)
+    window._left_controls_scroll.setVisible(visible)
+    window._sync_view_actions()
+    window._schedule_ui_state_persist()
+
+
+def toggle_sensorgram(window, checked: bool | None = None) -> None:
+    visible = window._sensorgram_block.isVisible() if checked is None else bool(checked)
+    window._sensorgram_block.setVisible(visible)
+    window._sync_view_actions()
+    window._schedule_ui_state_persist()
+
+
+def set_diagnostics_panel_visible(window, visible: bool) -> None:
+    visible = bool(visible)
+    window._diagnostics_panel_enabled = visible
+    if hasattr(window, "_log_section"):
+        window._log_section.setVisible(visible)
+    if hasattr(window, "log_terminal"):
+        window.log_terminal.setVisible(visible)
+    action = getattr(window, "_diagnostics_panel_action", None)
+    if action is not None:
+        action.blockSignals(True)
+        action.setChecked(visible)
+        action.blockSignals(False)
+    window._schedule_ui_state_persist()
+
+
+def toggle_diagnostics_panel(window, checked: bool | None = None) -> None:
+    visible = window._diagnostics_panel_enabled if checked is None else bool(checked)
+    set_diagnostics_panel_visible(window, visible)
+
+
+def sync_view_actions(window) -> None:
+    actions = getattr(window, "_view_menu_actions", None)
+    if not isinstance(actions, dict):
+        return
+    top = actions.get("top_view")
+    if isinstance(top, dict):
+        current = normalize_top_content_mode(getattr(window, "_top_view_mode", "spectra"))
+        for mode, action in top.items():
+            action.blockSignals(True)
+            action.setChecked(current == normalize_top_content_mode(mode))
+            action.blockSignals(False)
+    left_action = actions.get("left_controls")
+    if left_action is not None:
+        left_action.blockSignals(True)
+        left_action.setChecked(not window._left_controls_scroll.isHidden())
+        left_action.blockSignals(False)
+    diagnostics_action = getattr(window, "_diagnostics_panel_action", None)
+    if diagnostics_action is not None:
+        diagnostics_action.blockSignals(True)
+        diagnostics_action.setChecked(bool(getattr(window, "_diagnostics_panel_enabled", False)))
+        diagnostics_action.setVisible(not window._left_controls_scroll.isHidden())
+        diagnostics_action.blockSignals(False)
+    sensor_action = actions.get("sensorgram")
+    if sensor_action is not None:
+        sensor_action.blockSignals(True)
+        sensor_action.setChecked(not window._sensorgram_block.isHidden())
+        sensor_action.blockSignals(False)
+
+
+def sync_diagnostics_panel_action(window) -> None:
+    action = getattr(window, "_diagnostics_panel_action", None)
+    if action is None:
+        return
+    action.blockSignals(True)
+    action.setChecked(bool(getattr(window, "_diagnostics_panel_enabled", False)))
+    action.blockSignals(False)
+
+
+def launch_profile_settings(window):
+    try:
+        return object.__getattribute__(window, "_launch_profile_spec")
+    except Exception:
+        return launch_profile_spec(DEFAULT_LAUNCH_PROFILE)
+
+
+def apply_launch_profile_layout(window) -> None:
+    profile = launch_profile_settings(window)
+    if hasattr(window, "_recording_context_row") and window._recording_context_row is not None:
+        window._recording_context_row.setVisible(bool(profile.show_recording_context))
+    if hasattr(window, "_left_controls_scroll"):
+        window._left_controls_scroll.setVisible(bool(profile.show_left_controls))
+    if hasattr(window, "_sensorgram_block"):
+        window._sensorgram_block.setVisible(bool(profile.show_sensorgram))
+    if normalize_top_content_mode(getattr(profile, "initial_top_view_mode", "spectra")) == "experimental_control":
+        show_flow_only(window)
+    else:
+        show_plots_only(window)
+    sync_view_actions(window)
 
 
 def acquisition_state_payload(window) -> dict[str, object]:

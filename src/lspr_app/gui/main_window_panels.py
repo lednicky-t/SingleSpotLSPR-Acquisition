@@ -51,9 +51,18 @@ def build_spectrometer_page(window) -> QWidget:
     device_layout.addRow("Correct nonlinearity", window.correct_nonlinearity_check)
     device_group.setLayout(device_layout)
 
+    acquisition_stats_row = QWidget()
+    acquisition_stats_layout = QHBoxLayout()
+    acquisition_stats_layout.setContentsMargins(0, 0, 0, 0)
+    acquisition_stats_layout.setSpacing(8)
+    acquisition_stats_layout.addWidget(window.spectrometer_stats_label, 1)
+    acquisition_stats_row.setLayout(acquisition_stats_layout)
+    acquisition_stats_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
     page_layout = QVBoxLayout()
     page_layout.setContentsMargins(0, 0, 0, 0)
     page_layout.addWidget(device_group)
+    page_layout.addWidget(acquisition_stats_row)
     page_layout.addStretch(1)
     page = QWidget()
     page.setLayout(page_layout)

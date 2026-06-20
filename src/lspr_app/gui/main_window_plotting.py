@@ -642,6 +642,25 @@ def update_live_estimate_for(window) -> None:
     window._ui_refresh_state.live_estimate_dirty = False
 
 
+def build_spectrometer_stats_text_for(window) -> str:
+    spacing_text = _timing_plain_text(getattr(window, "_last_spacing_ms", None))
+    rate_text = "-"
+    effective_rate = getattr(window, "_effective_raw_rate_hz", None)
+    if effective_rate is not None:
+        try:
+            rate_text = f"{float(effective_rate):.1f} Hz"
+        except (TypeError, ValueError):
+            rate_text = "-"
+    overhead_text = _timing_plain_text(getattr(window, "_last_overhead_ms", None))
+    return f"spacing {spacing_text} | rate {rate_text} | ovh {overhead_text}"
+
+
+def refresh_spectrometer_stats_for(window) -> None:
+    if not hasattr(window, "spectrometer_stats_label"):
+        return
+    window.spectrometer_stats_label.setText(build_spectrometer_stats_text_for(window))
+
+
 def _timing_share_text(value_ms: float | None, total_ms: float | None) -> str:
     if value_ms is None:
         return "-"
@@ -656,6 +675,7 @@ def _timing_share_text(value_ms: float | None, total_ms: float | None) -> str:
 
 
 def refresh_telemetry_for(window) -> None:
+    refresh_spectrometer_stats_for(window)
     if window._last_elapsed_ms is None:
         if hasattr(window, "telemetry_label"):
             window.telemetry_label.setStyleSheet("")

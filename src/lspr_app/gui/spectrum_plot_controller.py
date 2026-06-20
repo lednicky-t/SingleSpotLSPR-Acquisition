@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPen
 
 from lspr_app.gui.plot_controller import (
@@ -49,6 +50,7 @@ class ResidualViewBox(pg.ViewBox):
         center = (y_min + y_max) * 0.5
         half_span = max((y_max - y_min) * 0.5 * factor, 1e-9)
         self.setYRange(center - half_span, center + half_span, padding=0.0)
+        self._manual_y_zoom = True
         self._main_window._residual_y_range = [center - half_span, center + half_span]
         self._main_window._residual_axis_autoscaled = True
         if hasattr(self._main_window, "_schedule_ui_state_persist"):
@@ -95,6 +97,22 @@ def _ensure_residual_segment_item(window, index: int) -> pg.PlotCurveItem:
         window.residual_view.addItem(item)
         segment_items.append(item)
     return segment_items[index]
+
+
+def _residual_visible_range(window) -> tuple[float, float] | None:
+    if not hasattr(window, "residual_view"):
+        return None
+    try:
+        current_range = window.residual_view.viewRange()[1]
+    except Exception:
+        return None
+    if len(current_range) != 2:
+        return None
+    y_min = float(current_range[0])
+    y_max = float(current_range[1])
+    if not np.isfinite(y_min) or not np.isfinite(y_max) or y_max <= y_min:
+        return None
+    return y_min, y_max
 
 
 def _downsample_residual_series_for_view(
@@ -157,7 +175,11 @@ def render_residual_display(window, x_values: np.ndarray, residual_values: np.nd
             except Exception:
                 pass
     window.residual_curve.setData(x=x, y=y)
-    window.residual_curve.setPen(pg.mkPen((0, 0, 0, 0), width=0))
+    window.residual_curve.setPen(pg.mkPen("#8a8a8a", width=1.0))
+    window.residual_curve.setSymbol("o")
+    window.residual_curve.setSymbolSize(4)
+    window.residual_curve.setSymbolBrush(pg.mkBrush("#c7c7c7"))
+    window.residual_curve.setSymbolPen(pg.mkPen("#666666", width=0.8))
 
 
 def update_residual_view_geometry(window) -> None:
@@ -171,8 +193,12 @@ def update_residual_view_geometry(window) -> None:
 def autoscale_residual_axis(window) -> None:
     if not hasattr(window, "residual_view") or not window.show_residual_button.isChecked():
         return
-    if bool(getattr(window, "_residual_axis_autoscaled", False)):
+    if bool(getattr(window.residual_view, "_manual_y_zoom", False)):
         return
+    if bool(getattr(window, "_residual_axis_autoscaled", False)):
+        current_range = _residual_visible_range(window)
+    else:
+        current_range = None
     residual = window.residual_curve.yData
     if residual is None or len(residual) == 0:
         window.residual_view.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
@@ -184,13 +210,25 @@ def autoscale_residual_axis(window) -> None:
         return
     y = y[finite]
     amplitude = float(np.percentile(np.abs(y), 95))
-    amplitude = max(amplitude, float(np.max(np.abs(y))), 1e-9)
-    pad = max(amplitude * 0.15, 1e-6)
+    amplitude = max(amplitude, float(np.max(np.abs(y))), 1e-6)
+    pad = max(amplitude * 0.2, 0.05)
     if not np.isfinite(pad):
-        pad = 1e-6
-    half_span = min(amplitude + pad, 100.0)
-    window.residual_view.setYRange(-half_span, half_span, padding=0.0)
-    window._residual_axis_autoscaled = True
+        pad = 0.05
+    target_half_span = min(amplitude + pad, 100.0)
+    target_min = -target_half_span
+    target_max = target_half_span
+    should_update = current_range is None
+    if current_range is not None:
+        current_min, current_max = current_range
+        current_half_span = max((current_max - current_min) * 0.5, 1e-9)
+        current_center = (current_min + current_max) * 0.5
+        if abs(current_center) > max(target_half_span * 0.15, 0.1):
+            should_update = True
+        elif current_half_span < target_half_span * 0.75 or current_half_span > target_half_span * 1.75:
+            should_update = True
+    if should_update:
+        window.residual_view.setYRange(target_min, target_max, padding=0.0)
+        window._residual_axis_autoscaled = True
 
 
 def update_residual_axis_visibility(window, visible: bool | None = None) -> None:

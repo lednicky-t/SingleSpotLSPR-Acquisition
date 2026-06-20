@@ -5,6 +5,8 @@ from math import floor, log10
 from time import monotonic, sleep
 
 import serial
+
+from lspr_app.device.connection_registry import claim_port, release_port, try_claim_port
 from serial.tools import list_ports
 
 
@@ -44,6 +46,7 @@ class RegloICCClient:
     def __init__(self) -> None:
         self._serial: serial.Serial | None = None
         self.port: str | None = None
+        self._claim_owner = "reglo-icc"
 
     @staticmethod
     def list_ports() -> list[PumpPort]:
@@ -63,16 +66,23 @@ class RegloICCClient:
 
     def connect(self, port: str, timeout_s: float = 0.35) -> None:
         self.close()
-        self._serial = serial.Serial(
-            port=port,
-            baudrate=9600,
-            bytesize=8,
-            parity="N",
-            stopbits=1,
-            timeout=timeout_s,
-            write_timeout=timeout_s,
-        )
+        if not try_claim_port(port, self._claim_owner):
+            raise RegloICCError(f"Port {port} is busy.")
+        try:
+            self._serial = serial.Serial(
+                port=port,
+                baudrate=9600,
+                bytesize=8,
+                parity="N",
+                stopbits=1,
+                timeout=timeout_s,
+                write_timeout=timeout_s,
+            )
+        except Exception:
+            release_port(port, self._claim_owner)
+            raise
         self.port = port
+        claim_port(port, self._claim_owner)
 
     def close(self) -> None:
         if self._serial is not None:
@@ -80,6 +90,8 @@ class RegloICCClient:
                 self._serial.close()
             finally:
                 self._serial = None
+                if self.port is not None:
+                    release_port(self.port, self._claim_owner)
                 self.port = None
 
     def is_connected(self) -> bool:

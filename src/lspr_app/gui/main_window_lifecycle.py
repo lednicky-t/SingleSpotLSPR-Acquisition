@@ -11,9 +11,12 @@ from lspr_app.gui.main_window_state import (
     acquisition_state_payload,
     apply_acquisition_state_to_widgets,
     collapsible_section_state,
+    launch_profile_settings,
     persist_acquisition_state,
+    ensure_visible_top_content_splitter,
     restore_collapsible_section_state,
     restore_ui_state,
+    normalize_top_content_mode,
     save_ui_state,
     schedule_acquisition_state_persist,
 )
@@ -131,42 +134,52 @@ def set_log_buffering_enabled_for(window, enabled: bool) -> None:
 
 
 def ensure_flow_panel_for(window) -> None:
-    if window._experiment_control_window is None:
-        from lspr_app.gui.experiment_control_window import ExperimentControlWindow
+    try:
+        if window._experiment_control_window is None:
+            from lspr_app.gui.experiment_control_window import ExperimentControlWindow
 
-        profile = window._launch_profile_settings()
-        window._experiment_control_window = ExperimentControlWindow(
-            window._experiment_control_window_ui_state,
-            known_probe=window._discovered_pump_probe,
-            theme_mode=window._theme_mode,
-            initial_mswitch_devices=[probe for probe in window._initial_mswitch_devices if probe is not None],
-            auto_connect_devices=profile.scan_devices,
-            show_runtime_controls=profile.show_runtime_controls,
-            parent=getattr(window, "_top_content_stack", window),
-        )
-        window._experiment_control_window.availability_changed.connect(window._handle_flow_availability_changed)
-        window._experiment_control_window.valve_availability_changed.connect(window._handle_valve_availability_changed)
-        window._experiment_control_window.mswitch_availability_changed.connect(window._handle_mswitch_availability_changed)
-        window._experiment_control_window.recording_control_requested.connect(window._handle_flow_recording_control)
-        window._experiment_control_window.experimental_control_state_recorded.connect(window._handle_experimental_control_state_recorded)
-        window._experiment_control_window.recording_controller = window
-        window._experiment_control_window.theme_changed.connect(window.set_theme)
-        if hasattr(window._experiment_control_window, "_set_record_with_flow_recording_active"):
-            window._experiment_control_window._set_record_with_flow_recording_active(bool(window._measurement_active))
-        window._experiment_control_window._ui_startup_ready = bool(getattr(window, "_ui_startup_ready", False))
-        header_label = getattr(window._experiment_control_window, "_experiment_control_header_label", None)
-        if header_label is not None:
-            header_label.installEventFilter(window)
-        sync_experiment_control_startup_ports_for(window)
-        if hasattr(window, "_top_content_stack"):
-            placeholder = getattr(window, "_experiment_control_panel_placeholder", getattr(window, "_flow_panel_placeholder", None))
-            if placeholder is not None:
-                index = window._top_content_stack.indexOf(placeholder)
-                if index >= 0:
-                    window._top_content_stack.removeWidget(placeholder)
-                    placeholder.setParent(None)
-                window._top_content_stack.addWidget(window._experiment_control_window)
-        window._log_info("Experiment control panel created.")
+            profile = launch_profile_settings(window)
+            window._experiment_control_window = ExperimentControlWindow(
+                window._experiment_control_window_ui_state,
+                known_probe=window._discovered_pump_probe,
+                theme_mode=window._theme_mode,
+                initial_mswitch_devices=[probe for probe in window._initial_mswitch_devices if probe is not None],
+                auto_connect_devices=profile.scan_devices,
+                show_runtime_controls=profile.show_runtime_controls,
+                parent=getattr(window, "_top_content_stack", window),
+            )
+            window._experiment_control_window.availability_changed.connect(window._handle_flow_availability_changed)
+            window._experiment_control_window.valve_availability_changed.connect(window._handle_valve_availability_changed)
+            window._experiment_control_window.mswitch_availability_changed.connect(window._handle_mswitch_availability_changed)
+            window._experiment_control_window.recording_control_requested.connect(window._handle_flow_recording_control)
+            window._experiment_control_window.experimental_control_state_recorded.connect(window._handle_experimental_control_state_recorded)
+            window._experiment_control_window.recording_controller = window
+            window._experiment_control_window.theme_changed.connect(window.set_theme)
+            if hasattr(window._experiment_control_window, "_set_record_with_flow_recording_active"):
+                window._experiment_control_window._set_record_with_flow_recording_active(bool(window._measurement_active))
+            window._experiment_control_window._ui_startup_ready = bool(getattr(window, "_ui_startup_ready", False))
+            header_label = getattr(window._experiment_control_window, "_experiment_control_header_label", None)
+            if header_label is not None:
+                header_label.installEventFilter(window)
+            sync_experiment_control_startup_ports_for(window)
+            if hasattr(window, "_top_content_stack"):
+                placeholder = getattr(window, "_experiment_control_panel_placeholder", getattr(window, "_flow_panel_placeholder", None))
+                if placeholder is not None:
+                    index = window._top_content_stack.indexOf(placeholder)
+                    if index >= 0:
+                        window._top_content_stack.removeWidget(placeholder)
+                        placeholder.setParent(None)
+                        window._top_content_stack.insertWidget(index, window._experiment_control_window)
+                        current_mode = normalize_top_content_mode(getattr(window, "_top_view_mode", "spectra"))
+                        pending_mode = normalize_top_content_mode(getattr(window, "_pending_top_view_mode", current_mode))
+                        if pending_mode == "experimental_control" or current_mode == "experimental_control":
+                            window._top_content_stack.setCurrentWidget(window._experiment_control_window)
+                    else:
+                        window._top_content_stack.addWidget(window._experiment_control_window)
+                ensure_visible_top_content_splitter(window, mode=getattr(window, "_top_view_mode", "spectra"))
+            window._log_info("Experiment control panel created.")
+    except Exception as exc:
+        window._log_error(f"Experiment control panel creation failed: {exc}")
 
 
 def sync_experiment_control_startup_ports_for(window) -> None:
@@ -176,7 +189,7 @@ def sync_experiment_control_startup_ports_for(window) -> None:
         hardware_init_ready = False
     if not hardware_init_ready:
         return
-    profile = window._launch_profile_settings()
+    profile = launch_profile_settings(window)
     if not bool(getattr(profile, "scan_devices", False)):
         return
     experiment_control_window = getattr(window, "_experiment_control_window", None)

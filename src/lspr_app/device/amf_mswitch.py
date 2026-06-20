@@ -4,6 +4,7 @@ import os
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from io import StringIO
 
+from lspr_app.device.connection_registry import claim_port, release_port, try_claim_port
 from lspr_app.device.serial_controllers import ControllerError, ControllerProbe
 
 try:  # Optional proprietary dependency.
@@ -78,19 +79,25 @@ class AMFSwitchController:
         if amfTools is None:
             raise ControllerError("AMFTools library is not installed.")
         self.close()
+        if not try_claim_port(port, self.controller_type):
+            raise ControllerError(f"Port {port} is busy.")
         try:
             self._amf = amfTools.AMF(port)
             self.port = str(self._amf.getSerialPort())
         except Exception as exc:
             self._amf = None
             self.port = None
+            release_port(port, self.controller_type)
             raise ControllerError(str(exc)) from exc
+        claim_port(self.port or port, self.controller_type)
 
     def close(self) -> None:
         if self._amf is not None:
             try:
                 self._amf.disconnect()
             finally:
+                if self.port is not None:
+                    release_port(self.port, self.controller_type)
                 self._amf = None
                 self.port = None
 

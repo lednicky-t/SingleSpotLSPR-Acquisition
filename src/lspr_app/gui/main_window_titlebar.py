@@ -188,9 +188,8 @@ def refresh_hw_device_status_strip(window) -> None:
             return False
         return True
 
-    spectrometer_detail = "(Simulations)" if not bool(window._hardware_available) else ""
     devices = {
-        "spectrometer": ("connected" if bool(window._hardware_available) else "disconnected", spectrometer_detail, ""),
+        "spectrometer": ("connected" if bool(window._hardware_available) else "disconnected", "", ""),
         "pump": (
             device_status_state(
                 _is_connected(pump_client, "Experiment Control / Pump"),
@@ -225,16 +224,12 @@ def refresh_hw_device_status_strip(window) -> None:
     for key, icon_label, text_label in items:
         state, detail, port_name = devices.get(key, ("disconnected", "", ""))
         if init_active and key in overrides:
-            override_online, override_detail = overrides.get(key, (state == "connected", detail))
+            override_online, _override_detail = overrides.get(key, (state == "connected", detail))
             state = "connected" if override_online else state
-            if key == "spectrometer" and override_detail:
-                detail = override_detail
         elif key in overrides and not detail:
-            override_online, override_detail = overrides.get(key, (state == "connected", detail))
+            override_online, _override_detail = overrides.get(key, (state == "connected", detail))
             if override_online:
                 state = "connected"
-            if key == "spectrometer" and override_detail:
-                detail = override_detail
         icon_label.setPixmap(device_status_icon(state).pixmap(16, 16))
         base_text = text_label.text().split(":", 1)[0].strip()
         text_label.setText(base_text if not detail else f"{base_text}: {detail}")
