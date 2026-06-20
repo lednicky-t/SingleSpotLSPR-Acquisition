@@ -24,6 +24,31 @@ def build_menu_bar(window) -> QMenuBar:
     top_view_group = QActionGroup(menu_bar)
     top_view_group.setExclusive(True)
 
+    presets_menu = view_menu.addMenu("Presets")
+    layout_preset_group = QActionGroup(menu_bar)
+    layout_preset_group.setExclusive(True)
+    preset_actions = {}
+    for preset_key, label, callback in (
+        ("spectra", "Spectra", window._apply_layout_preset),
+        ("control", "Control", window._apply_layout_preset),
+        ("measurement", "Measurement", window._apply_layout_preset),
+    ):
+        action = presets_menu.addAction(label)
+        action.setCheckable(True)
+        action.setActionGroup(layout_preset_group)
+        action.triggered.connect(lambda _checked=False, key=preset_key, cb=callback: cb(key))
+        preset_actions[preset_key] = action
+    view_menu_actions["layout_presets"] = preset_actions
+    presets_menu.addSeparator()
+    save_preset_action = presets_menu.addAction("Save preset")
+    save_preset_action.setToolTip("Save the current layout and panel visibility to the selected preset.")
+    save_preset_action.triggered.connect(window._save_current_layout_to_preset)
+    reset_preset_action = presets_menu.addAction("Reset default presets")
+    reset_preset_action.setToolTip("Restore the built-in preset layouts.")
+    reset_preset_action.triggered.connect(window._reset_layout_presets_to_defaults)
+
+    view_menu.addSeparator()
+
     spectra_action = view_menu.addAction("Spectra")
     spectra_action.setCheckable(True)
     spectra_action.setActionGroup(top_view_group)
@@ -59,10 +84,6 @@ def build_menu_bar(window) -> QMenuBar:
     window._diagnostics_panel_action = diagnostics_panel_action
 
     view_menu.addSeparator()
-    spectra_preset_action = view_menu.addAction("Spectra preset")
-    spectra_preset_action.triggered.connect(window._activate_spectra_view)
-    experimental_control_preset_action = view_menu.addAction("Experimental control preset")
-    experimental_control_preset_action.triggered.connect(window._activate_experimental_control_view)
     window._view_menu_actions = view_menu_actions
 
     hw_menu = menu_bar.addMenu("HW")

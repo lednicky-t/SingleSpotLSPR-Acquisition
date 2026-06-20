@@ -315,6 +315,66 @@ def build_main_layout_for(window) -> None:
     window._sensorgram_block = trace_block
     trace_block.installEventFilter(window)
 
+    measurement_top_host = QWidget()
+    measurement_top_layout = QVBoxLayout()
+    measurement_top_layout.setContentsMargins(0, 0, 0, 0)
+    measurement_top_layout.setSpacing(0)
+    measurement_top_host.setLayout(measurement_top_layout)
+    measurement_top_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+    measurement_bottom_left_host = QWidget()
+    measurement_bottom_left_layout = QVBoxLayout()
+    measurement_bottom_left_layout.setContentsMargins(0, 0, 0, 0)
+    measurement_bottom_left_layout.setSpacing(0)
+    measurement_bottom_left_host.setLayout(measurement_bottom_left_layout)
+    measurement_bottom_left_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    measurement_bottom_right_host = QWidget()
+    measurement_bottom_right_layout = QVBoxLayout()
+    measurement_bottom_right_layout.setContentsMargins(0, 0, 0, 0)
+    measurement_bottom_right_layout.setSpacing(0)
+    measurement_bottom_right_host.setLayout(measurement_bottom_right_layout)
+    measurement_bottom_right_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    measurement_bottom_splitter = CompactSplitter(Qt.Orientation.Horizontal)
+    measurement_bottom_splitter.setObjectName("measurementBottomSplitter")
+    measurement_bottom_splitter.setChildrenCollapsible(False)
+    measurement_bottom_splitter.setOpaqueResize(True)
+    measurement_bottom_splitter.setHandleWidth(12)
+    measurement_bottom_splitter.addWidget(measurement_bottom_left_host)
+    measurement_bottom_splitter.addWidget(measurement_bottom_right_host)
+    measurement_bottom_splitter.setStretchFactor(0, 1)
+    measurement_bottom_splitter.setStretchFactor(1, 1)
+    measurement_bottom_splitter.setSizes([520, 520])
+    measurement_bottom_splitter.splitterMoved.connect(lambda *_: window._schedule_ui_state_persist())
+
+    measurement_vertical_splitter = CompactSplitter(Qt.Orientation.Vertical)
+    measurement_vertical_splitter.setObjectName("measurementVerticalSplitter")
+    measurement_vertical_splitter.setChildrenCollapsible(False)
+    measurement_vertical_splitter.setOpaqueResize(True)
+    measurement_vertical_splitter.setHandleWidth(12)
+    measurement_vertical_splitter.addWidget(measurement_top_host)
+    measurement_vertical_splitter.addWidget(measurement_bottom_splitter)
+    measurement_vertical_splitter.setStretchFactor(0, 0)
+    measurement_vertical_splitter.setStretchFactor(1, 1)
+    measurement_vertical_splitter.setSizes([360, 540])
+    measurement_vertical_splitter.splitterMoved.connect(lambda *_: window._schedule_ui_state_persist())
+
+    measurement_page = QWidget()
+    measurement_page.setObjectName("measurementLayoutPage")
+    measurement_page_layout = QVBoxLayout()
+    measurement_page_layout.setContentsMargins(0, 0, 0, 0)
+    measurement_page_layout.setSpacing(0)
+    measurement_page_layout.addWidget(measurement_vertical_splitter, 1)
+    measurement_page.setLayout(measurement_page_layout)
+
+    window._measurement_top_host = measurement_top_host
+    window._measurement_bottom_left_host = measurement_bottom_left_host
+    window._measurement_bottom_right_host = measurement_bottom_right_host
+    window._measurement_bottom_splitter = measurement_bottom_splitter
+    window._measurement_vertical_splitter = measurement_vertical_splitter
+    window._measurement_layout_page = measurement_page
+
     window._top_content_stack = QStackedWidget()
     window._top_content_stack.addWidget(spectrum_block)
     window._experiment_control_panel_placeholder = QWidget()
@@ -351,8 +411,16 @@ def build_main_layout_for(window) -> None:
     plot_splitter.splitterMoved.connect(lambda *_: window._schedule_ui_state_persist())
     window.plot_splitter = plot_splitter
 
+    right_content_stack = QStackedWidget()
+    right_content_stack.addWidget(plot_splitter)
+    right_content_stack.addWidget(measurement_page)
+    right_content_stack.setCurrentWidget(plot_splitter)
+    window._right_content_stack = right_content_stack
+    window._standard_right_page = plot_splitter
+    window._measurement_right_page = measurement_page
+
     right_panel = QVBoxLayout()
-    right_panel.addWidget(window.plot_splitter, 1)
+    right_panel.addWidget(right_content_stack, 1)
     right_panel.addWidget(footer_widget, 0)
 
     right_widget = QWidget()

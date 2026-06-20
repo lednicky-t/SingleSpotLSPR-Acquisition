@@ -222,10 +222,13 @@ from lspr_app.gui.main_window_state import (
     activate_flow_view,
     activate_spectra_view,
     apply_acquisition_state_to_widgets,
+    apply_layout_preset,
     collapsible_section_state,
     persist_acquisition_state,
+    reset_layout_presets_to_defaults,
     restore_collapsible_section_state,
     restore_ui_state,
+    save_current_layout_to_preset,
     save_ui_state,
     schedule_acquisition_state_persist,
     set_gui_housekeeping_enabled,
@@ -1060,6 +1063,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"LSPR Acquisition {__version__}")
         self.setWindowIcon(QIcon(str(self._brand_icon_path)))
         self.resize(1380, 920)
+        self._startup_window_revealed = False
+        try:
+            self.setWindowOpacity(0.0)
+        except Exception:
+            pass
         _startup_mark("window flags and icon set")
 
         # Keep live plots responsive by default; the user can enable smoothing from plot settings.
@@ -1735,12 +1743,8 @@ class MainWindow(QMainWindow):
         self._build_menu_bar()
         _startup_mark("menu bar built")
         self._sync_view_actions()
-        if self._launch_profile_spec.key == LAUNCH_PROFILE_FULL:
-            self._flow_panel_bootstrap_pending = True
-            _startup_mark("experimental control panel deferred until first show")
-        else:
-            self._flow_panel_bootstrap_pending = False
-            _startup_mark("experimental control panel deferred")
+        self._flow_panel_bootstrap_pending = False
+        _startup_mark("experimental control panel bootstrap deferred")
         self.log_clear_button.clicked.connect(self._clear_log_terminal)
         self.log_copy_button.clicked.connect(self._copy_log_terminal)
         self.log_follow_button.toggled.connect(self._set_log_following)
@@ -1794,6 +1798,8 @@ class MainWindow(QMainWindow):
         self._ui_startup_ready = True
         if self._experiment_control_window is not None:
             self._experiment_control_window._ui_startup_ready = True
+        if self._experiment_control_window is None:
+            self._ensure_flow_panel()
         if getattr(self, "_pending_top_view_mode", None) in {"flow", "experimental_control"}:
             self._pending_top_view_mode = None
             QTimer.singleShot(0, self._activate_experimental_control_view)
@@ -2689,9 +2695,6 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self._start_hardware_initialization)
             elif self._launch_profile_spec.start_live_acquisition:
                 QTimer.singleShot(0, self._start_live_acquisition)
-        if getattr(self, "_flow_panel_bootstrap_pending", False):
-            self._flow_panel_bootstrap_pending = False
-            QTimer.singleShot(250, self._ensure_flow_panel)
         self._sync_view_actions()
 
     def moveEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
@@ -3079,6 +3082,15 @@ class MainWindow(QMainWindow):
 
     def _show_split_view(self) -> None:
         show_split_view(self)
+
+    def _apply_layout_preset(self, preset_key: str) -> None:
+        apply_layout_preset(self, preset_key)
+
+    def _save_current_layout_to_preset(self, preset_key: str | None = None) -> None:
+        save_current_layout_to_preset(self, preset_key)
+
+    def _reset_layout_presets_to_defaults(self) -> None:
+        reset_layout_presets_to_defaults(self)
 
     def _activate_spectra_view(self) -> None:
         activate_spectra_view(self)

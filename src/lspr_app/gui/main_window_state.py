@@ -3,6 +3,7 @@
 from PyQt6.QtCore import Qt, QRect
 from PyQt6.QtWidgets import QApplication
 from time import perf_counter
+from copy import deepcopy
 
 from lspr_app.domain.pump_plan import to_core_experiment_plan
 from lspr_app.gui.main_window_processing import normalize_sensorgram_metric_name, sensorgram_metric_order, sync_legacy_metric_widgets_from_state
@@ -15,6 +16,497 @@ def normalize_top_content_mode(mode: str | None) -> str:
     if text in {"flow", "experiment", "experimental", "experimental_control", "control"}:
         return "experimental_control"
     return "spectra"
+
+
+LAYOUT_PRESET_KEYS = ("spectra", "control", "measurement")
+
+
+def normalize_layout_preset_key(key: str | None) -> str:
+    text = str(key or "spectra").strip().lower().replace(" ", "_").replace("-", "_")
+    return text if text in LAYOUT_PRESET_KEYS else "spectra"
+
+
+def _default_layout_preset_snapshot(key: str) -> dict[str, object]:
+    preset_key = normalize_layout_preset_key(key)
+    if preset_key == "control":
+        return {
+            "layout_variant": "standard",
+            "top_view_mode": "experimental_control",
+            "left_controls_visible": False,
+            "sensorgram_visible": False,
+            "experiment_control_view_mode": "full",
+            "timeline_label_mode": "comment",
+            "left_right_splitter_sizes": [],
+            "plot_splitter_sizes": [],
+            "measurement_vertical_splitter_sizes": [],
+            "measurement_bottom_splitter_sizes": [],
+            "collapsible_sections": {},
+        }
+    if preset_key == "measurement":
+        return {
+            "layout_variant": "measurement",
+            "top_view_mode": "experimental_control",
+            "left_controls_visible": False,
+            "sensorgram_visible": True,
+            "experiment_control_view_mode": "timeline",
+            "timeline_label_mode": "comment",
+            "left_right_splitter_sizes": [],
+            "plot_splitter_sizes": [],
+            "measurement_vertical_splitter_sizes": [],
+            "measurement_bottom_splitter_sizes": [],
+            "collapsible_sections": {},
+        }
+    return {
+        "layout_variant": "standard",
+        "top_view_mode": "spectra",
+        "left_controls_visible": True,
+        "sensorgram_visible": True,
+        "experiment_control_view_mode": "full",
+        "timeline_label_mode": "comment",
+        "left_right_splitter_sizes": [],
+        "plot_splitter_sizes": [],
+        "measurement_vertical_splitter_sizes": [],
+        "measurement_bottom_splitter_sizes": [],
+        "collapsible_sections": {},
+    }
+
+
+def _default_layout_presets() -> dict[str, dict[str, object]]:
+    return {key: deepcopy(_default_layout_preset_snapshot(key)) for key in LAYOUT_PRESET_KEYS}
+
+
+def _coerce_layout_preset_snapshot(key: str, raw: object) -> dict[str, object]:
+    snapshot = _default_layout_preset_snapshot(key)
+    if not isinstance(raw, dict):
+        return snapshot
+    for field in snapshot:
+        if field in raw:
+            snapshot[field] = deepcopy(raw[field])
+    return snapshot
+
+
+def _current_experiment_control_snapshot(window) -> dict[str, object]:
+    control = getattr(window, "_experiment_control_window", None)
+    if control is None:
+        return {}
+    snapshot: dict[str, object] = {}
+    if hasattr(control, "_experiment_control_view_mode"):
+        snapshot["experiment_control_view_mode"] = str(getattr(control, "_experiment_control_view_mode", "full"))
+    if hasattr(control, "_experiment_control_timeline_label_mode"):
+        snapshot["timeline_label_mode"] = str(getattr(control, "_experiment_control_timeline_label_mode", "comment"))
+    if hasattr(control, "_experiment_control_view_mode_sizes"):
+        snapshot["experiment_control_view_mode_sizes"] = deepcopy(
+            getattr(control, "_experiment_control_view_mode_sizes", {})
+        )
+    if hasattr(control, "_experiment_control_view_mode_panel_sizes"):
+        snapshot["experiment_control_view_mode_panel_sizes"] = deepcopy(
+            getattr(control, "_experiment_control_view_mode_panel_sizes", {})
+        )
+    return snapshot
+
+
+def _current_layout_preset_snapshot(window) -> dict[str, object]:
+    snapshot = _default_layout_preset_snapshot(getattr(window, "_layout_preset_selected", "spectra"))
+    right_stack = getattr(window, "_right_content_stack", None)
+    measurement_page = getattr(window, "_measurement_right_page", None)
+    active_variant = "measurement" if right_stack is not None and right_stack.currentWidget() is measurement_page else "standard"
+    snapshot["layout_variant"] = active_variant if active_variant in {"standard", "measurement"} else "standard"
+    snapshot["top_view_mode"] = str(getattr(window, "_top_view_mode", "spectra"))
+    left_scroll = getattr(window, "_left_controls_scroll", None)
+    sensorgram_block = getattr(window, "_sensorgram_block", None)
+    snapshot["left_controls_visible"] = bool(left_scroll.isVisible()) if left_scroll is not None else True
+    snapshot["sensorgram_visible"] = bool(sensorgram_block.isVisible()) if sensorgram_block is not None else True
+    snapshot["left_right_splitter_sizes"] = [int(size) for size in getattr(getattr(window, "left_right_splitter", None), "sizes", lambda: [])()]
+    snapshot["plot_splitter_sizes"] = [int(size) for size in getattr(getattr(window, "plot_splitter", None), "sizes", lambda: [])()]
+    snapshot["measurement_vertical_splitter_sizes"] = [
+        int(size) for size in getattr(getattr(window, "_measurement_vertical_splitter", None), "sizes", lambda: [])()
+    ]
+    snapshot["measurement_bottom_splitter_sizes"] = [
+        int(size) for size in getattr(getattr(window, "_measurement_bottom_splitter", None), "sizes", lambda: [])()
+    ]
+    snapshot["collapsible_sections"] = collapsible_section_state(window)
+    snapshot.update(_current_experiment_control_snapshot(window))
+    return snapshot
+
+
+def _infer_layout_preset_from_current_state(window) -> str:
+    top_mode = normalize_top_content_mode(getattr(window, "_top_view_mode", "spectra"))
+    left_scroll = getattr(window, "_left_controls_scroll", None)
+    sensorgram_block = getattr(window, "_sensorgram_block", None)
+    left_visible = bool(left_scroll.isVisible()) if left_scroll is not None else True
+    sensor_visible = bool(sensorgram_block.isVisible()) if sensorgram_block is not None else True
+    if top_mode == "experimental_control":
+        if not left_visible and not sensor_visible:
+            return "control"
+        if not left_visible and sensor_visible:
+            return "measurement"
+        return "control"
+    return "spectra"
+
+
+def load_layout_presets(window) -> dict[str, dict[str, object]]:
+    ui_state = window._ui_state if isinstance(getattr(window, "_ui_state", None), dict) else {}
+    presets = ui_state.get("layout_presets")
+    result = _default_layout_presets()
+    if isinstance(presets, dict):
+        for key in LAYOUT_PRESET_KEYS:
+            result[key] = _coerce_layout_preset_snapshot(key, presets.get(key))
+    window._layout_presets = result
+    selected = normalize_layout_preset_key(ui_state.get("layout_preset_selected"))
+    window._layout_preset_selected = selected
+    window._layout_preset_active_variant = str(result.get(selected, {}).get("layout_variant", "standard"))
+    return result
+
+
+def save_layout_presets(window) -> None:
+    selected = normalize_layout_preset_key(getattr(window, "_layout_preset_selected", "spectra"))
+    presets = getattr(window, "_layout_presets", None)
+    if not isinstance(presets, dict):
+        presets = _default_layout_presets()
+    window._layout_presets = {
+        key: _coerce_layout_preset_snapshot(key, presets.get(key))
+        for key in LAYOUT_PRESET_KEYS
+    }
+    window._layout_preset_selected = selected
+
+
+def _set_widget_into_layout(widget, layout) -> None:
+    if widget is None or layout is None:
+        return
+    parent = widget.parentWidget()
+    if parent is not None:
+        try:
+            parent_layout = parent.layout()
+        except Exception:
+            parent_layout = None
+        if parent_layout is not None:
+            try:
+                parent_layout.removeWidget(widget)
+            except Exception:
+                pass
+        try:
+            from PyQt6.QtWidgets import QStackedWidget, QSplitter
+
+            if isinstance(parent, QStackedWidget):
+                parent.removeWidget(widget)
+            elif isinstance(parent, QSplitter):
+                parent.removeWidget(widget)
+        except Exception:
+            pass
+    try:
+        widget.setParent(None)
+    except Exception:
+        pass
+    try:
+        layout.addWidget(widget)
+        widget.setVisible(True)
+        widget.updateGeometry()
+    except Exception:
+        pass
+
+
+def _set_widget_into_splitter(widget, splitter, index: int | None = None) -> None:
+    if widget is None or splitter is None:
+        return
+    current_index = -1
+    try:
+        current_index = splitter.indexOf(widget)
+    except Exception:
+        current_index = -1
+    if current_index >= 0:
+        return
+    parent = widget.parentWidget()
+    if parent is not None:
+        try:
+            parent_layout = parent.layout()
+        except Exception:
+            parent_layout = None
+        if parent_layout is not None:
+            try:
+                parent_layout.removeWidget(widget)
+            except Exception:
+                pass
+        try:
+            from PyQt6.QtWidgets import QStackedWidget
+
+            if isinstance(parent, QStackedWidget):
+                parent.removeWidget(widget)
+            elif isinstance(parent, type(splitter)):
+                parent.removeWidget(widget)
+        except Exception:
+            pass
+    try:
+        widget.setParent(None)
+    except Exception:
+        pass
+    try:
+        if index is None or index < 0 or index >= splitter.count():
+            splitter.addWidget(widget)
+        else:
+            splitter.insertWidget(index, widget)
+        widget.setVisible(True)
+        widget.updateGeometry()
+    except Exception:
+        try:
+            splitter.addWidget(widget)
+            widget.setVisible(True)
+            widget.updateGeometry()
+        except Exception:
+            pass
+
+
+def _ensure_standard_layout_page(window) -> None:
+    stack = getattr(window, "_right_content_stack", None)
+    standard_page = getattr(window, "_standard_right_page", None)
+    if stack is not None and standard_page is not None:
+        try:
+            stack.setCurrentWidget(standard_page)
+        except Exception:
+            pass
+
+
+def _ensure_measurement_layout_page(window) -> None:
+    stack = getattr(window, "_right_content_stack", None)
+    measurement_page = getattr(window, "_measurement_right_page", None)
+    if stack is not None and measurement_page is not None:
+        try:
+            stack.setCurrentWidget(measurement_page)
+        except Exception:
+            pass
+
+
+def _restore_standard_widgets(window) -> None:
+    top_stack = getattr(window, "_top_content_stack", None)
+    spectra_block = getattr(window, "_spectra_block", None)
+    if top_stack is not None and spectra_block is not None:
+        try:
+            if top_stack.indexOf(spectra_block) < 0:
+                top_stack.insertWidget(0, spectra_block)
+        except Exception:
+            try:
+                top_stack.addWidget(spectra_block)
+            except Exception:
+                pass
+    trace_block = getattr(window, "_sensorgram_block", None)
+    plot_splitter = getattr(window, "plot_splitter", None)
+    if plot_splitter is not None and trace_block is not None:
+        try:
+            if plot_splitter.indexOf(trace_block) < 0:
+                plot_splitter.addWidget(trace_block)
+        except Exception:
+            try:
+                plot_splitter.addWidget(trace_block)
+            except Exception:
+                pass
+
+
+def _apply_experiment_control_snapshot(window, snapshot: dict[str, object]) -> None:
+    control = getattr(window, "_experiment_control_window", None)
+    if control is None:
+        return
+    view_mode = snapshot.get("experiment_control_view_mode")
+    if isinstance(view_mode, str) and hasattr(control, "_experiment_control_view_mode"):
+        try:
+            control._experiment_control_view_mode = control._normalize_experiment_control_view_mode(view_mode)
+            control._apply_experiment_control_view_mode(save=False)
+        except Exception:
+            pass
+    timeline_label_mode = snapshot.get("timeline_label_mode")
+    if isinstance(timeline_label_mode, str) and hasattr(control, "_experiment_control_timeline_label_mode"):
+        try:
+            control._experiment_control_timeline_label_mode = control._normalize_experiment_control_timeline_label_mode(
+                timeline_label_mode
+            )
+            control._update_experiment_control_timeline_label_mode()
+        except Exception:
+            pass
+    view_mode_sizes = snapshot.get("experiment_control_view_mode_sizes")
+    if isinstance(view_mode_sizes, dict) and hasattr(control, "_experiment_control_view_mode_sizes"):
+        try:
+            control._experiment_control_view_mode_sizes = control._load_experiment_control_view_mode_sizes(
+                {"experiment_control_view_mode_sizes": view_mode_sizes}
+            )
+        except Exception:
+            pass
+    view_mode_panel_sizes = snapshot.get("experiment_control_view_mode_panel_sizes")
+    if isinstance(view_mode_panel_sizes, dict) and hasattr(control, "_experiment_control_view_mode_panel_sizes"):
+        try:
+            control._experiment_control_view_mode_panel_sizes = control._load_experiment_control_view_mode_panel_sizes(
+                {"experiment_control_view_mode_panel_sizes": view_mode_panel_sizes}
+            )
+        except Exception:
+            pass
+
+
+def _apply_standard_layout_preset(window, preset_key: str, snapshot: dict[str, object]) -> None:
+    _ensure_standard_layout_page(window)
+    _restore_standard_widgets(window)
+    left_controls_visible = snapshot.get("left_controls_visible")
+    if isinstance(left_controls_visible, bool) and hasattr(window, "_left_controls_scroll"):
+        window._left_controls_scroll.setVisible(left_controls_visible)
+    sensorgram_visible = snapshot.get("sensorgram_visible")
+    if isinstance(sensorgram_visible, bool) and hasattr(window, "_sensorgram_block"):
+        window._sensorgram_block.setVisible(sensorgram_visible)
+    top_mode = snapshot.get("top_view_mode")
+    if isinstance(top_mode, str):
+        if normalize_top_content_mode(top_mode) == "experimental_control":
+            set_top_content_mode(window, "experimental_control", save=False)
+        else:
+            set_top_content_mode(window, "spectra", save=False)
+    else:
+        set_top_content_mode(window, "spectra", save=False)
+    _apply_experiment_control_snapshot(window, snapshot)
+    left_sizes = snapshot.get("left_right_splitter_sizes")
+    if (
+        isinstance(left_sizes, list)
+        and len(left_sizes) == 2
+        and all(isinstance(item, int) and item >= 0 for item in left_sizes)
+        and hasattr(window, "left_right_splitter")
+    ):
+        window.left_right_splitter.setSizes([int(left_sizes[0]), int(left_sizes[1])])
+    plot_sizes = snapshot.get("plot_splitter_sizes")
+    if (
+        isinstance(plot_sizes, list)
+        and len(plot_sizes) == 2
+        and all(isinstance(item, int) and item >= 0 for item in plot_sizes)
+        and hasattr(window, "plot_splitter")
+    ):
+        window.plot_splitter.setSizes([int(plot_sizes[0]), int(plot_sizes[1])])
+    elif preset_key == "spectra" and hasattr(window, "plot_splitter"):
+        try:
+            total = sum(int(size) for size in window.plot_splitter.sizes())
+            if total > 0:
+                half = max(total // 2, 1)
+                window.plot_splitter.setSizes([half, total - half])
+        except Exception:
+            pass
+    elif preset_key == "control" and hasattr(window, "plot_splitter"):
+        try:
+            total = sum(int(size) for size in window.plot_splitter.sizes())
+            if total > 0:
+                window.plot_splitter.setSizes([total, 0])
+        except Exception:
+            pass
+    ensure_visible_top_content_splitter(window, mode=getattr(window, "_top_view_mode", "spectra"))
+
+
+def _apply_measurement_layout_preset(window, snapshot: dict[str, object]) -> None:
+    from lspr_app.gui.main_window_lifecycle import ensure_flow_panel_for
+
+    ensure_flow_panel_for(window)
+    _ensure_measurement_layout_page(window)
+    measurement_top_host = getattr(window, "_measurement_top_host", None)
+    measurement_left_host = getattr(window, "_measurement_bottom_left_host", None)
+    measurement_right_host = getattr(window, "_measurement_bottom_right_host", None)
+    top_layout = measurement_top_host.layout() if measurement_top_host is not None else None
+    left_layout = measurement_left_host.layout() if measurement_left_host is not None else None
+    right_layout = measurement_right_host.layout() if measurement_right_host is not None else None
+    if top_layout is not None and getattr(window, "_experiment_control_window", None) is not None:
+        _set_widget_into_layout(window._experiment_control_window, top_layout)
+    if left_layout is not None and getattr(window, "_spectra_block", None) is not None:
+        _set_widget_into_layout(window._spectra_block, left_layout)
+    if right_layout is not None and getattr(window, "_sensorgram_block", None) is not None:
+        _set_widget_into_layout(window._sensorgram_block, right_layout)
+    _apply_experiment_control_snapshot(window, snapshot)
+    if getattr(window, "_experiment_control_window", None) is not None:
+        try:
+            window._experiment_control_window._apply_experiment_control_view_mode(save=False)
+        except Exception:
+            pass
+    window._top_view_mode = "experimental_control"
+    left_controls_visible = snapshot.get("left_controls_visible")
+    if isinstance(left_controls_visible, bool) and hasattr(window, "_left_controls_scroll"):
+        window._left_controls_scroll.setVisible(left_controls_visible)
+    sensorgram_visible = snapshot.get("sensorgram_visible")
+    if isinstance(sensorgram_visible, bool) and hasattr(window, "_sensorgram_block"):
+        window._sensorgram_block.setVisible(sensorgram_visible)
+    vertical_sizes = snapshot.get("measurement_vertical_splitter_sizes")
+    if (
+        isinstance(vertical_sizes, list)
+        and len(vertical_sizes) == 2
+        and all(isinstance(item, int) and item >= 0 for item in vertical_sizes)
+        and hasattr(window, "_measurement_vertical_splitter")
+    ):
+        window._measurement_vertical_splitter.setSizes([int(vertical_sizes[0]), int(vertical_sizes[1])])
+    else:
+        try:
+            splitter = getattr(window, "_measurement_vertical_splitter", None)
+            if splitter is not None:
+                total = sum(int(size) for size in splitter.sizes())
+                if total > 0:
+                    top = max(total // 3, 180)
+                    bottom = max(total - top, 240)
+                    splitter.setSizes([top, bottom])
+        except Exception:
+            pass
+    bottom_sizes = snapshot.get("measurement_bottom_splitter_sizes")
+    if (
+        isinstance(bottom_sizes, list)
+        and len(bottom_sizes) == 2
+        and all(isinstance(item, int) and item >= 0 for item in bottom_sizes)
+        and hasattr(window, "_measurement_bottom_splitter")
+    ):
+        window._measurement_bottom_splitter.setSizes([int(bottom_sizes[0]), int(bottom_sizes[1])])
+    else:
+        try:
+            splitter = getattr(window, "_measurement_bottom_splitter", None)
+            if splitter is not None:
+                total = sum(int(size) for size in splitter.sizes())
+                if total > 0:
+                    half = max(total // 2, 1)
+                    splitter.setSizes([half, total - half])
+        except Exception:
+            pass
+    _sync_measurement_visibility(window, True)
+
+
+def _sync_measurement_visibility(window, visible: bool) -> None:
+    page = getattr(window, "_measurement_right_page", None)
+    if page is not None:
+        page.setVisible(bool(visible))
+
+
+def apply_layout_preset(window, preset_key: str, *, save: bool = True) -> None:
+    selected = normalize_layout_preset_key(preset_key)
+    presets = getattr(window, "_layout_presets", None)
+    if not isinstance(presets, dict):
+        presets = load_layout_presets(window)
+    snapshot = _coerce_layout_preset_snapshot(selected, presets.get(selected))
+    window._layout_preset_selected = selected
+    window._layout_preset_active_variant = str(snapshot.get("layout_variant", "standard"))
+    if str(snapshot.get("layout_variant", "standard")) == "measurement":
+        _apply_measurement_layout_preset(window, snapshot)
+    else:
+        _apply_standard_layout_preset(window, selected, snapshot)
+        _sync_measurement_visibility(window, False)
+    window._sync_view_actions()
+    if save:
+        save_ui_state(window)
+
+
+def save_current_layout_to_preset(window, preset_key: str | None = None) -> None:
+    selected = normalize_layout_preset_key(preset_key or getattr(window, "_layout_preset_selected", "spectra"))
+    presets = getattr(window, "_layout_presets", None)
+    if not isinstance(presets, dict):
+        presets = load_layout_presets(window)
+    snapshot = _current_layout_preset_snapshot(window)
+    presets[selected] = snapshot
+    window._layout_presets = presets
+    window._layout_preset_selected = selected
+    window._layout_preset_active_variant = str(snapshot.get("layout_variant", "standard"))
+    save_layout_presets(window)
+    save_ui_state(window)
+
+
+def reset_layout_presets_to_defaults(window) -> None:
+    window._layout_presets = _default_layout_presets()
+    window._layout_preset_selected = normalize_layout_preset_key(getattr(window, "_layout_preset_selected", "spectra"))
+    window._layout_preset_active_variant = str(
+        window._layout_presets.get(window._layout_preset_selected, {}).get("layout_variant", "standard")
+    )
+    save_layout_presets(window)
+    apply_layout_preset(window, window._layout_preset_selected, save=False)
+    save_ui_state(window)
 
 
 def ensure_visible_top_content_splitter(window, mode: str | None = None) -> None:
@@ -176,6 +668,8 @@ def restore_ui_state(window) -> None:
     trace_stats_metric_name = ui_state.get("trace_stats_metric_name")
     residual_y_range = ui_state.get("residual_y_range")
     residual_visible = bool(ui_state.get("show_residual", False))
+    layout_presets = ui_state.get("layout_presets")
+    layout_preset_selected = ui_state.get("layout_preset_selected")
 
     if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
         app = QApplication.instance()
@@ -426,6 +920,27 @@ def restore_ui_state(window) -> None:
                 window.residual_view.setYRange(y_min, y_max, padding=0.0)
                 window._residual_axis_autoscaled = True
     window._start_maximized = bool(maximized)
+    if isinstance(layout_presets, dict):
+        window._layout_presets = {
+            key: _coerce_layout_preset_snapshot(key, layout_presets.get(key))
+            for key in LAYOUT_PRESET_KEYS
+        }
+        has_layout_preset_state = True
+    else:
+        window._layout_presets = _default_layout_presets()
+        has_layout_preset_state = False
+    if isinstance(layout_preset_selected, str):
+        window._layout_preset_selected = normalize_layout_preset_key(layout_preset_selected)
+    else:
+        window._layout_preset_selected = _infer_layout_preset_from_current_state(window)
+    window._layout_preset_active_variant = str(
+        window._layout_presets.get(window._layout_preset_selected, {}).get("layout_variant", "standard")
+    )
+    if has_layout_preset_state or isinstance(layout_preset_selected, str):
+        try:
+            apply_layout_preset(window, window._layout_preset_selected, save=False)
+        except Exception:
+            window._sync_view_actions()
     window._sync_view_actions()
 
 
@@ -529,6 +1044,11 @@ def save_ui_state(window) -> None:
             ),
             "trace_stats_metric_name": window._trace_stats_metric_name,
             "residual_y_range": residual_y_range,
+            "layout_presets": {
+                key: deepcopy(_coerce_layout_preset_snapshot(key, getattr(window, "_layout_presets", {}).get(key)))
+                for key in LAYOUT_PRESET_KEYS
+            },
+            "layout_preset_selected": normalize_layout_preset_key(getattr(window, "_layout_preset_selected", "spectra")),
             "collapsible_sections": collapsible_section_state(window),
         },
     )
@@ -731,6 +1251,15 @@ def sync_view_actions(window) -> None:
         sensor_action.blockSignals(True)
         sensor_action.setChecked(not window._sensorgram_block.isHidden())
         sensor_action.blockSignals(False)
+    preset_actions = actions.get("layout_presets")
+    if isinstance(preset_actions, dict):
+        selected = normalize_layout_preset_key(getattr(window, "_layout_preset_selected", "spectra"))
+        for preset_key, action in preset_actions.items():
+            if action is None:
+                continue
+            action.blockSignals(True)
+            action.setChecked(normalize_layout_preset_key(preset_key) == selected)
+            action.blockSignals(False)
 
 
 def sync_diagnostics_panel_action(window) -> None:
