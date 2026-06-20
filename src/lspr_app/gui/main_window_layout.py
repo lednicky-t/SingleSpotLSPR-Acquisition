@@ -233,7 +233,6 @@ def build_main_layout_for(window) -> None:
 
     window._source_section = source_section
     window._spectra_processing_section = spectra_processing_section
-    window._processing_section = spectra_processing_section
     window._session_section = session_section
     window._log_section = log_section
     window._restore_collapsible_section_state()
@@ -246,14 +245,14 @@ def build_main_layout_for(window) -> None:
     tool_panel_title_layout = QHBoxLayout()
     tool_panel_title_layout.setContentsMargins(0, 0, 0, 0)
     tool_panel_title_layout.setSpacing(6)
-    spectra_processing_title = QLabel("Spectra Processing")
-    spectra_processing_title.setObjectName("spectraProcessingTitleLabel")
-    spectra_processing_title.setStyleSheet("font-size: 13px; font-weight: 800; letter-spacing: 0.8px; color: #e0a84a;")
-    spectra_processing_hide_button = _make_hide_panel_button(window, "Hide left controls.")
-    spectra_processing_hide_button.clicked.connect(lambda _checked=False: window._toggle_left_controls(False))
-    tool_panel_title_layout.addWidget(spectra_processing_title)
+    tool_panel_title = QLabel("Tool panel")
+    tool_panel_title.setObjectName("toolPanelTitleLabel")
+    tool_panel_title.setStyleSheet("font-size: 13px; font-weight: 800; letter-spacing: 0.8px; color: #e0a84a;")
+    tool_panel_hide_button = _make_hide_panel_button(window, "Hide left controls.")
+    tool_panel_hide_button.clicked.connect(lambda _checked=False: window._toggle_left_controls(False))
+    tool_panel_title_layout.addWidget(tool_panel_title)
     tool_panel_title_layout.addStretch(1)
-    tool_panel_title_layout.addWidget(spectra_processing_hide_button)
+    tool_panel_title_layout.addWidget(tool_panel_hide_button)
     tool_panel_title_row.setLayout(tool_panel_title_layout)
     left_panel.addWidget(tool_panel_title_row)
     left_panel.addLayout(measurement_bar)

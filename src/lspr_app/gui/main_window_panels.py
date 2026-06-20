@@ -15,10 +15,9 @@ from PyQt6.QtCore import Qt
 
 from lspr_ui import make_info_button
 
-PROCESSING_SECTION_LABEL_COL_WIDTH = 78
-PROCESSING_CONTROL_COL_WIDTH = 64
-PROCESSING_SECTION_H_SPACING = 5
-PROCESSING_SECTION_V_SPACING = 3
+SPECTRA_PROCESSING_SECTION_LABEL_COL_WIDTH = 78
+SPECTRA_PROCESSING_SECTION_H_SPACING = 5
+SPECTRA_PROCESSING_SECTION_V_SPACING = 3
 
 
 def build_spectrometer_page(window) -> QWidget:
@@ -205,10 +204,6 @@ def build_spectra_processing_group(window) -> QGroupBox:
     return spectra_processing_group
 
 
-def build_processing_group(window) -> QGroupBox:
-    return build_spectra_processing_group(window)
-
-
 def configure_spectra_processing_group_controls(window) -> None:
     range_width = max(window.range_min_spin.sizeHint().width(), window.range_max_spin.sizeHint().width())
     expanded_range_width = max(int(round(range_width * 0.92)), 36)
@@ -237,19 +232,13 @@ def configure_spectra_processing_group_controls(window) -> None:
     uniform_width = max(int(round(uniform_width * 0.8)), 84)
     for control in uniform_controls:
         control.setFixedWidth(uniform_width)
-
-
-def configure_processing_group_controls(window) -> None:
-    configure_spectra_processing_group_controls(window)
-
-
 def _build_processing_single_row_widget(title: str, control, tooltip: str) -> QWidget:
     widget = QWidget()
     layout = QGridLayout()
     layout.setContentsMargins(0, 0, 0, 0)
-    layout.setHorizontalSpacing(PROCESSING_SECTION_H_SPACING)
-    layout.setVerticalSpacing(PROCESSING_SECTION_V_SPACING)
-    layout.setColumnMinimumWidth(0, PROCESSING_SECTION_LABEL_COL_WIDTH)
+    layout.setHorizontalSpacing(SPECTRA_PROCESSING_SECTION_H_SPACING)
+    layout.setVerticalSpacing(SPECTRA_PROCESSING_SECTION_V_SPACING)
+    layout.setColumnMinimumWidth(0, SPECTRA_PROCESSING_SECTION_LABEL_COL_WIDTH)
     layout.setColumnStretch(1, 1)
 
     title_widget = QLabel(title)
@@ -303,9 +292,9 @@ def _build_processing_fitting_widget(window) -> QWidget:
     fitting_widget = QWidget()
     fitting_layout = QGridLayout()
     fitting_layout.setContentsMargins(0, 0, 0, 0)
-    fitting_layout.setHorizontalSpacing(PROCESSING_SECTION_H_SPACING)
-    fitting_layout.setVerticalSpacing(PROCESSING_SECTION_V_SPACING)
-    fitting_layout.setColumnMinimumWidth(0, PROCESSING_SECTION_LABEL_COL_WIDTH)
+    fitting_layout.setHorizontalSpacing(SPECTRA_PROCESSING_SECTION_H_SPACING)
+    fitting_layout.setVerticalSpacing(SPECTRA_PROCESSING_SECTION_V_SPACING)
+    fitting_layout.setColumnMinimumWidth(0, SPECTRA_PROCESSING_SECTION_LABEL_COL_WIDTH)
     fitting_layout.setColumnMinimumWidth(1, PROCESSING_CONTROL_COL_WIDTH)
     fitting_layout.setColumnMinimumWidth(2, PROCESSING_CONTROL_COL_WIDTH)
     fitting_layout.setColumnMinimumWidth(3, PROCESSING_CONTROL_COL_WIDTH)
@@ -363,9 +352,9 @@ def _build_processing_two_row_grid(
     widget = QWidget()
     grid = QGridLayout()
     grid.setContentsMargins(0, 0, 0, 0)
-    grid.setHorizontalSpacing(PROCESSING_SECTION_H_SPACING)
-    grid.setVerticalSpacing(PROCESSING_SECTION_V_SPACING)
-    grid.setColumnMinimumWidth(0, PROCESSING_SECTION_LABEL_COL_WIDTH)
+    grid.setHorizontalSpacing(SPECTRA_PROCESSING_SECTION_H_SPACING)
+    grid.setVerticalSpacing(SPECTRA_PROCESSING_SECTION_V_SPACING)
+    grid.setColumnMinimumWidth(0, SPECTRA_PROCESSING_SECTION_LABEL_COL_WIDTH)
     for column in range(1, len(specs) + 1):
         grid.setColumnMinimumWidth(column, PROCESSING_CONTROL_COL_WIDTH)
     grid.setColumnStretch(len(specs) + 1, 1)
