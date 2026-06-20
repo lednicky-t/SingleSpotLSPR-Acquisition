@@ -538,7 +538,7 @@ def collapsible_section_state(window) -> dict[str, bool]:
     sections: dict[str, bool] = {}
     for key, attr in (
         ("source", "_source_section"),
-        ("processing", "_processing_section"),
+        ("spectra_processing", "_spectra_processing_section"),
         ("session", "_session_section"),
         ("log", "_log_section"),
     ):
@@ -555,7 +555,7 @@ def restore_collapsible_section_state(window) -> None:
         return
     for key, attr in (
         ("source", "_source_section"),
-        ("processing", "_processing_section"),
+        ("spectra_processing", "_spectra_processing_section"),
         ("session", "_session_section"),
         ("log", "_log_section"),
     ):
@@ -563,6 +563,9 @@ def restore_collapsible_section_state(window) -> None:
         value = saved.get(key)
         if section is not None and isinstance(value, bool):
             section.set_expanded(value)
+    spectra_section = getattr(window, "_spectra_processing_section", None)
+    if spectra_section is not None and "spectra_processing" not in saved and isinstance(saved.get("processing"), bool):
+        spectra_section.set_expanded(bool(saved["processing"]))
 
 
 def set_gui_housekeeping_enabled(window, enabled: bool) -> None:

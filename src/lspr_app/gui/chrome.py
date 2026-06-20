@@ -37,7 +37,7 @@ def build_menu_bar(window) -> QMenuBar:
     experimental_control_action.triggered.connect(lambda _checked=False: window._activate_experimental_control_view())
     view_menu_actions["top_view"]["experimental_control"] = experimental_control_action
 
-    left_controls_action = view_menu.addAction("Tool panel")
+    left_controls_action = view_menu.addAction("Spectra Processing")
     left_controls_action.setCheckable(True)
     left_controls_action.setChecked(True)
     left_controls_action.triggered.connect(window._toggle_left_controls)

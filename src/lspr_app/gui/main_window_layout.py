@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from lspr_app.gui.main_window_panels import build_processing_group
+from lspr_app.gui.main_window_panels import build_spectra_processing_group
 from lspr_app.gui.icon_helpers import flow_tabler_icon, storage_compression_icon, tint_tabler_icon
 from lspr_app.gui.widgets import CollapsibleSection, CompactSplitter
 from lspr_app.gui.main_window_titlebar import refresh_hw_device_status_strip
@@ -62,7 +62,7 @@ def build_main_layout_for(window) -> None:
     measurement_bar.setSpacing(4)
     measurement_bar.addStretch(1)
 
-    processing_group = build_processing_group(window)
+    spectra_processing_group = build_spectra_processing_group(window)
 
     source_block = QWidget()
     source_layout = QVBoxLayout()
@@ -180,9 +180,9 @@ def build_main_layout_for(window) -> None:
 
     source_section = CollapsibleSection("Light source", source_block, expanded=True)
     source_section.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-    processing_section = CollapsibleSection(
-        "Tool panel",
-        processing_group,
+    spectra_processing_section = CollapsibleSection(
+        "Spectra Processing",
+        spectra_processing_group,
         expanded=False,
         header_widgets=[window.save_processing_button, window.load_processing_button],
     )
@@ -232,7 +232,8 @@ def build_main_layout_for(window) -> None:
     log_section.setVisible(bool(getattr(window, "_diagnostics_panel_enabled", False)))
 
     window._source_section = source_section
-    window._processing_section = processing_section
+    window._spectra_processing_section = spectra_processing_section
+    window._processing_section = spectra_processing_section
     window._session_section = session_section
     window._log_section = log_section
     window._restore_collapsible_section_state()
@@ -245,19 +246,19 @@ def build_main_layout_for(window) -> None:
     tool_panel_title_layout = QHBoxLayout()
     tool_panel_title_layout.setContentsMargins(0, 0, 0, 0)
     tool_panel_title_layout.setSpacing(6)
-    tool_panel_title = QLabel("Tool panel")
-    tool_panel_title.setObjectName("toolPanelTitleLabel")
-    tool_panel_title.setStyleSheet("font-size: 13px; font-weight: 800; letter-spacing: 0.8px; color: #e0a84a;")
-    tool_panel_hide_button = _make_hide_panel_button(window, "Hide left controls.")
-    tool_panel_hide_button.clicked.connect(lambda _checked=False: window._toggle_left_controls(False))
-    tool_panel_title_layout.addWidget(tool_panel_title)
+    spectra_processing_title = QLabel("Spectra Processing")
+    spectra_processing_title.setObjectName("spectraProcessingTitleLabel")
+    spectra_processing_title.setStyleSheet("font-size: 13px; font-weight: 800; letter-spacing: 0.8px; color: #e0a84a;")
+    spectra_processing_hide_button = _make_hide_panel_button(window, "Hide left controls.")
+    spectra_processing_hide_button.clicked.connect(lambda _checked=False: window._toggle_left_controls(False))
+    tool_panel_title_layout.addWidget(spectra_processing_title)
     tool_panel_title_layout.addStretch(1)
-    tool_panel_title_layout.addWidget(tool_panel_hide_button)
+    tool_panel_title_layout.addWidget(spectra_processing_hide_button)
     tool_panel_title_row.setLayout(tool_panel_title_layout)
     left_panel.addWidget(tool_panel_title_row)
     left_panel.addLayout(measurement_bar)
     left_panel.addWidget(source_section)
-    left_panel.addWidget(processing_section)
+    left_panel.addWidget(spectra_processing_section)
     left_panel.addWidget(session_section)
     left_panel.addWidget(log_section)
     left_panel.addStretch(1)

@@ -185,27 +185,31 @@ def build_simulation_page(window) -> QWidget:
     return page
 
 
-def build_processing_group(window) -> QGroupBox:
-    processing_group = QGroupBox()
-    processing_layout = QVBoxLayout()
-    processing_layout.setContentsMargins(0, 0, 0, 0)
-    processing_layout.setSpacing(8)
+def build_spectra_processing_group(window) -> QGroupBox:
+    spectra_processing_group = QGroupBox()
+    spectra_processing_layout = QVBoxLayout()
+    spectra_processing_layout.setContentsMargins(0, 0, 0, 0)
+    spectra_processing_layout.setSpacing(8)
 
-    processing_layout.addWidget(_build_processing_range_widget(window))
-    processing_layout.addWidget(
+    spectra_processing_layout.addWidget(_build_processing_range_widget(window))
+    spectra_processing_layout.addWidget(
         _build_processing_single_row_widget(
             "Base removal",
             window.baseline_method_combo,
             "Baseline subtraction method.",
         )
     )
-    processing_layout.addWidget(_build_processing_smoothing_widget(window))
-    processing_layout.addWidget(_build_processing_fitting_widget(window))
-    processing_group.setLayout(processing_layout)
-    return processing_group
+    spectra_processing_layout.addWidget(_build_processing_smoothing_widget(window))
+    spectra_processing_layout.addWidget(_build_processing_fitting_widget(window))
+    spectra_processing_group.setLayout(spectra_processing_layout)
+    return spectra_processing_group
 
 
-def configure_processing_group_controls(window) -> None:
+def build_processing_group(window) -> QGroupBox:
+    return build_spectra_processing_group(window)
+
+
+def configure_spectra_processing_group_controls(window) -> None:
     range_width = max(window.range_min_spin.sizeHint().width(), window.range_max_spin.sizeHint().width())
     expanded_range_width = max(int(round(range_width * 0.92)), 36)
     resolution_width = max(int(round(expanded_range_width * 0.78)), 58)
@@ -233,6 +237,10 @@ def configure_processing_group_controls(window) -> None:
     uniform_width = max(int(round(uniform_width * 0.8)), 84)
     for control in uniform_controls:
         control.setFixedWidth(uniform_width)
+
+
+def configure_processing_group_controls(window) -> None:
+    configure_spectra_processing_group_controls(window)
 
 
 def _build_processing_single_row_widget(title: str, control, tooltip: str) -> QWidget:

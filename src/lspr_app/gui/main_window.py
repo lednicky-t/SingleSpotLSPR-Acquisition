@@ -122,10 +122,10 @@ from lspr_app.gui.icon_helpers import (
 )
 from lspr_app.gui.main_window_titlebar import build_title_bar, refresh_hw_device_status_strip, sync_window_control_icons
 from lspr_app.gui.main_window_panels import (
-    build_processing_group,
+    build_spectra_processing_group,
     build_simulation_page,
     build_spectrometer_page,
-    configure_processing_group_controls,
+    configure_spectra_processing_group_controls,
 )
 from lspr_app.gui.main_window_plot_settings import show_sensorgram_plot_settings_dialog_for
 from lspr_app.gui.main_window_preferences import show_preferences_dialog_for
@@ -3239,7 +3239,7 @@ class MainWindow(QMainWindow):
             combo.setMinimumContentsLength(1)
             combo.view().setTextElideMode(Qt.TextElideMode.ElideRight)
 
-        configure_processing_group_controls(self)
+        configure_spectra_processing_group_controls(self)
 
         for button in (
             self.measurement_toggle_button,
