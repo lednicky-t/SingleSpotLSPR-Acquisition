@@ -199,7 +199,7 @@ class CollapsibleSection(QWidget):
     ) -> None:
         super().__init__()
         self._content = content
-        self._toggle = QToolButton()
+        self._toggle = QToolButton(self)
         self._toggle.setObjectName("collapseToggle")
         self._toggle.setText(title)
         self._toggle.setCheckable(True)
@@ -213,7 +213,7 @@ class CollapsibleSection(QWidget):
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
-        header_row = QWidget()
+        header_row = QWidget(self)
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(4)

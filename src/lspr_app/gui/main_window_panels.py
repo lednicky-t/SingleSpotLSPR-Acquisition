@@ -51,7 +51,7 @@ def build_spectrometer_page(window) -> QWidget:
     device_layout.addRow("Correct nonlinearity", window.correct_nonlinearity_check)
     device_group.setLayout(device_layout)
 
-    acquisition_stats_row = QWidget()
+    acquisition_stats_row = QWidget(window)
     acquisition_stats_layout = QHBoxLayout()
     acquisition_stats_layout.setContentsMargins(0, 0, 0, 0)
     acquisition_stats_layout.setSpacing(8)
@@ -64,7 +64,7 @@ def build_spectrometer_page(window) -> QWidget:
     page_layout.addWidget(device_group)
     page_layout.addWidget(acquisition_stats_row)
     page_layout.addStretch(1)
-    page = QWidget()
+    page = QWidget(window)
     page.setLayout(page_layout)
     return page
 
@@ -180,13 +180,13 @@ def build_simulation_page(window) -> QWidget:
     page_layout.setContentsMargins(0, 0, 0, 0)
     page_layout.addWidget(simulation_group)
     page_layout.addStretch(1)
-    page = QWidget()
+    page = QWidget(window)
     page.setLayout(page_layout)
     return page
 
 
 def build_spectra_processing_group(window) -> QGroupBox:
-    spectra_processing_group = QGroupBox()
+    spectra_processing_group = QGroupBox(window)
     spectra_processing_layout = QVBoxLayout()
     spectra_processing_layout.setContentsMargins(0, 0, 0, 0)
     spectra_processing_layout.setSpacing(8)
@@ -194,6 +194,7 @@ def build_spectra_processing_group(window) -> QGroupBox:
     spectra_processing_layout.addWidget(_build_processing_range_widget(window))
     spectra_processing_layout.addWidget(
         _build_processing_single_row_widget(
+            window,
             "Base removal",
             window.baseline_method_combo,
             "Baseline subtraction method.",
@@ -233,8 +234,8 @@ def configure_spectra_processing_group_controls(window) -> None:
     uniform_width = max(int(round(uniform_width * 0.8)), 84)
     for control in uniform_controls:
         control.setFixedWidth(uniform_width)
-def _build_processing_single_row_widget(title: str, control, tooltip: str) -> QWidget:
-    widget = QWidget()
+def _build_processing_single_row_widget(window, title: str, control, tooltip: str) -> QWidget:
+    widget = QWidget(window)
     layout = QGridLayout()
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setHorizontalSpacing(SPECTRA_PROCESSING_SECTION_H_SPACING)
@@ -246,7 +247,7 @@ def _build_processing_single_row_widget(title: str, control, tooltip: str) -> QW
     title_widget.setToolTip(tooltip)
     layout.addWidget(title_widget, 0, 0, alignment=Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
     if isinstance(control, QLayout):
-        control_widget = QWidget()
+        control_widget = QWidget(window)
         control_layout = QHBoxLayout()
         control_layout.setContentsMargins(0, 0, 0, 0)
         control_layout.setSpacing(6)
@@ -263,6 +264,7 @@ def _build_processing_single_row_widget(title: str, control, tooltip: str) -> QW
 
 def _build_processing_range_widget(window) -> QWidget:
     range_widget = _build_processing_two_row_grid(
+        window,
         "Range",
         [
             ("Min", "Minimum wavelength used for processing and fit range.", window.range_min_spin),
@@ -278,6 +280,7 @@ def _build_processing_range_widget(window) -> QWidget:
 
 def _build_processing_smoothing_widget(window) -> QWidget:
     smoothing_widget = _build_processing_two_row_grid(
+        window,
         "Smoothing",
         [
             ("Temporal", "Temporal smoothing of displayed processed spectra.", window.temporal_smoothing_spin),
@@ -290,7 +293,7 @@ def _build_processing_smoothing_widget(window) -> QWidget:
     smoothing_widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
     return smoothing_widget
 def _build_processing_fitting_widget(window) -> QWidget:
-    fitting_widget = QWidget()
+    fitting_widget = QWidget(window)
     fitting_layout = QGridLayout()
     fitting_layout.setContentsMargins(0, 0, 0, 0)
     fitting_layout.setHorizontalSpacing(SPECTRA_PROCESSING_SECTION_H_SPACING)
@@ -314,7 +317,7 @@ def _build_processing_fitting_widget(window) -> QWidget:
     order_title = QLabel("Order")
     order_title.setToolTip("Polynomial order used when polynomial fitting is selected.")
     fitting_layout.addWidget(order_title, 0, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
-    order_row = QWidget()
+    order_row = QWidget(window)
     order_layout = QHBoxLayout()
     order_layout.setContentsMargins(0, 0, 0, 0)
     order_layout.setSpacing(6)
@@ -344,13 +347,14 @@ def _build_processing_fitting_widget(window) -> QWidget:
 
 
 def _build_processing_two_row_grid(
+    window,
     section_label: str,
     specs: list[tuple[str | QLabel, str, QWidget]],
     *,
     section_tooltip: str = "",
     section_label_tooltip: str = "",
 ) -> QWidget:
-    widget = QWidget()
+    widget = QWidget(window)
     grid = QGridLayout()
     grid.setContentsMargins(0, 0, 0, 0)
     grid.setHorizontalSpacing(SPECTRA_PROCESSING_SECTION_H_SPACING)

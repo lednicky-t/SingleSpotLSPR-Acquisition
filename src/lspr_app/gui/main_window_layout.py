@@ -22,7 +22,7 @@ from lspr_app.gui.main_window_headers import update_source_tab_headers, update_s
 
 
 def build_recording_context_row_for(window) -> QWidget:
-    panel = QWidget()
+    panel = QWidget(window)
     panel.setObjectName("recordingContextPanel")
     layout = QHBoxLayout()
     layout.setContentsMargins(6, 0, 6, 0)
@@ -64,7 +64,7 @@ def build_main_layout_for(window) -> None:
 
     spectra_processing_group = build_spectra_processing_group(window)
 
-    source_block = QWidget()
+    source_block = QWidget(window)
     source_layout = QVBoxLayout()
     source_layout.setContentsMargins(0, 0, 0, 0)
     source_layout.setSpacing(6)
@@ -93,17 +93,19 @@ def build_main_layout_for(window) -> None:
     trace_title.setStyleSheet("color: #8FE3A1;")
     window.sensorgram_content_mode_button.clicked.connect(window._cycle_sensorgram_content_mode)
     window._update_sensorgram_content_mode_button()
+    window._update_sensorgram_metric_y_axis_mode_button()
     window.sensorgram_settings_button.clicked.connect(window._show_sensorgram_plot_settings_dialog)
 
     trace_title_row = QHBoxLayout()
     trace_title_row.setContentsMargins(0, 0, 0, 0)
     trace_title_row.setSpacing(6)
     trace_title_row.addWidget(trace_title)
+    trace_title_row.addWidget(window.sensorgram_metric_y_axis_mode_button)
     trace_title_row.addStretch(1)
     trace_title_hide_button = _make_hide_panel_button(window, "Hide sensorgram.")
     trace_title_hide_button.clicked.connect(lambda _checked=False: window._toggle_sensorgram(False))
     trace_title_row.addWidget(trace_title_hide_button)
-    trace_title_row_widget = QWidget()
+    trace_title_row_widget = QWidget(window)
     trace_title_row_widget.setLayout(trace_title_row)
     trace_title_row_widget.setContentsMargins(0, 0, 0, 0)
 
@@ -126,7 +128,7 @@ def build_main_layout_for(window) -> None:
     trace_metrics_row.setContentsMargins(0, 0, 0, 0)
     trace_metrics_row.setSpacing(6)
     trace_metrics_row.addWidget(window.trace_stats_label, 1)
-    trace_metrics_widget = QWidget()
+    trace_metrics_widget = QWidget(window)
     trace_metrics_widget.setLayout(trace_metrics_row)
     trace_metrics_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
@@ -136,7 +138,7 @@ def build_main_layout_for(window) -> None:
     trace_noise_row.addWidget(QLabel("Noise"))
     trace_noise_row.addWidget(window.trace_noise_window_spin)
     trace_noise_row.addWidget(window.trace_noise_summary_label, 1)
-    trace_noise_widget = QWidget()
+    trace_noise_widget = QWidget(window)
     trace_noise_widget.setLayout(trace_noise_row)
     trace_noise_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
@@ -147,7 +149,7 @@ def build_main_layout_for(window) -> None:
     trace_noise_cursor_row.addStretch(1)
     trace_noise_cursor_row.addWidget(window.trace_cursor_label, 0, Qt.AlignmentFlag.AlignRight)
 
-    trace_noise_cursor_widget = QWidget()
+    trace_noise_cursor_widget = QWidget(window)
     trace_noise_cursor_widget.setLayout(trace_noise_cursor_row)
     trace_noise_cursor_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
@@ -157,11 +159,11 @@ def build_main_layout_for(window) -> None:
     trace_noise_widget.setFixedHeight(trace_noise_widget.sizeHint().height())
     trace_noise_cursor_widget.setFixedHeight(max(trace_noise_widget.sizeHint().height(), window.trace_cursor_label.sizeHint().height()))
 
-    trace_left_widget = QWidget()
+    trace_left_widget = QWidget(window)
     trace_left_widget.setLayout(trace_left_field)
     trace_left_widget.setMinimumWidth(160)
     trace_left_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-    trace_right_widget = QWidget()
+    trace_right_widget = QWidget(window)
     trace_right_widget.setLayout(trace_right_field)
     trace_right_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
@@ -200,7 +202,7 @@ def build_main_layout_for(window) -> None:
     session_top_row.addWidget(window.session_stats_save_button)
     session_top_row.addWidget(window.session_stats_record_button)
 
-    session_block = QWidget()
+    session_block = QWidget(window)
     session_layout = QVBoxLayout()
     session_layout.setContentsMargins(0, 0, 0, 0)
     session_layout.setSpacing(4)
@@ -221,7 +223,7 @@ def build_main_layout_for(window) -> None:
     log_header_row.addWidget(window.log_follow_button)
     log_header_row.addWidget(window.log_copy_button)
     log_header_row.addWidget(window.log_clear_button)
-    log_block = QWidget()
+    log_block = QWidget(window)
     log_layout = QVBoxLayout()
     log_layout.setContentsMargins(0, 0, 0, 0)
     log_layout.setSpacing(4)
@@ -241,7 +243,7 @@ def build_main_layout_for(window) -> None:
     left_panel = QVBoxLayout()
     left_panel.setSpacing(6)
     left_panel.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
-    tool_panel_title_row = QWidget()
+    tool_panel_title_row = QWidget(window)
     tool_panel_title_layout = QHBoxLayout()
     tool_panel_title_layout.setContentsMargins(0, 0, 0, 0)
     tool_panel_title_layout.setSpacing(6)
@@ -262,11 +264,11 @@ def build_main_layout_for(window) -> None:
     left_panel.addWidget(log_section)
     left_panel.addStretch(1)
 
-    left_widget = QWidget()
+    left_widget = QWidget(window)
     left_widget.setLayout(left_panel)
     left_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
 
-    left_scroll = QScrollArea()
+    left_scroll = QScrollArea(window)
     left_scroll.setWidgetResizable(True)
     left_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
     left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -275,11 +277,11 @@ def build_main_layout_for(window) -> None:
     left_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
     window._left_controls_scroll = left_scroll
 
-    spectrum_block = QWidget()
+    spectrum_block = QWidget(window)
     spectrum_layout = QVBoxLayout()
     spectrum_layout.setContentsMargins(0, 0, 0, 0)
     spectrum_layout.setSpacing(4)
-    spectrum_header_row = QWidget()
+    spectrum_header_row = QWidget(window)
     spectrum_header_layout = QHBoxLayout()
     spectrum_header_layout.setContentsMargins(0, 0, 0, 0)
     spectrum_header_layout.setSpacing(6)
@@ -293,7 +295,7 @@ def build_main_layout_for(window) -> None:
     spectrum_header_layout.addWidget(spectrum_header)
     spectrum_header_layout.addStretch(1)
     spectrum_header_hide_button = _make_hide_panel_button(window, "Hide processed spectra.")
-    spectrum_header_hide_button.clicked.connect(lambda _checked=False: window._activate_flow_view())
+    spectrum_header_hide_button.clicked.connect(lambda _checked=False: window._activate_experiment_control_view())
     spectrum_header_layout.addWidget(spectrum_header_hide_button)
     spectrum_header_row.setLayout(spectrum_header_layout)
     spectrum_layout.addWidget(spectrum_header_row)
@@ -304,7 +306,7 @@ def build_main_layout_for(window) -> None:
     window._spectra_block = spectrum_block
     spectrum_block.installEventFilter(window)
 
-    trace_block = QWidget()
+    trace_block = QWidget(window)
     trace_layout = QVBoxLayout()
     trace_layout.setContentsMargins(0, 0, 0, 0)
     trace_layout.setSpacing(4)
@@ -315,21 +317,21 @@ def build_main_layout_for(window) -> None:
     window._sensorgram_block = trace_block
     trace_block.installEventFilter(window)
 
-    measurement_top_host = QWidget()
+    measurement_top_host = QWidget(window)
     measurement_top_layout = QVBoxLayout()
     measurement_top_layout.setContentsMargins(0, 0, 0, 0)
     measurement_top_layout.setSpacing(0)
     measurement_top_host.setLayout(measurement_top_layout)
     measurement_top_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
-    measurement_bottom_left_host = QWidget()
+    measurement_bottom_left_host = QWidget(window)
     measurement_bottom_left_layout = QVBoxLayout()
     measurement_bottom_left_layout.setContentsMargins(0, 0, 0, 0)
     measurement_bottom_left_layout.setSpacing(0)
     measurement_bottom_left_host.setLayout(measurement_bottom_left_layout)
     measurement_bottom_left_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-    measurement_bottom_right_host = QWidget()
+    measurement_bottom_right_host = QWidget(window)
     measurement_bottom_right_layout = QVBoxLayout()
     measurement_bottom_right_layout.setContentsMargins(0, 0, 0, 0)
     measurement_bottom_right_layout.setSpacing(0)
@@ -360,7 +362,7 @@ def build_main_layout_for(window) -> None:
     measurement_vertical_splitter.setSizes([360, 540])
     measurement_vertical_splitter.splitterMoved.connect(lambda *_: window._schedule_ui_state_persist())
 
-    measurement_page = QWidget()
+    measurement_page = QWidget(window)
     measurement_page.setObjectName("measurementLayoutPage")
     measurement_page_layout = QVBoxLayout()
     measurement_page_layout.setContentsMargins(0, 0, 0, 0)
@@ -377,7 +379,8 @@ def build_main_layout_for(window) -> None:
 
     window._top_content_stack = QStackedWidget()
     window._top_content_stack.addWidget(spectrum_block)
-    window._experiment_control_panel_placeholder = QWidget()
+    window._experiment_control_panel_placeholder = QWidget(window)
+    window._experiment_control_panel_placeholder.setVisible(False)
     window._flow_panel_placeholder = window._experiment_control_panel_placeholder
     window._top_content_stack.addWidget(window._experiment_control_panel_placeholder)
     window._top_content_stack.setCurrentIndex(0)
@@ -393,7 +396,7 @@ def build_main_layout_for(window) -> None:
     window._window_size_grip = QSizeGrip(window)
     window._window_size_grip.setToolTip("Drag to resize the window.")
     footer_bar.addWidget(window._window_size_grip, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
-    footer_widget = QWidget()
+    footer_widget = QWidget(window)
     footer_widget.setContentsMargins(0, 0, 0, 0)
     footer_widget.setLayout(footer_bar)
     footer_widget.setObjectName("mainWindowStatusFooter")
@@ -423,7 +426,7 @@ def build_main_layout_for(window) -> None:
     right_panel.addWidget(right_content_stack, 1)
     right_panel.addWidget(footer_widget, 0)
 
-    right_widget = QWidget()
+    right_widget = QWidget(window)
     right_widget.setLayout(right_panel)
     right_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -450,7 +453,7 @@ def build_main_layout_for(window) -> None:
     root_layout.addWidget(splitter, 1)
     root_layout.addWidget(footer_widget, 0)
 
-    container = QWidget()
+    container = QWidget(window)
     container.setLayout(root_layout)
     window._main_content_widget = container
     container.installEventFilter(window)

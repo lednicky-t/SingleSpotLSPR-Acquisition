@@ -1047,7 +1047,7 @@ class ExperimentControlDialogs:
             """ % self._theme_palette
         )
 
-        top_bar = QWidget()
+        top_bar = QWidget(dialog)
         top_bar.setObjectName("paletteDialogBar")
         top_bar_layout = QHBoxLayout()
         top_bar_layout.setContentsMargins(0, 0, 0, 0)
@@ -1300,7 +1300,7 @@ class ExperimentControlDialogs:
             """ % self._theme_palette
         )
 
-        top_bar = QWidget()
+        top_bar = QWidget(dialog)
         top_bar.setObjectName("pauseStateDialogBar")
         top_bar_layout = QHBoxLayout()
         top_bar_layout.setContentsMargins(0, 0, 0, 0)

@@ -176,10 +176,7 @@ def render_residual_display(window, x_values: np.ndarray, residual_values: np.nd
                 pass
     window.residual_curve.setData(x=x, y=y)
     window.residual_curve.setPen(pg.mkPen("#8a8a8a", width=1.0))
-    window.residual_curve.setSymbol("o")
-    window.residual_curve.setSymbolSize(4)
-    window.residual_curve.setSymbolBrush(pg.mkBrush("#c7c7c7"))
-    window.residual_curve.setSymbolPen(pg.mkPen("#666666", width=0.8))
+    window.residual_curve.setSymbol(None)
 
 
 def update_residual_view_geometry(window) -> None:

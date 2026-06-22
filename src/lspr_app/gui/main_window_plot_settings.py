@@ -250,7 +250,7 @@ class MetricModeSelector(QWidget):
             color_button = MetricColorButton(metric_color)
             color_button.colorChanged.connect(lambda color, metric=mode: self._on_color_changed(metric, color))
 
-            star_label = QToolButton()
+            star_label = QToolButton(self)
             star_label.setFixedSize(22, 22)
             star_label.setAutoRaise(True)
             star_label.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
@@ -263,7 +263,7 @@ class MetricModeSelector(QWidget):
             )
             star_label.clicked.connect(lambda _checked=False, metric=mode: self._on_primary_clicked(metric))
 
-            checkbox = QCheckBox()
+            checkbox = QCheckBox(self)
             checkbox.setFixedHeight(22)
             checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
             checkbox.setToolTip("Include this metric in the sensorgram display and statistics.")
@@ -630,7 +630,7 @@ class SensorgramPlotSettingsDialog(QDialog):
         self.metric_mode_selector.selectionChanged.connect(self._on_metric_mode_selection_changed)
         outer.addWidget(self.metric_mode_selector)
 
-        self.control_overlay_style_combo = QComboBox()
+        self.control_overlay_style_combo = QComboBox(self)
         self.control_overlay_style_combo.addItem("Compact", "bar")
         self.control_overlay_style_combo.addItem("Full", "background")
         self.control_overlay_style_combo.setCurrentIndex(
@@ -724,7 +724,7 @@ class SensorgramPlotSettingsDialog(QDialog):
             "Enable anti-aliasing for sensorgram drawing."
         )
 
-        self.line_mode_combo = QComboBox()
+        self.line_mode_combo = QComboBox(self)
         for option in _LINE_MODE_OPTIONS:
             self.line_mode_combo.addItem(option.label, option.step_mode)
         current_step_mode = _normalize_line_mode(getattr(self._window, "_sensorgram_line_step_mode", None))
@@ -750,7 +750,7 @@ class SensorgramPlotSettingsDialog(QDialog):
         self.line_width_spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.line_width_spin.setFixedWidth(62)
 
-        self.follow_latest_buffer_combo = QComboBox()
+        self.follow_latest_buffer_combo = QComboBox(self)
         current_buffer_fraction = getattr(self._window, "_metric_autoscale_follow_latest_buffer_fraction", 0.05)
         if current_buffer_fraction is None:
             current_buffer_fraction = 0.0
@@ -774,7 +774,7 @@ class SensorgramPlotSettingsDialog(QDialog):
             "Keep a blank buffer on the right side of the sensorgram plot so new data does not immediately touch the edge."
         )
 
-        self.autoscale_throttle_combo = QComboBox()
+        self.autoscale_throttle_combo = QComboBox(self)
         current_throttle_s = getattr(self._window, "_metric_autoscale_min_interval_s", 1.0)
         try:
             current_throttle_s = float(current_throttle_s)

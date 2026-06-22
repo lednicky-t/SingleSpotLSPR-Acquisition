@@ -150,7 +150,7 @@ from lspr_app.gui.main_window_lifecycle import (
     acquisition_state_payload_for,
     collapsible_section_state_for,
     disconnect_all_devices_for,
-    ensure_flow_panel_for,
+    ensure_experiment_control_panel_for,
     finish_hardware_initialization_for,
     handle_hardware_init_finished_for,
     handle_hardware_init_step_for,
@@ -172,9 +172,11 @@ from lspr_app.gui.main_window_logging_ui import initialize_logging_ui_for
 from lspr_app.gui.main_window_sensorgram import (
     apply_sensorgram_content_mode,
     apply_sensorgram_metric_selection,
+    apply_sensorgram_metric_y_axis_mode,
     apply_sensorgram_time_axis_mode,
     append_sensorgram_heatmap_history,
     cycle_sensorgram_content_mode,
+    cycle_sensorgram_metric_y_axis_mode,
     cycle_trace_stats_metric,
     normalize_sensorgram_content_mode,
     normalize_sensorgram_line_mode,
@@ -184,6 +186,7 @@ from lspr_app.gui.main_window_sensorgram import (
     trace_stats_metric as trace_stats_metric_for_sensorgram,
     toggle_sensorgram_time_axis_mode,
     update_sensorgram_content_mode_button,
+    update_sensorgram_metric_y_axis_mode_button,
 )
 from lspr_app.gui.main_window_sensorgram_archive import (
     apply_sensorgram_display_style,
@@ -217,9 +220,8 @@ from lspr_app.gui.main_window_sensorgram_overlay import (
 )
 from lspr_app.gui.main_window_state import (
     acquisition_state_payload,
-    activate_experiment_control_view,
     activate_experimental_control_view,
-    activate_flow_view,
+    activate_experiment_control_view,
     activate_spectra_view,
     apply_acquisition_state_to_widgets,
     apply_layout_preset,
@@ -236,7 +238,6 @@ from lspr_app.gui.main_window_state import (
     set_metric_plot_enabled,
     set_sensorgram_heatmap_enabled,
     show_experimental_control_only,
-    show_flow_only,
     show_plots_only,
     show_split_view,
     sync_diagnostics_panel_action,
@@ -244,7 +245,6 @@ from lspr_app.gui.main_window_state import (
     sync_view_actions,
     toggle_diagnostics_panel,
     toggle_experimental_control_panel_visibility,
-    toggle_flow_panel_visibility,
     toggle_left_controls,
     toggle_sensorgram,
     launch_profile_settings,
@@ -894,6 +894,7 @@ class MainWindow(QMainWindow):
         self._sensorgram_settings_dialog = None
         self._sensorgram_content_mode = "metric"
         self._sensorgram_time_axis_mode = "elapsed"
+        self._sensorgram_metric_y_axis_mode = "auto"
         self._sensorgram_axis_started_at: datetime | None = None
         self._sensorgram_line_step_mode = None
         self._sensorgram_line_width_px = 2.2
@@ -905,6 +906,13 @@ class MainWindow(QMainWindow):
         )
         self.sensorgram_content_mode_button.setCheckable(True)
         self.sensorgram_content_mode_button.setVisible(False)
+        self.sensorgram_metric_y_axis_mode_button = QToolButton(self)
+        self.sensorgram_metric_y_axis_mode_button.setObjectName("sensorgramYAxisModeButton")
+        self.sensorgram_metric_y_axis_mode_button.setAutoRaise(True)
+        self.sensorgram_metric_y_axis_mode_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.sensorgram_metric_y_axis_mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sensorgram_metric_y_axis_mode_button.clicked.connect(self._cycle_sensorgram_metric_y_axis_mode)
+        self._update_sensorgram_metric_y_axis_mode_button()
         self.sensorgram_settings_button = self._make_frameless_icon_button(
             tint_tabler_icon(flow_tabler_icon("settings"), QColor("#f0f3f7")),
             "Open sensorgram plot settings.",
@@ -1064,10 +1072,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(QIcon(str(self._brand_icon_path)))
         self.resize(1380, 920)
         self._startup_window_revealed = False
-        try:
-            self.setWindowOpacity(0.0)
-        except Exception:
-            pass
+        self._startup_show_requested = False
         _startup_mark("window flags and icon set")
 
         # Keep live plots responsive by default; the user can enable smoothing from plot settings.
@@ -1141,7 +1146,7 @@ class MainWindow(QMainWindow):
         self.measurement_toggle_button.clicked.connect(self._toggle_measurement_run)
         self.stop_measurement_button.clicked.connect(self._stop_measurement_run)
 
-        self.integration_spin = QDoubleSpinBox()
+        self.integration_spin = QDoubleSpinBox(self)
         make_compact_spinbox(self.integration_spin)
         self.integration_spin.setRange(1.0, 10000.0)
         self.integration_spin.setValue(50.0)
@@ -1150,18 +1155,18 @@ class MainWindow(QMainWindow):
         self.integration_spin.setSingleStep(1.0)
         self.integration_spin.setStepType(QAbstractSpinBox.StepType.AdaptiveDecimalStepType)
 
-        self.averages_spin = QSpinBox()
+        self.averages_spin = QSpinBox(self)
         make_compact_spinbox(self.averages_spin)
         self.averages_spin.setRange(1, 1000)
         self.averages_spin.setValue(3)
 
-        self.auto_integration_button = QPushButton("Auto")
+        self.auto_integration_button = QPushButton("Auto", self)
         self.auto_integration_button.setToolTip("Automatically set integration time.")
         self.auto_integration_button.clicked.connect(self._auto_set_integration_time)
 
-        self.correct_dark_check = QCheckBox("Elec. dark correction")
+        self.correct_dark_check = QCheckBox("Elec. dark correction", self)
         self.correct_dark_check.setChecked(True)
-        self.correct_nonlinearity_check = QCheckBox("Nonlinearity correction")
+        self.correct_nonlinearity_check = QCheckBox("Nonlinearity correction", self)
         self.correct_nonlinearity_check.setChecked(True)
 
         self.acquire_dark_button = self._make_frameless_icon_button(
@@ -1178,7 +1183,7 @@ class MainWindow(QMainWindow):
         self.acquire_dark_button.clicked.connect(lambda: self._request_manual_acquisition("dark"))
         self.acquire_reference_button.clicked.connect(lambda: self._request_manual_acquisition("reference"))
 
-        self.live_rate_spin = InlineWheelDoubleLabel(4.0)
+        self.live_rate_spin = InlineWheelDoubleLabel(4.0, self)
         self.live_rate_spin.setObjectName("liveRateLabel")
         self.live_rate_spin.setRange(0.1, 200.0)
         self.live_rate_spin.setValue(4.0)
@@ -1190,7 +1195,7 @@ class MainWindow(QMainWindow):
             "Lower values skip more display frames and reduce GUI work."
         )
 
-        self.sim_output_rate_spin = QDoubleSpinBox()
+        self.sim_output_rate_spin = QDoubleSpinBox(self)
         make_compact_spinbox(self.sim_output_rate_spin)
         self.sim_output_rate_spin.setRange(0.1, 200.0)
         self.sim_output_rate_spin.setValue(4.0)
@@ -1208,7 +1213,7 @@ class MainWindow(QMainWindow):
             "src = source acquisition rate; disp = GUI display rate; proc = processing time per spectrum; "
             "head = display-period / processing-time; skip = dropped GUI updates per second."
         )
-        self.spectrometer_stats_label = QLabel()
+        self.spectrometer_stats_label = QLabel(self)
         self.spectrometer_stats_label.setWordWrap(False)
         self.spectrometer_stats_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.spectrometer_stats_label.setText("spacing - | rate - | ovh -")
@@ -1229,14 +1234,14 @@ class MainWindow(QMainWindow):
         self.live_estimate.setFont(footer_font)
         self.spectrometer_stats_label.setFont(footer_font)
         self.telemetry_label.setFont(footer_font)
-        self.spectrum_stats_label = QLabel("peak: - | centroid: - | FWHM: - | MSE: - | R: - | S/N: -")
+        self.spectrum_stats_label = QLabel("peak: - | centroid: - | FWHM: - | MSE: - | R: - | S/N: -", self)
         self.spectrum_stats_label.setWordWrap(True)
         self.spectrum_stats_label.setToolTip(
             "Spectrum stats: peak position, centroid, FWHM, fit error (MSE), fit quality (R), and signal-to-noise."
         )
-        self.spectrum_cursor_label = QLabel("cursor: -")
+        self.spectrum_cursor_label = QLabel("cursor: -", self)
         self.spectrum_cursor_label.setToolTip("Spectrum cursor readout under the mouse pointer.")
-        self.trace_stats_label = QLabel("latest: - | min/max: - | span: - | dt -")
+        self.trace_stats_label = QLabel("latest: - | min/max: - | span: - | dt -", self)
         self.trace_stats_label.setWordWrap(False)
         self.trace_stats_label.setTextFormat(Qt.TextFormat.RichText)
         self.trace_stats_label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
@@ -1245,9 +1250,9 @@ class MainWindow(QMainWindow):
         )
         self.trace_stats_label.setCursor(Qt.CursorShape.PointingHandCursor)
         self.trace_stats_label.installEventFilter(self)
-        self.trace_cursor_label = QLabel("cursor: -")
+        self.trace_cursor_label = QLabel("cursor: -", self)
         self.trace_cursor_label.setToolTip("Metric cursor readout under the mouse pointer.")
-        self.trace_noise_window_spin = InlineWheelDoubleLabel(10.0)
+        self.trace_noise_window_spin = InlineWheelDoubleLabel(10.0, self)
         self.trace_noise_window_spin.setObjectName("traceNoiseWindowLabel")
         self.trace_noise_window_spin.setRange(0.5, 600.0)
         self.trace_noise_window_spin.setDecimals(1)
@@ -1256,7 +1261,7 @@ class MainWindow(QMainWindow):
         self.trace_noise_window_spin.setToolTip(
             "Noise window in seconds for the sensorgram trace. Click to focus, then use the mouse wheel or arrow keys."
         )
-        self.trace_noise_summary_label = QLabel("noise: -")
+        self.trace_noise_summary_label = QLabel("noise: -", self)
         self.trace_noise_summary_label.setWordWrap(False)
         self.trace_noise_summary_label.setTextFormat(Qt.TextFormat.RichText)
         self.trace_noise_summary_label.setToolTip("Noise estimate for each trace metric over the selected window.")
@@ -1282,7 +1287,7 @@ class MainWindow(QMainWindow):
         self.sensorgram_freeze_button.setCheckable(True)
         self.sensorgram_freeze_button.toggled.connect(self._set_sensorgram_frozen)
         self._update_sensorgram_freeze_button_icon()
-        self.clear_trace_button = QToolButton()
+        self.clear_trace_button = QToolButton(self)
         self.clear_trace_button.setObjectName("flowStepActionButton")
         self.clear_trace_button.setAutoRaise(True)
         self.clear_trace_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
@@ -1314,10 +1319,10 @@ class MainWindow(QMainWindow):
             "Start recording sensorgram data",
         )
         self.trace_record_button.clicked.connect(self._toggle_measurement_run)
-        self.autoscale_spectrum_button = QPushButton("Auto spectrum")
+        self.autoscale_spectrum_button = QPushButton("Auto spectrum", self)
         self.autoscale_spectrum_button.setObjectName("toolbarButton")
         self.autoscale_spectrum_button.clicked.connect(self._autoscale_spectrum_plot)
-        self.autoscale_trace_button = QPushButton("Auto metric")
+        self.autoscale_trace_button = QPushButton("Auto metric", self)
         self.autoscale_trace_button.setObjectName("toolbarButton")
         self.autoscale_trace_button.clicked.connect(self._autoscale_trace_plot)
 
@@ -1330,12 +1335,12 @@ class MainWindow(QMainWindow):
         self.range_max_spin.setRange(0, 5000)
         self.range_max_spin.setToolTip("Maximum wavelength used for processing and fit range.")
 
-        self.smoothing_method_combo = QComboBox()
+        self.smoothing_method_combo = QComboBox(self)
         self.smoothing_method_combo.addItem("None", "none")
         self.smoothing_method_combo.addItem("Avg", "moving_average")
         self.smoothing_method_combo.addItem("SG", "savitzky_golay")
         self.smoothing_method_combo.setToolTip("Method used to smooth the spectrum before analysis.")
-        self.baseline_method_combo = QComboBox()
+        self.baseline_method_combo = QComboBox(self)
         self.baseline_method_combo.addItems(["none", "linear"])
         self.baseline_method_combo.setToolTip("Method used to estimate and subtract the baseline.")
         self.smoothing_window_spin = QSpinBox()
@@ -1350,7 +1355,7 @@ class MainWindow(QMainWindow):
         self.temporal_smoothing_spin.setToolTip(
             "Average the last N displayed processed spectra before fit and peak extraction. 1 keeps no temporal accumulation."
         )
-        self.crop_method_combo = QComboBox()
+        self.crop_method_combo = QComboBox(self)
         self.crop_method_combo.addItem("Range", "fixed_width")
         self.crop_method_combo.addItem("Thresh", "threshold")
         self.crop_method_combo.setToolTip(
@@ -1366,7 +1371,7 @@ class MainWindow(QMainWindow):
             "Threshold fraction of peak height used when the crop method is set to threshold."
         )
 
-        self.fit_method_combo = QComboBox()
+        self.fit_method_combo = QComboBox(self)
         self.fit_method_combo.addItem("none", "none")
         self.fit_method_combo.addItem("poly", "poly")
         self.fit_method_combo.addItem("Gauss", "gaussian")
@@ -1396,20 +1401,20 @@ class MainWindow(QMainWindow):
         self.crop_parameter_stack = QStackedWidget()
         self.crop_parameter_stack.addWidget(self.fit_window_spin)
         self.crop_parameter_stack.addWidget(self.crop_fraction_spin)
-        self.analysis_resolution_spin = QComboBox()
+        self.analysis_resolution_spin = QComboBox(self)
         populate_analysis_resolution_combo(self.analysis_resolution_spin)
         self.analysis_resolution_spin.setCurrentIndex(2)
         self.analysis_resolution_spin.setEditable(False)
         self.analysis_resolution_spin.setToolTip(
             "Resolution used for peak and centroid analysis. Lower values improve sub-sample tracking but cost more CPU."
         )
-        self.metric_mode_combo = QComboBox()
+        self.metric_mode_combo = QComboBox(self)
         self.metric_mode_combo.addItems(["smoothed_max", "poly_max", "gaussian_center", "centroid"])
         self.metric_mode_combo.setToolTip("Choose which spectrum tracking metric is shown in the metric plot and summary.")
-        self.trace_max_check = QCheckBox("Max")
-        self.trace_centroid_check = QCheckBox("Centroid")
-        self.trace_poly_check = QCheckBox("Poly")
-        self.trace_gaussian_check = QCheckBox("Gauss")
+        self.trace_max_check = QCheckBox("Max", self)
+        self.trace_centroid_check = QCheckBox("Centroid", self)
+        self.trace_poly_check = QCheckBox("Poly", self)
+        self.trace_gaussian_check = QCheckBox("Gauss", self)
         self.trace_max_check.setObjectName("traceMaxCheck")
         self.trace_centroid_check.setObjectName("traceCentroidCheck")
         self.trace_poly_check.setObjectName("tracePolyCheck")
@@ -1448,22 +1453,22 @@ class MainWindow(QMainWindow):
         self.sim_resolution_spin.setSingleStep(0.01)
         self.sim_resolution_spin.setSuffix(" nm")
         self.sim_resolution_spin.setValue(self._default_simulation_resolution_nm())
-        self.sim_peak_center_value = QLabel()
-        self.sim_peak_width_value = QLabel()
-        self.sim_peak_height_value = QLabel()
-        self.sim_secondary_peak_offset_value = QLabel()
-        self.sim_secondary_peak_height_value = QLabel()
-        self.sim_secondary_peak_width_value = QLabel()
-        self.sim_baseline_value = QLabel()
-        self.sim_slope_value = QLabel()
-        self.sim_noise_value = QLabel()
+        self.sim_peak_center_value = QLabel(self)
+        self.sim_peak_width_value = QLabel(self)
+        self.sim_peak_height_value = QLabel(self)
+        self.sim_secondary_peak_offset_value = QLabel(self)
+        self.sim_secondary_peak_height_value = QLabel(self)
+        self.sim_secondary_peak_width_value = QLabel(self)
+        self.sim_baseline_value = QLabel(self)
+        self.sim_slope_value = QLabel(self)
+        self.sim_noise_value = QLabel(self)
 
-        self.plot_selector = QComboBox()
+        self.plot_selector = QComboBox(self)
         self.plot_selector.addItems(self.PLOT_MODES.keys())
         self.plot_selector.setCurrentText("Sample")
         self.plot_selector.currentTextChanged.connect(self._refresh_plot)
 
-        self.source_tabs = QTabWidget()
+        self.source_tabs = QTabWidget(self)
         _startup_mark("building source tabs")
         self.source_tabs.addTab(self._build_spectrometer_page(), "Spectrometer")
         self.source_tabs.addTab(self._build_simulation_page(), "Simulation")
@@ -1539,10 +1544,7 @@ class MainWindow(QMainWindow):
         self.residual_curve.setDownsampling(auto=False, ds=1)
         self.residual_curve.setSkipFiniteCheck(True)
         self.residual_curve.setPen(pg.mkPen("#8a8a8a", width=1.0))
-        self.residual_curve.setSymbol("o")
-        self.residual_curve.setSymbolSize(4)
-        self.residual_curve.setSymbolBrush(pg.mkBrush("#c7c7c7"))
-        self.residual_curve.setSymbolPen(pg.mkPen("#666666", width=0.8))
+        self.residual_curve.setSymbol(None)
         self.processing_region_item = pg.LinearRegionItem(values=(0, 1), movable=False, brush=pg.mkBrush(90, 160, 255, 30), pen=pg.mkPen(None))
         self.fit_region_item = pg.LinearRegionItem(values=(0, 1), movable=False, brush=pg.mkBrush(255, 180, 80, 40), pen=pg.mkPen(None))
         self.spectrum_plot.addItem(self.processing_region_item)
@@ -1744,7 +1746,8 @@ class MainWindow(QMainWindow):
         _startup_mark("menu bar built")
         self._sync_view_actions()
         self._flow_panel_bootstrap_pending = False
-        _startup_mark("experimental control panel bootstrap deferred")
+        self._experiment_control_panel_bootstrap_pending = False
+        _startup_mark("experiment control panel bootstrap deferred")
         self.log_clear_button.clicked.connect(self._clear_log_terminal)
         self.log_copy_button.clicked.connect(self._copy_log_terminal)
         self.log_follow_button.toggled.connect(self._set_log_following)
@@ -1799,11 +1802,20 @@ class MainWindow(QMainWindow):
         if self._experiment_control_window is not None:
             self._experiment_control_window._ui_startup_ready = True
         if self._experiment_control_window is None:
-            self._ensure_flow_panel()
+            self._ensure_experimental_control_panel()
+        pending_layout_preset = getattr(self, "_pending_layout_preset_selected", None)
+        if pending_layout_preset is not None:
+            self._pending_layout_preset_selected = None
+            QTimer.singleShot(
+                0,
+                lambda preset_key=pending_layout_preset: apply_layout_preset(self, preset_key, save=False),
+            )
         if getattr(self, "_pending_top_view_mode", None) in {"flow", "experimental_control"}:
             self._pending_top_view_mode = None
             QTimer.singleShot(0, self._activate_experimental_control_view)
         _startup_mark("startup wiring complete")
+        if bool(getattr(self, "_startup_show_requested", False)):
+            QTimer.singleShot(0, self._complete_startup_show)
 
     def _initialize_logging_ui(self) -> None:
         initialize_logging_ui_for(self)
@@ -2091,6 +2103,7 @@ class MainWindow(QMainWindow):
             }
             QToolButton#sensorgramViewModeButton,
             QToolButton#sensorgramContentModeButton,
+            QToolButton#sensorgramYAxisModeButton,
             QToolButton#sensorgramWindowButton {
                 background: transparent;
                 border: none;
@@ -2101,12 +2114,14 @@ class MainWindow(QMainWindow):
             }
             QToolButton#sensorgramViewModeButton:hover,
             QToolButton#sensorgramContentModeButton:hover,
+            QToolButton#sensorgramYAxisModeButton:hover,
             QToolButton#sensorgramWindowButton:hover {
                 background: transparent;
                 border: none;
             }
             QToolButton#sensorgramViewModeButton:pressed,
             QToolButton#sensorgramContentModeButton:pressed,
+            QToolButton#sensorgramYAxisModeButton:pressed,
             QToolButton#sensorgramWindowButton:pressed {
                 background: transparent;
                 border: none;
@@ -2762,10 +2777,10 @@ class MainWindow(QMainWindow):
                         f"{stack_widget.__class__.__name__}(objectName={stack_widget.objectName()!r}, "
                         f"visible={stack_widget.isVisible()}, window={stack_widget.isWindow()})"
                     )
-            flow_widget = getattr(self, "_experiment_control_window", None)
-            flow_widget_text = (
-                f"{flow_widget.__class__.__name__}(visible={flow_widget.isVisible()}, window={flow_widget.isWindow()})"
-                if flow_widget is not None
+            experiment_control_widget = getattr(self, "_experiment_control_window", None)
+            experiment_control_widget_text = (
+                f"{experiment_control_widget.__class__.__name__}(visible={experiment_control_widget.isVisible()}, window={experiment_control_widget.isWindow()})"
+                if experiment_control_widget is not None
                 else "None"
             )
             top_level_summary: list[str] = []
@@ -2784,8 +2799,8 @@ class MainWindow(QMainWindow):
                 f"top_view={getattr(self, '_top_view_mode', '-')} | "
                 f"stack_index={stack_index} | "
                 f"stack_current={current_widget or '-'} | "
-                f"flow_widget={flow_widget_text} | "
-                f"flow_bootstrap_pending={bool(getattr(self, '_flow_panel_bootstrap_pending', False))} | "
+                f"experiment_control_widget={experiment_control_widget_text} | "
+                f"experiment_control_bootstrap_pending={bool(getattr(self, '_experiment_control_panel_bootstrap_pending', getattr(self, '_flow_panel_bootstrap_pending', False)))} | "
                 f"ui_startup_ready={bool(getattr(self, '_ui_startup_ready', False))} | "
                 f"stack_pages=[{' ; '.join(stack_pages) if stack_pages else '-'}] | "
                 f"top_levels=[{' ; '.join(top_level_summary) if top_level_summary else '-'}]"
@@ -2798,7 +2813,7 @@ class MainWindow(QMainWindow):
 
     def _top_content_stack_diagnostics(self) -> dict[str, object]:
         stack = getattr(self, "_top_content_stack", None)
-        flow_widget = getattr(self, "_experiment_control_window", None)
+        experiment_control_widget = getattr(self, "_experiment_control_window", None)
         placeholder = getattr(self, "_experiment_control_panel_placeholder", None)
         spectra_block = getattr(self, "_spectra_block", None)
         pages: list[dict[str, object]] = []
@@ -2815,7 +2830,7 @@ class MainWindow(QMainWindow):
                     continue
                 if page is spectra_block:
                     label = "spectra"
-                elif page is flow_widget:
+                elif page is experiment_control_widget:
                     label = "experimental_control"
                 elif page is placeholder:
                     label = "placeholder"
@@ -2834,13 +2849,13 @@ class MainWindow(QMainWindow):
         else:
             current_index = -1
             count = 0
-        flow_index = -1
+        experiment_control_index = -1
         placeholder_index = -1
         spectra_index = -1
         if stack is not None:
             try:
-                if flow_widget is not None:
-                    flow_index = int(stack.indexOf(flow_widget))
+                if experiment_control_widget is not None:
+                    experiment_control_index = int(stack.indexOf(experiment_control_widget))
                 if placeholder is not None:
                     placeholder_index = int(stack.indexOf(placeholder))
                 if spectra_block is not None:
@@ -2857,8 +2872,8 @@ class MainWindow(QMainWindow):
             ),
             "top_content_stack_page_count": count,
             "top_content_stack_pages": pages,
-            "experiment_control_window_exists": flow_widget is not None,
-            "experiment_control_window_index": flow_index,
+            "experiment_control_window_exists": experiment_control_widget is not None,
+            "experiment_control_window_index": experiment_control_index,
             "placeholder_index": placeholder_index,
             "spectra_block_index": spectra_index,
         }
@@ -2976,13 +2991,31 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self._close_startup_splash)
 
     def _reveal_startup_window(self) -> None:
+        self._complete_startup_show()
+
+    def _complete_startup_show(self) -> None:
+        if not bool(getattr(self, "_startup_show_requested", False)):
+            return
         if getattr(self, "_startup_window_revealed", False):
             return
+        startup_show_t0 = getattr(self, "_startup_show_requested_t0", None)
+        if startup_show_t0 is not None:
+            self._log_info(
+                f"Startup +{(perf_counter() - startup_show_t0) * 1000.0:.1f} ms: completing startup show"
+            )
         self._startup_window_revealed = True
-        try:
-            self.setWindowOpacity(1.0)
-        except Exception:
-            pass
+        if bool(getattr(self, "_start_maximized", False)):
+            self._screen_fitted = True
+            self.showMaximized()
+        else:
+            if not getattr(self, "_screen_fitted", False):
+                self._fit_window_to_available_screen()
+                self._screen_fitted = True
+            self.show()
+        splash = getattr(self, "_startup_splash", None)
+        if splash is not None and not getattr(self, "_startup_splash_close_scheduled", False):
+            self._startup_splash_close_scheduled = True
+            QTimer.singleShot(200, self._close_startup_splash)
 
     def _close_startup_splash(self) -> None:
         splash = getattr(self, "_startup_splash", None)
@@ -3051,28 +3084,31 @@ class MainWindow(QMainWindow):
         apply_acquisition_state_to_widgets(self, state)
 
     def _open_experiment_control_window(self) -> None:
-        self._activate_flow_view()
+        self._activate_experiment_control_view()
 
     def _open_experimental_control_window(self) -> None:
         self._open_experiment_control_window()
 
     def _toggle_flow_panel_visibility(self, checked: bool | None = None) -> None:
-        toggle_flow_panel_visibility(self, checked)
+        self._toggle_experimental_control_panel_visibility(checked)
 
     def _toggle_experimental_control_panel_visibility(self, checked: bool | None = None) -> None:
         toggle_experimental_control_panel_visibility(self, checked)
 
     def _ensure_flow_panel(self) -> None:
-        ensure_flow_panel_for(self)
+        self._ensure_experimental_control_panel()
 
     def _ensure_experimental_control_panel(self) -> None:
-        self._ensure_flow_panel()
+        ensure_experiment_control_panel_for(self)
+
+    def _ensure_experiment_control_panel(self) -> None:
+        self._ensure_experimental_control_panel()
 
     def _sync_main_view_visibility(self) -> None:
         sync_main_view_visibility(self)
 
     def _show_flow_only(self) -> None:
-        show_flow_only(self)
+        self._show_experimental_control_only()
 
     def _show_experimental_control_only(self) -> None:
         show_experimental_control_only(self)
@@ -3096,10 +3132,10 @@ class MainWindow(QMainWindow):
         activate_spectra_view(self)
 
     def _activate_flow_view(self) -> None:
-        self._ensure_flow_panel()
-        activate_flow_view(self)
+        self._activate_experimental_control_view()
 
     def _activate_experiment_control_view(self) -> None:
+        self._ensure_experimental_control_panel()
         activate_experiment_control_view(self)
 
     def _activate_experimental_control_view(self) -> None:
@@ -5027,6 +5063,15 @@ class MainWindow(QMainWindow):
 
     def _cycle_sensorgram_content_mode(self) -> None:
         cycle_sensorgram_content_mode(self)
+
+    def _update_sensorgram_metric_y_axis_mode_button(self) -> None:
+        update_sensorgram_metric_y_axis_mode_button(self)
+
+    def _apply_sensorgram_metric_y_axis_mode(self, mode: object, *, save: bool = False) -> None:
+        apply_sensorgram_metric_y_axis_mode(self, mode, save=save)
+
+    def _cycle_sensorgram_metric_y_axis_mode(self) -> None:
+        cycle_sensorgram_metric_y_axis_mode(self)
 
     def _append_sensorgram_heatmap_history(self, spectrum: Spectrum | None) -> None:
         append_sensorgram_heatmap_history(self, spectrum)

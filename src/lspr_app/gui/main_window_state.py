@@ -144,6 +144,16 @@ def _infer_layout_preset_from_current_state(window) -> str:
     return "spectra"
 
 
+def _default_layout_preset_for_launch_profile(window) -> str:
+    profile = launch_profile_settings(window)
+    profile_key = str(getattr(profile, "key", "") or "").strip().lower()
+    if profile_key == LAUNCH_PROFILE_CONTROL_EDITOR:
+        return "control"
+    if profile_key == LAUNCH_PROFILE_SIMULATION:
+        return "spectra"
+    return "spectra"
+
+
 def load_layout_presets(window) -> dict[str, dict[str, object]]:
     ui_state = window._ui_state if isinstance(getattr(window, "_ui_state", None), dict) else {}
     presets = ui_state.get("layout_presets")
@@ -152,7 +162,10 @@ def load_layout_presets(window) -> dict[str, dict[str, object]]:
         for key in LAYOUT_PRESET_KEYS:
             result[key] = _coerce_layout_preset_snapshot(key, presets.get(key))
     window._layout_presets = result
-    selected = normalize_layout_preset_key(ui_state.get("layout_preset_selected"))
+    if "layout_preset_selected" in ui_state:
+        selected = normalize_layout_preset_key(ui_state.get("layout_preset_selected"))
+    else:
+        selected = _default_layout_preset_for_launch_profile(window)
     window._layout_preset_selected = selected
     window._layout_preset_active_variant = str(result.get(selected, {}).get("layout_variant", "standard"))
     return result
@@ -391,9 +404,9 @@ def _apply_standard_layout_preset(window, preset_key: str, snapshot: dict[str, o
 
 
 def _apply_measurement_layout_preset(window, snapshot: dict[str, object]) -> None:
-    from lspr_app.gui.main_window_lifecycle import ensure_flow_panel_for
+    from lspr_app.gui.main_window_lifecycle import ensure_experiment_control_panel_for
 
-    ensure_flow_panel_for(window)
+    ensure_experiment_control_panel_for(window)
     _ensure_measurement_layout_page(window)
     measurement_top_host = getattr(window, "_measurement_top_host", None)
     measurement_left_host = getattr(window, "_measurement_bottom_left_host", None)
@@ -570,31 +583,32 @@ def ensure_experimental_control_stack_page(window):
     if stack is None:
         return None
     if getattr(window, "_experiment_control_window", None) is None:
-        from lspr_app.gui.main_window_lifecycle import ensure_flow_panel_for
+        from lspr_app.gui.main_window_lifecycle import ensure_experiment_control_panel_for
 
-        ensure_flow_panel_for(window)
-    flow_widget = getattr(window, "_experiment_control_window", None)
-    if flow_widget is None:
+        ensure_experiment_control_panel_for(window)
+    experiment_control_widget = getattr(window, "_experiment_control_window", None)
+    if experiment_control_widget is None:
         return None
     placeholder = getattr(window, "_experiment_control_panel_placeholder", None)
-    flow_index = stack.indexOf(flow_widget)
+    experiment_control_index = stack.indexOf(experiment_control_widget)
     placeholder_index = stack.indexOf(placeholder) if placeholder is not None else -1
-    if flow_index < 0:
+    if experiment_control_index < 0:
         if placeholder_index >= 0:
             was_current = stack.currentIndex() == placeholder_index
+            placeholder.hide()
             stack.removeWidget(placeholder)
             placeholder.setParent(None)
-            stack.insertWidget(placeholder_index, flow_widget)
+            stack.insertWidget(placeholder_index, experiment_control_widget)
             if was_current:
-                stack.setCurrentWidget(flow_widget)
+                stack.setCurrentWidget(experiment_control_widget)
         else:
-            stack.addWidget(flow_widget)
+            stack.addWidget(experiment_control_widget)
     else:
         if placeholder_index >= 0:
+            placeholder.hide()
             stack.removeWidget(placeholder)
             placeholder.setParent(None)
-    flow_widget.setVisible(True)
-    return flow_widget
+    return experiment_control_widget
 
 
 def set_top_content_mode(window, mode: str, *, save: bool = True) -> None:
@@ -609,7 +623,12 @@ def set_top_content_mode(window, mode: str, *, save: bool = True) -> None:
     else:
         widget = ensure_experimental_control_stack_page(window)
         if widget is not None:
-            stack.setCurrentWidget(widget)
+            startup_ready = bool(getattr(widget, "_ui_startup_ready", False))
+            bootstrap_running = bool(getattr(widget, "_experiment_control_bootstrap_in_progress", False))
+            if startup_ready and not bootstrap_running:
+                stack.setCurrentWidget(widget)
+            else:
+                window._pending_top_view_mode = normalized
             ensure_visible_top_content_splitter(window, mode=normalized)
             apply_view_mode = getattr(widget, "_apply_experiment_control_view_mode", None)
             if callable(apply_view_mode):
@@ -932,11 +951,13 @@ def restore_ui_state(window) -> None:
     if isinstance(layout_preset_selected, str):
         window._layout_preset_selected = normalize_layout_preset_key(layout_preset_selected)
     else:
-        window._layout_preset_selected = _infer_layout_preset_from_current_state(window)
+        window._layout_preset_selected = _default_layout_preset_for_launch_profile(window)
     window._layout_preset_active_variant = str(
         window._layout_presets.get(window._layout_preset_selected, {}).get("layout_variant", "standard")
     )
     if has_layout_preset_state or isinstance(layout_preset_selected, str):
+        if not bool(getattr(window, "_ui_startup_ready", False)):
+            window._pending_layout_preset_selected = window._layout_preset_selected
         try:
             apply_layout_preset(window, window._layout_preset_selected, save=False)
         except Exception:
@@ -1001,6 +1022,7 @@ def save_ui_state(window) -> None:
             "metric_autoscale_skip_tiny_changes_enabled": bool(
                 getattr(window, "_metric_autoscale_skip_tiny_changes_enabled", True)
             ),
+            "sensorgram_metric_y_axis_mode": str(getattr(window, "_sensorgram_metric_y_axis_mode", "auto")),
             "sensorgram_metric_colors": {
                 mode: str(getattr(window, "TRACE_METRIC_COLORS", {}).get(mode, "#444444"))
                 for mode in sensorgram_metric_order(window)
@@ -1127,15 +1149,6 @@ def set_metric_plot_enabled(window, enabled: bool) -> None:
     window._request_deferred_ui_refresh(trace_plot=True)
 
 
-def toggle_flow_panel_visibility(window, checked: bool | None = None) -> None:
-    if checked is None:
-        window._activate_experimental_control_view() if normalize_top_content_mode(getattr(window, "_top_view_mode", "spectra")) != "experimental_control" else window._activate_spectra_view()
-    elif checked:
-        window._activate_experimental_control_view()
-    else:
-        window._activate_spectra_view()
-
-
 def toggle_experimental_control_panel_visibility(window, checked: bool | None = None) -> None:
     if checked is None:
         window._activate_experimental_control_view() if normalize_top_content_mode(getattr(window, "_top_view_mode", "spectra")) != "experimental_control" else window._activate_spectra_view()
@@ -1143,6 +1156,10 @@ def toggle_experimental_control_panel_visibility(window, checked: bool | None = 
         window._activate_experimental_control_view()
     else:
         window._activate_spectra_view()
+
+
+def toggle_flow_panel_visibility(window, checked: bool | None = None) -> None:
+    toggle_experimental_control_panel_visibility(window, checked)
 
 
 def sync_main_view_visibility(window) -> None:
@@ -1154,12 +1171,12 @@ def sync_main_view_visibility(window) -> None:
     refresh_hw_device_status_strip(window)
 
 
-def show_flow_only(window) -> None:
-    window._activate_experimental_control_view()
-
-
 def show_experimental_control_only(window) -> None:
     window._activate_experimental_control_view()
+
+
+def show_flow_only(window) -> None:
+    show_experimental_control_only(window)
 
 
 def show_plots_only(window) -> None:
@@ -1178,16 +1195,16 @@ def activate_spectra_view(window) -> None:
     set_top_content_mode(window, "spectra")
 
 
-def activate_flow_view(window) -> None:
-    set_top_content_mode(window, "experimental_control")
-
-
 def activate_experiment_control_view(window) -> None:
     set_top_content_mode(window, "experimental_control")
 
 
 def activate_experimental_control_view(window) -> None:
     set_top_content_mode(window, "experimental_control")
+
+
+def activate_flow_view(window) -> None:
+    activate_experiment_control_view(window)
 
 
 def toggle_left_controls(window, checked: bool | None = None) -> None:
@@ -1287,7 +1304,7 @@ def apply_launch_profile_layout(window) -> None:
     if hasattr(window, "_sensorgram_block"):
         window._sensorgram_block.setVisible(bool(profile.show_sensorgram))
     if normalize_top_content_mode(getattr(profile, "initial_top_view_mode", "spectra")) == "experimental_control":
-        show_flow_only(window)
+        show_experimental_control_only(window)
     else:
         show_plots_only(window)
     sync_view_actions(window)

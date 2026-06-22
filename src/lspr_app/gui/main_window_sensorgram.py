@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
+from time import perf_counter
 
 import numpy as np
-
 from lspr_app.gui.icon_helpers import heatmap_icon
 from lspr_app.gui.main_window_processing import normalize_sensorgram_metric_name, sensorgram_metric_order
 from lspr_app.gui.plot_view_cache import expand_heatmap_levels
@@ -118,6 +118,147 @@ def cycle_sensorgram_content_mode(window) -> None:
     window._sensorgram_content_mode = "heatmap" if current == "metric" else "metric"
     apply_sensorgram_content_mode(window, save=True)
     window._schedule_ui_state_persist()
+
+
+def normalize_sensorgram_metric_y_axis_mode(mode: object) -> str:
+    normalized = str(mode or "auto").strip().lower().replace(" ", "_").replace("-", "_")
+    if normalized in {"auto", "step_2nm", "step_5nm", "step_10nm", "step_50nm"}:
+        return normalized
+    return "auto"
+
+
+def sensorgram_metric_y_axis_mode_label(mode: object | None = None) -> str:
+    normalized = normalize_sensorgram_metric_y_axis_mode(mode)
+    return {
+        "auto": "Auto",
+        "step_2nm": "2 nm",
+        "step_5nm": "5 nm",
+        "step_10nm": "10 nm",
+        "step_50nm": "50 nm",
+    }[normalized]
+
+
+def sensorgram_metric_y_axis_mode_tooltip(window, mode: object | None = None) -> str:
+    normalized = normalize_sensorgram_metric_y_axis_mode(mode or getattr(window, "_sensorgram_metric_y_axis_mode", "auto"))
+    if normalized == "auto":
+        return (
+            "Current display: Auto y-axis. Click to switch to stepped scaling."
+            " The sensorgram metric plot will scale itself to the data."
+        )
+    step_label = sensorgram_metric_y_axis_mode_label(normalized)
+    return (
+        f"Current display: stepped {step_label} y-axis. Click to switch back to Auto."
+        " The sensorgram metric plot will snap its Y range to the selected step size."
+    )
+
+
+def update_sensorgram_metric_y_axis_mode_button(window) -> None:
+    button = getattr(window, "sensorgram_metric_y_axis_mode_button", None)
+    if button is None:
+        return
+    normalized = normalize_sensorgram_metric_y_axis_mode(getattr(window, "_sensorgram_metric_y_axis_mode", "auto"))
+    button.setText(f"[{sensorgram_metric_y_axis_mode_label(normalized)}]")
+    button.setToolTip(sensorgram_metric_y_axis_mode_tooltip(window, normalized))
+
+
+def apply_sensorgram_metric_y_axis_mode(window, mode: object, *, save: bool = False) -> None:
+    window._sensorgram_metric_y_axis_mode = normalize_sensorgram_metric_y_axis_mode(mode)
+    update_sensorgram_metric_y_axis_mode_button(window)
+    if window._sensorgram_metric_y_axis_mode == "auto":
+        if hasattr(window, "_request_trace_autoscale"):
+            window._request_trace_autoscale()
+    else:
+        apply_sensorgram_metric_y_axis_mode_once(window)
+    if save:
+        window._schedule_ui_state_persist()
+
+
+def apply_sensorgram_metric_y_axis_mode_once(window) -> None:
+    mode = normalize_sensorgram_metric_y_axis_mode(getattr(window, "_sensorgram_metric_y_axis_mode", "auto"))
+    step = {
+        "step_2nm": 2.0,
+        "step_5nm": 5.0,
+        "step_10nm": 10.0,
+        "step_50nm": 50.0,
+    }.get(mode)
+    if step is None:
+        return
+
+    visible_series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    series_getter = getattr(window, "_active_trace_series", None)
+    if callable(series_getter):
+        try:
+            visible_series = dict(series_getter() or {})
+        except Exception:
+            visible_series = {}
+
+    y_arrays: list[np.ndarray] = []
+    for series in visible_series.values():
+        try:
+            y_values = np.asarray(series[1], dtype=np.float64)
+        except Exception:
+            continue
+        finite = y_values[np.isfinite(y_values)]
+        if len(finite) > 0:
+            y_arrays.append(finite)
+
+    if not y_arrays and hasattr(window, "trace_curves"):
+        for curve in getattr(window, "trace_curves", {}).values():
+            y_data = getattr(curve, "yData", None)
+            if y_data is None:
+                continue
+            try:
+                y_values = np.asarray(y_data, dtype=np.float64)
+            except Exception:
+                continue
+            finite = y_values[np.isfinite(y_values)]
+            if len(finite) > 0:
+                y_arrays.append(finite)
+
+    if not y_arrays or not hasattr(window, "trace_plot"):
+        return
+
+    combined = np.concatenate(y_arrays)
+    if len(combined) == 0:
+        return
+
+    combined = np.sort(combined)
+    trim_count = int(max(len(combined) * 0.1, 0))
+    if len(combined) >= 10 and trim_count > 0 and (trim_count * 2) < len(combined):
+        trimmed = combined[trim_count:-trim_count]
+    else:
+        trimmed = combined
+    if len(trimmed) == 0:
+        trimmed = combined
+    center = float(np.mean(trimmed))
+    lower = float(np.floor(center - (float(step) * 0.5)))
+    upper = lower + float(step)
+    if upper <= lower:
+        return
+
+    try:
+        window._trace_view_autoscaling = True
+        window.trace_plot.setYRange(lower, upper, padding=0.0)
+        window._last_metric_autoscale_range = (0.0, 0.0, lower, upper)
+        window._last_metric_autoscale_at = perf_counter()
+        window._last_metric_autoscale_ms = 0.0
+    finally:
+        window._trace_view_autoscaling = False
+        window._metric_autoscale_pending = False
+
+    if save:
+        window._schedule_ui_state_persist()
+
+
+def cycle_sensorgram_metric_y_axis_mode(window) -> None:
+    current = normalize_sensorgram_metric_y_axis_mode(getattr(window, "_sensorgram_metric_y_axis_mode", "auto"))
+    order = ["auto", "step_2nm", "step_5nm", "step_10nm", "step_50nm"]
+    try:
+        index = order.index(current)
+    except ValueError:
+        index = 0
+    next_mode = order[(index + 1) % len(order)]
+    apply_sensorgram_metric_y_axis_mode(window, next_mode, save=True)
 
 
 def append_sensorgram_heatmap_history(window, spectrum) -> None:

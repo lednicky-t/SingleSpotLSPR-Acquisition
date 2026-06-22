@@ -133,7 +133,7 @@ def set_log_buffering_enabled_for(window, enabled: bool) -> None:
     window._log_info(f"Log buffering {state_text}.")
 
 
-def ensure_flow_panel_for(window) -> None:
+def ensure_experiment_control_panel_for(window) -> None:
     try:
         if window._experiment_control_window is None:
             from lspr_app.gui.experiment_control_window import ExperimentControlWindow
@@ -148,6 +148,7 @@ def ensure_flow_panel_for(window) -> None:
                 show_runtime_controls=profile.show_runtime_controls,
                 parent=getattr(window, "_top_content_stack", window),
             )
+            window._experiment_control_window.setVisible(False)
             window._experiment_control_window.availability_changed.connect(window._handle_flow_availability_changed)
             window._experiment_control_window.valve_availability_changed.connect(window._handle_valve_availability_changed)
             window._experiment_control_window.mswitch_availability_changed.connect(window._handle_mswitch_availability_changed)
@@ -167,19 +168,34 @@ def ensure_flow_panel_for(window) -> None:
                 if placeholder is not None:
                     index = window._top_content_stack.indexOf(placeholder)
                     if index >= 0:
+                        placeholder.hide()
                         window._top_content_stack.removeWidget(placeholder)
                         placeholder.setParent(None)
                         window._top_content_stack.insertWidget(index, window._experiment_control_window)
-                        current_mode = normalize_top_content_mode(getattr(window, "_top_view_mode", "spectra"))
-                        pending_mode = normalize_top_content_mode(getattr(window, "_pending_top_view_mode", current_mode))
-                        if pending_mode == "experimental_control" or current_mode == "experimental_control":
-                            window._top_content_stack.setCurrentWidget(window._experiment_control_window)
                     else:
                         window._top_content_stack.addWidget(window._experiment_control_window)
                 ensure_visible_top_content_splitter(window, mode=getattr(window, "_top_view_mode", "spectra"))
+            pending_layout_preset = str(getattr(window, "_pending_layout_preset_selected", "") or "").strip().lower()
+            if pending_layout_preset == "measurement":
+                from lspr_app.gui.main_window_state import apply_layout_preset
+
+                def _replay_selected_layout_preset() -> None:
+                    try:
+                        if hasattr(window, "_log_info"):
+                            window._log_info("Replaying restored measurement preset after experiment control panel creation.")
+                        apply_layout_preset(window, "measurement", save=False)
+                    except Exception as exc:
+                        if hasattr(window, "_log_warning"):
+                            window._log_warning(f"Deferred measurement preset replay failed: {exc}")
+
+                QTimer.singleShot(0, _replay_selected_layout_preset)
             window._log_info("Experiment control panel created.")
     except Exception as exc:
         window._log_error(f"Experiment control panel creation failed: {exc}")
+
+
+def ensure_flow_panel_for(window) -> None:
+    ensure_experiment_control_panel_for(window)
 
 
 def sync_experiment_control_startup_ports_for(window) -> None:

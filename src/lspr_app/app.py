@@ -315,33 +315,33 @@ class StartupSplash(QWidget):
         self.setWindowTitle("Starting LSPR Acquisition")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
 
-        accent = QFrame()
+        accent = QFrame(self)
         accent.setObjectName("startupAccent")
         accent.setFixedHeight(4)
-        icon_label = QLabel()
-        icon_label.setObjectName("startupIcon")
-        icon_label.setFixedSize(108, 108)
-        icon_label.setPixmap(QIcon(str(_brand_logo_path())).pixmap(92, 92))
-        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._icon_opacity_effect = QGraphicsOpacityEffect(self)
         self._icon_opacity_effect.setOpacity(0.25)
-        icon_label.setGraphicsEffect(self._icon_opacity_effect)
+        self._icon_label = QLabel(self)
+        self._icon_label.setObjectName("startupIcon")
+        self._icon_label.setFixedSize(108, 108)
+        self._icon_label.setPixmap(QIcon(str(_brand_logo_path())).pixmap(92, 92))
+        self._icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._icon_label.setGraphicsEffect(self._icon_opacity_effect)
         self._icon_opacity_anim = QPropertyAnimation(self._icon_opacity_effect, b"opacity", self)
         self._icon_opacity_anim.setDuration(220)
         self._icon_opacity_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        title = QLabel("LSPR Acquisition")
+        title = QLabel("LSPR Acquisition", self)
         title.setObjectName("startupTitle")
         title.setContentsMargins(0, 0, 0, 4)
 
-        version_label = QLabel(f"ver. {__version__}")
+        version_label = QLabel(f"ver. {__version__}", self)
         version_label.setObjectName("startupVersion")
         version_label.setContentsMargins(0, 0, 0, 4)
 
-        subtitle = QLabel("Spectroscopy and experiment control are waking up.")
+        subtitle = QLabel("Spectroscopy and experiment control are waking up.", self)
         subtitle.setObjectName("startupSubtitle")
-        self._status_label = QLabel("Starting...")
+        self._status_label = QLabel("Starting...", self)
         self._status_label.setObjectName("startupStatus")
-        self._progress = StartupProgressBar()
+        self._progress = StartupProgressBar(self)
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
         self._progress.setTextVisible(False)
@@ -351,13 +351,13 @@ class StartupSplash(QWidget):
         layout.setSpacing(0)
         layout.addWidget(accent)
 
-        body = QWidget()
-        content_row = QWidget()
+        body = QWidget(self)
+        content_row = QWidget(body)
         content_layout = QVBoxLayout()
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(3)
 
-        title_row = QWidget()
+        title_row = QWidget(content_row)
         title_row_layout = QHBoxLayout()
         title_row_layout.setContentsMargins(0, 0, 0, 0)
         title_row_layout.setSpacing(8)
@@ -371,11 +371,11 @@ class StartupSplash(QWidget):
         content_layout.addWidget(self._progress)
         content_row.setLayout(content_layout)
 
-        header_row = QWidget()
+        header_row = QWidget(body)
         header_layout = QVBoxLayout()
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(0)
-        header_layout.addWidget(icon_label, 0, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        header_layout.addWidget(self._icon_label, 0, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         header_row.setLayout(header_layout)
 
         body_layout = QHBoxLayout()
@@ -630,14 +630,8 @@ def main() -> None:
         app.main_window = window
         window._startup_splash = splash
         window._startup_show_requested_t0 = perf_counter()
-        window.setWindowOpacity(0.0)
-        if bool(getattr(window, "_start_maximized", False)):
-            window._screen_fitted = True
-            window.showMaximized()
-        else:
-            window._fit_window_to_available_screen()
-            window._screen_fitted = True
-            window.show()
+        window._startup_show_requested = True
+        QTimer.singleShot(0, window._complete_startup_show)
 
     def _handle_startup_failure(message: str) -> None:
         tracer = getattr(app, "_startup_widget_tracer", None)

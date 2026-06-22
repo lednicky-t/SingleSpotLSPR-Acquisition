@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta
 from html import escape
 from time import perf_counter
@@ -12,6 +13,7 @@ import pyqtgraph as pg
 from scipy.interpolate import CubicSpline
 
 from lspr_app.domain.models import Spectrum
+from lspr_app.gui.main_window_sensorgram import normalize_sensorgram_metric_y_axis_mode
 from lspr_app.gui.plot_view_cache import (
     build_heatmap_arrays,
     build_heatmap_history_token,
@@ -711,6 +713,39 @@ def _metric_autoscale_min_interval_from_mode(window) -> float:
     return max(float(interval_s), 0.0)
 
 
+def _sensorgram_metric_y_axis_step_size(window) -> float | None:
+    mode = normalize_sensorgram_metric_y_axis_mode(getattr(window, "_sensorgram_metric_y_axis_mode", "auto"))
+    return {
+        "step_2nm": 2.0,
+        "step_5nm": 5.0,
+        "step_10nm": 10.0,
+        "step_50nm": 50.0,
+    }.get(mode)
+
+
+def _sensorgram_metric_y_axis_is_auto(window) -> bool:
+    return normalize_sensorgram_metric_y_axis_mode(getattr(window, "_sensorgram_metric_y_axis_mode", "auto")) == "auto"
+
+
+def _quantize_sensorgram_metric_y_range(window, y_min: float, y_max: float) -> tuple[float, float]:
+    step = _sensorgram_metric_y_axis_step_size(window)
+    if step is None or not np.isfinite(step) or step <= 0.0:
+        return y_min, y_max
+    center = (float(y_min) + float(y_max)) * 0.5
+    half_step = float(step) * 0.5
+    lower = math.floor(center - half_step)
+    upper = float(lower) + float(step)
+    if not np.isfinite(lower) or not np.isfinite(upper):
+        return y_min, y_max
+    if center < float(lower) or center > float(upper):
+        lower = math.floor(center - half_step)
+        upper = float(lower) + float(step)
+    if upper < float(y_max):
+        lower = math.ceil(center - half_step)
+        upper = float(lower) + float(step)
+    return float(lower), float(upper)
+
+
 def apply_processing_range_to_spectrum_plot(window) -> None:
     settings = window._current_processing_settings()
     low = float(min(settings.wavelength_min_nm, settings.wavelength_max_nm))
@@ -728,6 +763,7 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
     content_mode = getattr(window, "_sensorgram_content_mode", "metric")
     axis_mode = _sensorgram_time_axis_mode(window)
     clock_mode = axis_mode == "clock"
+    metric_y_axis_auto = _sensorgram_metric_y_axis_is_auto(window)
     if content_mode == "heatmap":
         if bool(getattr(window, "_live_active", False)):
             _show_sensorgram_heatmap_unavailable(
@@ -858,23 +894,47 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
                 return
     x_min = float(np.min(x))
     x_max = latest_x + follow_latest_buffer_s
-    y_pad = max(y_span * 0.12, 1e-6)
-    overlay_y_pad_low = 0.0
-    overlay_y_pad_high = 0.0
-    reserved_y_padding = getattr(window, "_sensorgram_control_step_overlay_reserved_y_padding", None)
-    if callable(reserved_y_padding):
-        try:
-            overlay_y_pad_low, overlay_y_pad_high = reserved_y_padding(float(y_min), float(y_max))
-        except Exception:
-            overlay_y_pad_low, overlay_y_pad_high = 0.0, 0.0
     if getattr(window, "_trace_view_locked", False):
         window._metric_autoscale_pending = False
         return
+    current_y_range = None
+    if not metric_y_axis_auto:
+        try:
+            current_y_range = window.trace_plot.getViewBox().viewRange()[1]
+        except Exception:
+            current_y_range = None
+    if metric_y_axis_auto:
+        y_pad = max(y_span * 0.12, 1e-6)
+        overlay_y_pad_low = 0.0
+        overlay_y_pad_high = 0.0
+        reserved_y_padding = getattr(window, "_sensorgram_control_step_overlay_reserved_y_padding", None)
+        if callable(reserved_y_padding):
+            try:
+                overlay_y_pad_low, overlay_y_pad_high = reserved_y_padding(float(y_min), float(y_max))
+            except Exception:
+                overlay_y_pad_low, overlay_y_pad_high = 0.0, 0.0
+        y_low = float(y_min - y_pad - overlay_y_pad_low)
+        y_high = float(y_max + y_pad + overlay_y_pad_high)
+        y_low, y_high = _quantize_sensorgram_metric_y_range(window, y_low, y_high)
+    else:
+        y_low = y_high = None
+        if isinstance(current_y_range, (list, tuple)) and len(current_y_range) == 2:
+            try:
+                candidate_low = float(current_y_range[0])
+                candidate_high = float(current_y_range[1])
+                if np.isfinite(candidate_low) and np.isfinite(candidate_high) and candidate_high > candidate_low:
+                    y_low, y_high = candidate_low, candidate_high
+            except Exception:
+                y_low = y_high = None
+        if y_low is None or y_high is None:
+            y_pad = max(y_span * 0.12, 1e-6)
+            y_low = float(y_min - y_pad)
+            y_high = float(y_max + y_pad)
     new_range = (
         float(x_min),
         float(x_max),
-        float(y_min - y_pad - overlay_y_pad_low),
-        float(y_max + y_pad + overlay_y_pad_high),
+        float(y_low),
+        float(y_high),
     )
     should_apply = True
     if isinstance(last_range, tuple) and len(last_range) == 4:
@@ -1007,7 +1067,8 @@ def refresh_metric_plot(window, trace_label: str) -> None:
             if hasattr(window, "trace_legend"):
                 _set_visible_if_changed(window.trace_legend, False)
             render_sensorgram_heatmap(window, window._sensorgram_heatmap_history, clock_mode=clock_mode)
-            request_metric_autoscale(window)
+            if _sensorgram_metric_y_axis_is_auto(window):
+                request_metric_autoscale(window)
             sync_control_step_overlay = getattr(window, "_sync_sensorgram_control_step_overlay", None)
             if callable(sync_control_step_overlay):
                 try:
@@ -1028,7 +1089,7 @@ def refresh_metric_plot(window, trace_label: str) -> None:
                 _set_visible_if_changed(window.trace_legend, True)
             for curve in window.trace_curves.values():
                 _set_visible_if_changed(curve, True)
-            if metric_changed or previous_visible_mode != visible_mode:
+            if (metric_changed or previous_visible_mode != visible_mode) and _sensorgram_metric_y_axis_is_auto(window):
                 request_metric_autoscale(window)
             sync_control_step_overlay = getattr(window, "_sync_sensorgram_control_step_overlay", None)
             if callable(sync_control_step_overlay):
@@ -1058,7 +1119,8 @@ def refresh_metric_plot(window, trace_label: str) -> None:
         window._visible_trace_x = None
         window._visible_trace_y = None
         window._visible_trace_mode = axis_mode
-        request_metric_autoscale(window)
+        if _sensorgram_metric_y_axis_is_auto(window):
+            request_metric_autoscale(window)
         window._log_throttled(
             "trace_refresh",
             f"Metric updated | {trace_label}",

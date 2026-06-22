@@ -38,7 +38,7 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
     if profile is None:
         profile = launch_profile_spec(DEFAULT_LAUNCH_PROFILE)
 
-    title_widget = QWidget()
+    title_widget = QWidget(window)
     title_widget.setObjectName("titleBar")
 
     window._window_mode_label = QLabel(title_widget)
