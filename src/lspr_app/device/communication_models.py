@@ -14,6 +14,15 @@ class PortDescriptor:
 
 
 @dataclass(frozen=True, slots=True)
+class PortRefreshData:
+    generation: int
+    pump_ports: list[object]
+    valve_ports: list[object]
+    mswitch_devices: list[object]
+    amf_tools_available: bool
+
+
+@dataclass(frozen=True, slots=True)
 class DeviceProfile:
     label: str
     type: str

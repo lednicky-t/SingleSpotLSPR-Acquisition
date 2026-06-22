@@ -69,6 +69,7 @@ from lspr_app import __version__
 from lspr_app.diagnostics import DiagnosticsConfig
 from lspr_app.device.base import Spectrometer, SpectrometerCapabilities
 from lspr_app.device.amf_mswitch import detect_amf_mswitch_devices
+from lspr_app.device.device_manager import DeviceCommunicationService
 from lspr_app.device.reglo_icc import RegloICCClient, is_probable_reglo_port
 from lspr_app.device.port_assignments import get_port_assignment, should_probe_port_for_role
 from lspr_app.device.probe_diagnostics import record_port_probe_event
@@ -887,6 +888,7 @@ class MainWindow(QMainWindow):
         self._recording_blink_visible = True
         self._processing_debug_mode_enabled = bool(load_app_setting("processing_debug_mode", False))
         set_processing_debug_mode_enabled(self._processing_debug_mode_enabled)
+        self._device_comm_service = DeviceCommunicationService.shared()
         hdf5_compression_setting = load_app_setting("measurement_hdf5_compression_enabled", True)
         if isinstance(hdf5_compression_setting, str):
             self._hdf5_compression_enabled = hdf5_compression_setting.strip().lower() in {"1", "true", "yes", "on"}

@@ -70,8 +70,7 @@ class DeviceConsoleDialog(QDialog):
         self._thread_pool = QThreadPool.globalInstance()
         self._service = getattr(parent, "_device_comm_service", None)
         if not isinstance(self._service, DeviceCommunicationService):
-            self._service = DeviceCommunicationService()
-            self._service.ensure_default_profiles()
+            self._service = DeviceCommunicationService.shared()
             if parent is not None:
                 parent._device_comm_service = self._service
 

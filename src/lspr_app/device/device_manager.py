@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from time import perf_counter
 
 from lspr_app.device.amf_mswitch import AMFSwitchController, amf_tools_available, detect_amf_mswitch_devices
@@ -9,6 +10,7 @@ from lspr_app.device.communication_models import (
     DeviceProfile,
     DeviceStatus,
     PortDescriptor,
+    PortRefreshData,
     ProbeResult,
 )
 from lspr_app.device.connection_registry import snapshot_port_ownership
@@ -16,6 +18,11 @@ from lspr_app.device.port_assignments import device_assignment_label, get_port_a
 from lspr_app.device.reglo_icc import RegloICCClient
 from lspr_app.device.serial_controllers import ControllerError, SerialController
 from lspr_app.device.valve_controllers import detect_valve_controller
+from lspr_app.storage.app_config import load_app_setting, save_app_setting
+
+
+_DEVICE_PROFILE_SETTING_KEY = "device_profiles"
+_DEVICE_COMM_SERVICE: "DeviceCommunicationService" | None = None
 
 
 class DeviceCommunicationService:
@@ -23,9 +30,19 @@ class DeviceCommunicationService:
         self._profiles: dict[str, DeviceProfile] = {}
         self._connections: dict[str, object] = {}
         self._last_errors: dict[str, str] = {}
+        self.load_profiles()
+
+    @classmethod
+    def shared(cls) -> "DeviceCommunicationService":
+        global _DEVICE_COMM_SERVICE
+        if _DEVICE_COMM_SERVICE is None:
+            _DEVICE_COMM_SERVICE = cls()
+            _DEVICE_COMM_SERVICE.ensure_default_profiles()
+        return _DEVICE_COMM_SERVICE
 
     def register_profile(self, profile: DeviceProfile) -> None:
         self._profiles[profile.label] = profile
+        self.save_profiles()
 
     def profile(self, label: str) -> DeviceProfile | None:
         return self._profiles.get(str(label or ""))
@@ -182,8 +199,33 @@ class DeviceCommunicationService:
             profile = DeviceProfile(label=label, type="unknown", driver=type(connection).__name__, endpoint=getattr(connection, "port", None))
         connection = self._connections.get(label)
         connected = bool(connection is not None and getattr(connection, "is_connected", lambda: False)())
-        state = "connected" if connected else "disconnected"
         return self._make_status(label, profile, connected, self._last_errors.get(label), {})
+
+    def connection(self, label: str) -> object | None:
+        return self._connections.get(str(label or "").strip())
+
+    def is_connected(self, label: str) -> bool:
+        connection = self._connections.get(str(label or "").strip())
+        return bool(connection is not None and getattr(connection, "is_connected", lambda: False)())
+
+    def adopt_connection(self, label: str, connection: object) -> None:
+        label = str(label or "").strip()
+        if not label:
+            raise ControllerError("Device label is required.")
+        profile = self._require_profile(label)
+        self._connections[label] = connection
+        self._last_errors.pop(label, None)
+        if profile.endpoint is None:
+            self._profiles[label] = DeviceProfile(
+                label=profile.label,
+                type=profile.type,
+                driver=profile.driver,
+                endpoint=getattr(connection, "port", None),
+                role=profile.role,
+                identity=dict(profile.identity),
+                enabled=profile.enabled,
+            )
+            self.save_profiles()
 
     def list_devices(self) -> list[DeviceStatus]:
         labels = list(self._profiles)
@@ -203,12 +245,45 @@ class DeviceCommunicationService:
         )
         for profile in defaults:
             self._profiles.setdefault(profile.label, profile)
+        if not self._profiles:
+            for profile in defaults:
+                self._profiles[profile.label] = profile
+        self.save_profiles()
 
     def register_endpoint_assignment(self, label: str, endpoint: str, device_type: str = "auto", driver: str = "auto", role: str | None = None) -> DeviceProfile:
         profile = DeviceProfile(label=label, type=device_type, driver=driver, endpoint=endpoint, role=role)
         self._profiles[label] = profile
         set_port_assignment(endpoint, device_assignment_label(device_type))
+        self.save_profiles()
         return profile
+
+    def load_profiles(self) -> None:
+        raw = load_app_setting(_DEVICE_PROFILE_SETTING_KEY, [])
+        self._profiles.clear()
+        if isinstance(raw, dict):
+            raw = raw.get("devices", [])
+        if not isinstance(raw, list):
+            return
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label", "")).strip()
+            if not label:
+                continue
+            profile = DeviceProfile(
+                label=label,
+                type=str(item.get("type", "unknown") or "unknown"),
+                driver=str(item.get("driver", "auto") or "auto"),
+                endpoint=(str(item.get("endpoint", "")).strip() or None),
+                role=(str(item.get("role", "")).strip() or None),
+                identity={str(k): str(v) for k, v in dict(item.get("identity", {}) or {}).items()},
+                enabled=bool(item.get("enabled", True)),
+            )
+            self._profiles[label] = profile
+
+    def save_profiles(self) -> None:
+        payload = {"devices": [asdict(profile) for profile in self._profiles.values()]}
+        save_app_setting(_DEVICE_PROFILE_SETTING_KEY, payload)
 
     def _dispatch_command(self, connection: object, command: DeviceCommand) -> object | None:
         command_type = str(command.command_type or "").strip().casefold()
@@ -277,3 +352,27 @@ class DeviceCommunicationService:
         controller = AMFSwitchController()
         controller.connect(endpoint)
         return controller, controller.get_probe()
+
+    def refresh_device_ports(self, generation: int) -> object:
+        pump_ports = RegloICCClient.list_ports()
+        valve_ports = SerialController.list_ports()
+        mswitch_devices = detect_amf_mswitch_devices() if amf_tools_available() else []
+        return PortRefreshData(
+            generation=generation,
+            pump_ports=list(pump_ports),
+            valve_ports=list(valve_ports),
+            mswitch_devices=list(mswitch_devices),
+            amf_tools_available=amf_tools_available(),
+        )
+
+    def probe_pump_port(self, port: str):
+        return RegloICCClient.probe_port(port)
+
+    def connect_valve_port(self, port: str):
+        client, probe = detect_valve_controller(port)
+        return client, probe
+
+    def connect_mswitch_port(self, port: str):
+        client = AMFSwitchController()
+        client.connect(port)
+        return client, client.get_probe()
