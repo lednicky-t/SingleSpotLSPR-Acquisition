@@ -99,6 +99,10 @@ def build_menu_bar(window) -> QMenuBar:
     usb_probe_action.setToolTip("Show the recent USB/COM probe history, including skipped ports and probe results.")
     usb_probe_action.triggered.connect(window._show_usb_probe_diagnostics_dialog)
 
+    device_console_action = hw_menu.addAction("Device Console")
+    device_console_action.setToolTip("Open the device console for passive inventory, probe, connection, and command routing.")
+    device_console_action.triggered.connect(window._show_device_console_dialog)
+
     hw_disconnect_all_action = hw_menu.addAction("Disconnect all devices")
     hw_disconnect_all_action.setToolTip("Stop the active devices and release all app-owned hardware connections.")
     hw_disconnect_all_action.triggered.connect(window._disconnect_all_devices)
