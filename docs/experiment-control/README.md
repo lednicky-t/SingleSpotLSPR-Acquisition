@@ -26,3 +26,7 @@ Implementation checklist:
 
 - [`pause_row_implementation_checklist.md`](./pause_row_implementation_checklist.md)
 
+Reuse split proposal:
+
+- [`CODEX_EXPERIMENT_CONTROL_REUSE_SPLIT_V49.md`](./CODEX_EXPERIMENT_CONTROL_REUSE_SPLIT_V49.md)
+
