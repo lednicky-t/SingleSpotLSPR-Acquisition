@@ -87,31 +87,18 @@ def build_menu_bar(window) -> QMenuBar:
     window._view_menu_actions = view_menu_actions
 
     hw_menu = menu_bar.addMenu("HW")
-    hw_init_action = hw_menu.addAction("Initialize devices")
-    hw_init_action.setToolTip("Scan the connected spectrometer and pump controller.")
+    hw_init_action = hw_menu.addAction("Reinitialize hardware")
+    hw_init_action.setToolTip("Disconnect all devices, then scan and reconnect all available hardware.")
     hw_init_action.triggered.connect(window._start_hardware_initialization)
 
-    hw_inventory_action = hw_menu.addAction("Connected devices")
-    hw_inventory_action.setToolTip("Show connected COM ports and the device type recognized for each port.")
-    hw_inventory_action.triggered.connect(window._show_connected_devices_dialog)
+    device_manager_action = hw_menu.addAction("Device Manager…")
+    device_manager_action.setToolTip("View connection status, manage device profiles, run diagnostics, and send commands.")
+    device_manager_action.triggered.connect(window._show_device_manager_dialog)
 
-    usb_probe_action = hw_menu.addAction("USB probe diagnostics")
-    usb_probe_action.setToolTip("Show the recent USB/COM probe history, including skipped ports and probe results.")
-    usb_probe_action.triggered.connect(window._show_usb_probe_diagnostics_dialog)
-
-    device_console_action = hw_menu.addAction("Device Console")
-    device_console_action.setToolTip("Open the device console for passive inventory, probe, connection, and command routing.")
-    device_console_action.triggered.connect(window._show_device_console_dialog)
-
-    hw_disconnect_all_action = hw_menu.addAction("Disconnect all devices")
+    hw_disconnect_all_action = hw_menu.addAction("Disconnect all")
     hw_disconnect_all_action.setToolTip("Stop the active devices and release all app-owned hardware connections.")
     hw_disconnect_all_action.triggered.connect(window._disconnect_all_devices)
     window._hw_disconnect_all_action = hw_disconnect_all_action
-
-    hw_menu.addSeparator()
-    device_settings_menu = hw_menu.addMenu("Device settings")
-    device_settings_placeholder = device_settings_menu.addAction("Reserved for device-specific settings")
-    device_settings_placeholder.setEnabled(False)
 
     help_menu = menu_bar.addMenu("Help")
 

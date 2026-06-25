@@ -417,9 +417,7 @@ from lspr_app.gui.hardware_initializer import (
     HardwareInitStepResult,
     HardwareInitTask,
 )
-from lspr_app.gui.hardware_inventory_dialog import show_hardware_inventory_dialog
-from lspr_app.gui.device_console_dialog import show_device_console_dialog
-from lspr_app.gui.usb_probe_diagnostics_dialog import show_usb_probe_diagnostics_dialog
+from lspr_app.gui.device_console_dialog import show_device_manager_dialog
 from lspr_app.gui.workers import (
     AcquisitionResult,
     HeatmapArchiveLoadRequest,
@@ -4534,14 +4532,8 @@ class MainWindow(QMainWindow):
             "show = last displayed frame/window summary",
         )
 
-    def _show_connected_devices_dialog(self) -> None:
-        show_hardware_inventory_dialog(self)
-
-    def _show_usb_probe_diagnostics_dialog(self) -> None:
-        show_usb_probe_diagnostics_dialog(self)
-
-    def _show_device_console_dialog(self) -> None:
-        show_device_console_dialog(self)
+    def _show_device_manager_dialog(self) -> None:
+        show_device_manager_dialog(self)
 
     def _set_processing_debug_mode_enabled(self, enabled: bool) -> None:
         self._processing_debug_mode_enabled = bool(enabled)
