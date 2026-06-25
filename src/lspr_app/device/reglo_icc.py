@@ -6,7 +6,7 @@ from time import monotonic, sleep
 
 import serial
 
-from lspr_app.device.connection_registry import claim_port, release_port, try_claim_port
+from lspr_app.device.connection_registry import release_port, try_claim_port
 from serial.tools import list_ports
 
 
@@ -46,7 +46,7 @@ class RegloICCClient:
     def __init__(self) -> None:
         self._serial: serial.Serial | None = None
         self.port: str | None = None
-        self._claim_owner = "reglo-icc"
+        self._claim_owner = f"reglo-icc:{id(self)}"
 
     @staticmethod
     def list_ports() -> list[PumpPort]:
@@ -82,7 +82,6 @@ class RegloICCClient:
             release_port(port, self._claim_owner)
             raise
         self.port = port
-        claim_port(port, self._claim_owner)
 
     def close(self) -> None:
         if self._serial is not None:
@@ -100,7 +99,11 @@ class RegloICCClient:
     def get_probe(self) -> PumpProbe:
         protocol_version = self.query("0x!")
         serial_number = self.query("0xS")
-        channel_count = int(self.query("0xA"))
+        raw_channels = self.query("0xA")
+        try:
+            channel_count = int(raw_channels.split()[0])
+        except (ValueError, IndexError):
+            channel_count = 0
         model = self.query("0#")
         return PumpProbe(
             port=self.port or "",
@@ -111,10 +114,7 @@ class RegloICCClient:
         )
 
     def query(self, command: str) -> str:
-        response = self.send(command)
-        if response in {"*", "#", "+", "-"}:
-            return response
-        return response
+        return self.send(command)
 
     def send(self, command: str, idle_timeout_s: float = 0.03, max_wait_s: float = 0.75) -> str:
         if self._serial is None:

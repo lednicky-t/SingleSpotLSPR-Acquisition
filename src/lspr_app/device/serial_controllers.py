@@ -133,8 +133,17 @@ class SerialController(ABC):
 
 
 def detect_controller(port: str) -> tuple[SerialController, ControllerProbe]:
+    port_info = next((p for p in SerialController.list_ports() if p.device == port), None)
+    all_controllers = sorted(registered_controllers(), key=lambda cls: cls.priority, reverse=True)
+    if port_info is not None:
+        candidates = [cls for cls in all_controllers if cls.is_probable_port(port_info)]
+        if not candidates:
+            candidates = all_controllers
+    else:
+        candidates = all_controllers
+
     errors: list[str] = []
-    for controller_cls in sorted(registered_controllers(), key=lambda cls: cls.priority, reverse=True):
+    for controller_cls in candidates:
         controller = controller_cls()
         try:
             controller.connect(port)

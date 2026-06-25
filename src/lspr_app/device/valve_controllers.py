@@ -5,7 +5,7 @@ from time import sleep
 
 import serial
 
-from lspr_app.device.connection_registry import claim_port, release_port, try_claim_port
+from lspr_app.device.connection_registry import release_port, try_claim_port
 from lspr_app.device.serial_controllers import (
     ControllerError,
     ControllerPort,
@@ -20,6 +20,18 @@ from lspr_app.device.serial_controllers import (
 class ArduinoValveController(SerialController):
     controller_type = "arduino-valve"
     priority = 20
+
+    @classmethod
+    def is_probable_port(cls, port: ControllerPort) -> bool:
+        description = port.description.upper()
+        hwid = port.hwid.upper()
+        return (
+            "ARDUINO" in description
+            or "CH340" in description
+            or "ATMEGA" in description
+            or "2341" in hwid  # Arduino LLC VID
+            or "1A86" in hwid  # QinHeng CH340 VID
+        ) and "239A" not in hwid  # exclude Adafruit/ItsyBitsy
 
     def connect(self, port: str) -> None:
         self.close()
@@ -39,8 +51,8 @@ class ArduinoValveController(SerialController):
             release_port(port, self.controller_type)
             raise
         self.port = port
-        claim_port(port, self.controller_type)
         sleep(2.0)
+        self._serial.reset_input_buffer()
 
     def close(self) -> None:
         if self._serial is not None:
@@ -110,7 +122,6 @@ class ItsyBitsy32U4ValveController(ArduinoValveController):
             release_port(port, self.controller_type)
             raise
         self.port = port
-        claim_port(port, self.controller_type)
         sleep(3.0)
         if self._serial is not None:
             self._serial.reset_input_buffer()
