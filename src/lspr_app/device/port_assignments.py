@@ -13,6 +13,8 @@ _ASSIGNMENT_LABELS: dict[str, str] = {
     "valve": "Valve controller",
 }
 
+_assignment_cache: dict[str, DeviceAssignment] | None = None
+
 
 def normalize_device_assignment(value: object) -> DeviceAssignment:
     assignment = str(value or "auto").strip().casefold()
@@ -27,21 +29,28 @@ def normalize_device_assignment(value: object) -> DeviceAssignment:
 
 
 def _load_port_assignments() -> dict[str, DeviceAssignment]:
+    global _assignment_cache
+    if _assignment_cache is not None:
+        return _assignment_cache
     raw = load_app_setting(_APP_SETTING_KEY, {})
     if not isinstance(raw, dict):
-        return {}
+        _assignment_cache = {}
+        return _assignment_cache
     assignments: dict[str, DeviceAssignment] = {}
     for raw_port, raw_assignment in raw.items():
         port = str(raw_port or "").strip().upper()
         if not port:
             continue
         assignments[port] = normalize_device_assignment(raw_assignment)
-    return assignments
+    _assignment_cache = assignments
+    return _assignment_cache
 
 
 def _save_port_assignments(assignments: dict[str, DeviceAssignment]) -> None:
+    global _assignment_cache
     payload = {port: assignment for port, assignment in sorted(assignments.items()) if assignment != "auto"}
     save_app_setting(_APP_SETTING_KEY, payload)
+    _assignment_cache = dict(assignments)
 
 
 def snapshot_port_assignments() -> dict[str, DeviceAssignment]:

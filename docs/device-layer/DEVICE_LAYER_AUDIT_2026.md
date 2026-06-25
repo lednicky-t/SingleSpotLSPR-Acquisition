@@ -159,7 +159,7 @@ simultaneously — defeating the registry's exclusive-access guarantee.
 
 ### Y1 — `port_assignments.py` reads JSON from disk on every call
 **File:** `port_assignments.py:55`  
-**Status:** ⬜ pending
+**Status:** ✅ fixed
 
 `get_port_assignment(port)` calls `_load_port_assignments()` → `load_app_setting()` →
 reads and JSON-parses the settings file from disk. During `scan_connected_serial_devices()`,
@@ -171,7 +171,7 @@ this is called at least twice per port. With 5 ports that is 10 file reads per s
 
 ### Y2 — `ensure_default_profiles()` always creates 6 profiles on every startup
 **File:** `device_manager.py:327`  
-**Status:** ⬜ pending
+**Status:** ✅ fixed (metadata flag added; UI distinction is B2 scope)
 
 Every startup ensures pump_1/pump_2/pump_3 + valve_1/valve_2 + switch_1 exist, all with
 `endpoint=None`. Users with only 1 pump and 1 valve see 6 device slots in the UI, making it
@@ -185,7 +185,7 @@ pump_3, valve_2 automatically and let the user add them via the device UI.
 
 ### Y3 — `arduino_valve.py` is orphaned dead code
 **File:** `arduino_valve.py`  
-**Status:** ⬜ pending
+**Status:** ✅ fixed (file removed)
 
 `ArduinoValveClient` predates the `SerialController` framework. It has no connection registry
 integration, no `is_probable_port()` logic, and is imported nowhere in the current code path.

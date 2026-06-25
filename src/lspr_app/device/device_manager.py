@@ -327,13 +327,14 @@ class DeviceCommunicationService:
             self.save_profiles()
 
     def ensure_default_profiles(self) -> None:
+        _default = {"source": "default"}
         defaults = (
-            new_device_profile(label="pump_1", type="pump", driver="reglo_icc", role="sample_pump", display_name="Main Pump"),
-            new_device_profile(label="pump_2", type="pump", driver="reglo_icc", role="aux_pump", display_name="Aux Pump"),
-            new_device_profile(label="pump_3", type="pump", driver="reglo_icc", role="waste_pump", display_name="Waste Pump"),
-            new_device_profile(label="valve_1", type="valve", driver="auto", role="inlet_valve", display_name="Inlet Valve"),
-            new_device_profile(label="valve_2", type="valve", driver="auto", role="outlet_valve", display_name="Outlet Valve"),
-            new_device_profile(label="switch_1", type="switch", driver="amf-mswitch", role="main_switch", display_name="Main Switch"),
+            new_device_profile(label="pump_1", type="pump", driver="reglo_icc", role="sample_pump", display_name="Main Pump", metadata=_default),
+            new_device_profile(label="pump_2", type="pump", driver="reglo_icc", role="aux_pump", display_name="Aux Pump", metadata=_default),
+            new_device_profile(label="pump_3", type="pump", driver="reglo_icc", role="waste_pump", display_name="Waste Pump", metadata=_default),
+            new_device_profile(label="valve_1", type="valve", driver="auto", role="inlet_valve", display_name="Inlet Valve", metadata=_default),
+            new_device_profile(label="valve_2", type="valve", driver="auto", role="outlet_valve", display_name="Outlet Valve", metadata=_default),
+            new_device_profile(label="switch_1", type="switch", driver="amf-mswitch", role="main_switch", display_name="Main Switch", metadata=_default),
         )
         if not self._profiles:
             for profile in defaults:

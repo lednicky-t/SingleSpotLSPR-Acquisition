@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
+from uuid import uuid4
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,25 +26,53 @@ class PortRefreshData:
 
 @dataclass(frozen=True, slots=True)
 class DeviceProfile:
+    uuid: str
     label: str
     type: str
     driver: str
-    endpoint: str | None
+    endpoint: str | None = None
     role: str | None = None
+    display_name: str | None = None
     identity: dict[str, str] = field(default_factory=dict)
     enabled: bool = True
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def new_device_profile(
+    *,
+    label: str,
+    type: str,
+    driver: str,
+    endpoint: str | None = None,
+    role: str | None = None,
+    display_name: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> DeviceProfile:
+    return DeviceProfile(
+        uuid=str(uuid4()),
+        label=label,
+        type=type,
+        driver=driver,
+        endpoint=endpoint,
+        role=role,
+        display_name=display_name,
+        metadata=dict(metadata) if metadata else {},
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class DeviceStatus:
+    uuid: str
     label: str
     type: str
     driver: str
     endpoint: str | None
     connected: bool
     state: str
-    last_error: str | None
+    last_error: str | None = None
     identity: dict[str, str] = field(default_factory=dict)
+    display_name: str | None = None
+    role: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +89,7 @@ class ProbeResult:
 @dataclass(frozen=True, slots=True)
 class DeviceCommand:
     command_type: str
-    payload: dict[str, object]
+    payload: dict[str, object] = field(default_factory=dict)
     timeout_s: float = 2.0
 
 
@@ -71,3 +101,30 @@ class DeviceCommandResult:
     response: object | None
     error: str | None
     duration_ms: float
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceEvent:
+    timestamp_s: float
+    label: str | None
+    endpoint: str | None
+    owner: str
+    action: str
+    command: str | None
+    result: str
+    duration_ms: float
+    message: str
+
+
+def next_device_label(existing_labels: set[str], device_type: str) -> str:
+    prefix = f"{device_type}_"
+    numbers: list[int] = []
+    for label in existing_labels:
+        if label.startswith(prefix):
+            suffix = label[len(prefix):]
+            if suffix.isdigit():
+                numbers.append(int(suffix))
+    next_number = 1
+    while next_number in numbers:
+        next_number += 1
+    return f"{prefix}{next_number}"
