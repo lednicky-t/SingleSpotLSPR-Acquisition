@@ -68,13 +68,14 @@ from PyQt6.QtWidgets import (
 from lspr_app import __version__
 from lspr_app.diagnostics import DiagnosticsConfig
 from lspr_app.device.base import Spectrometer, SpectrometerCapabilities
-from lspr_app.device.amf_mswitch import detect_amf_mswitch_devices
-from lspr_app.device.device_manager import DeviceCommunicationService
-from lspr_app.device.reglo_icc import RegloICCClient, is_probable_reglo_port
+from lspr_app.device.amf_mswitch import detect_amf_selector_devices
+from lspr_app.device.communication_models import DeviceProfile
+from lspr_app.device.device_manager import DeviceCommunicationService, extract_usb_fingerprint
+from lspr_app.device.reglo_icc import PumpProbe, RegloICCClient, is_probable_reglo_port
 from lspr_app.device.port_assignments import get_port_assignment, should_probe_port_for_role
 from lspr_app.device.probe_diagnostics import record_port_probe_event
-from lspr_app.device.serial_controllers import SerialController, controller_port_priority
-from lspr_app.device.valve_controllers import detect_valve_controller
+from lspr_app.device.serial_controllers import ControllerProbe, SerialController, controller_port_priority
+
 from lspr_app.device.simulated import SimulationParameters, SimulatedSpectrometer
 from lspr_app.domain.models import AcquisitionSettings, ProcessingSettings, Spectrum
 from lspr_app.domain.processing import fit_processed_spectrum, set_processing_debug_mode_enabled
@@ -1096,7 +1097,7 @@ class MainWindow(QMainWindow):
         self._install_shortcuts()
         _startup_mark("shortcuts installed")
 
-        self.status_label = ElidingLabel(f"Connected backend: {self._spectrometer.device_name()}")
+        self.status_label = ElidingLabel(f"Connected backend: {self._spectrometer.device_name()}", self)
         self.status_label.setWordWrap(False)
         self.status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.status_label.setToolTip("Current source/backend connection and important application status messages.")
@@ -1209,7 +1210,7 @@ class MainWindow(QMainWindow):
             "This does not affect spectrometer hardware."
         )
 
-        self.live_estimate = ElidingLabel()
+        self.live_estimate = ElidingLabel(self)
         self.live_estimate.setWordWrap(False)
         self.live_estimate.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.live_estimate.setToolTip(
@@ -1223,7 +1224,7 @@ class MainWindow(QMainWindow):
         self.spectrometer_stats_label.setToolTip(
             "Spectrometer acquisition stats: last frame spacing, effective source rate, and acquisition overhead."
         )
-        self.telemetry_label = ElidingLabel()
+        self.telemetry_label = ElidingLabel(self)
         self.telemetry_label.setWordWrap(False)
         self.telemetry_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.telemetry_label.setText("gap - | acq - | proc - | plot - | ui - | idle - | ovh - | show -")
@@ -3848,12 +3849,28 @@ class MainWindow(QMainWindow):
             button.setChecked(False)
 
     def _hardware_init_steps(self) -> list[HardwareInitStep]:
-        return [
+        steps: list[HardwareInitStep] = [
             HardwareInitStep("spectrometer", "Spectrometer", self._spectrometer_init_step),
-            HardwareInitStep("pump", "Pump controller", self._pump_init_step),
-            HardwareInitStep("mswitch", "M-Switch", self._mswitch_init_step),
-            HardwareInitStep("valve", "Valve controller", self._valve_init_step),
         ]
+        service = self._device_comm_service
+        configured_types: set[str] = set()
+        for profile in sorted(service.list_profiles(), key=lambda p: p.label):
+            if not profile.enabled or not profile.endpoint:
+                continue
+            configured_types.add(profile.type)
+            display = profile.display_name or profile.label
+            steps.append(HardwareInitStep(
+                profile.label,
+                display,
+                lambda p=profile: self._profile_device_init_step(p),
+            ))
+        if "pump" not in configured_types:
+            steps.append(HardwareInitStep("pump_scan", "Pump scan", self._pump_scan_step))
+        if "valve" not in configured_types:
+            steps.append(HardwareInitStep("valve_scan", "Valve scan", self._valve_scan_step))
+        if "selector" not in configured_types:
+            steps.append(HardwareInitStep("selector_scan", "Selector scan", self._selector_scan_step))
+        return steps
 
     def _spectrometer_init_step(self) -> HardwareInitStepResult:
         name = self._spectrometer.device_name()
@@ -3901,7 +3918,53 @@ class MainWindow(QMainWindow):
             message=message,
         )
 
-    def _pump_init_step(self) -> HardwareInitStepResult:
+    def _profile_device_init_step(self, profile: DeviceProfile) -> HardwareInitStepResult:
+        display = profile.display_name or profile.label
+        try:
+            status = self._device_comm_service.connect(profile.label)
+        except Exception as exc:
+            return HardwareInitStepResult(
+                key=profile.label,
+                label=display,
+                state="error",
+                message=f"{display}: {exc}",
+                connected=False,
+                error=str(exc),
+            )
+        probe: object | None = None
+        if profile.type == "pump":
+            try:
+                probe = PumpProbe(
+                    port=status.endpoint or "",
+                    protocol_version=status.identity.get("protocol_version", ""),
+                    serial_number=status.identity.get("serial_number", ""),
+                    channel_count=int(status.identity.get("channel_count", "0") or "0"),
+                    model=status.identity.get("model", ""),
+                )
+            except Exception:
+                probe = None
+        elif profile.type == "valve":
+            try:
+                probe = ControllerProbe(
+                    port=status.endpoint or "",
+                    controller_type=status.driver,
+                    model=status.identity.get("model", ""),
+                    serial_number=status.identity.get("serial_number") or None,
+                    protocol_version=status.identity.get("protocol_version") or None,
+                )
+            except Exception:
+                probe = None
+        return HardwareInitStepResult(
+            key=profile.label,
+            label=display,
+            state="connected",
+            message=f"{display} connected on {status.endpoint}.",
+            connected=True,
+            probe=probe,
+            payload=status,
+        )
+
+    def _pump_scan_step(self) -> HardwareInitStepResult:
         all_ports = RegloICCClient.list_ports()
         preferred_ports = [
             port
@@ -3918,13 +3981,15 @@ class MainWindow(QMainWindow):
         ports = preferred_ports + [port for port in probable_ports if port not in preferred_ports]
         if not ports:
             return HardwareInitStepResult(
-                key="pump",
-                label="Pump controller",
+                key="pump_scan",
+                label="Pump scan",
                 state="missing",
                 message="No pump controller discovered.",
                 connected=False,
                 payload=[],
             )
+        found_probes: list[PumpProbe] = []
+        found_profiles: list[DeviceProfile] = []
         last_error: str | None = None
         assigned_error: str | None = None
         for port in ports:
@@ -3970,62 +4035,107 @@ class MainWindow(QMainWindow):
                 command="0x!",
                 duration_ms=(perf_counter() - started) * 1000.0,
             )
-            return HardwareInitStepResult(
-                key="pump",
-                label="Pump controller",
-                state="discovered",
-                message=f"Pump controller discovered on {probe.port}.",
-                connected=False,
-                probe=probe,
-                payload=probe,
+            sn = str(probe.serial_number or "").strip()
+            fingerprint = f"reglo-icc:{sn}" if sn and sn.upper() not in {"#", "*", ""} else extract_usb_fingerprint(port.hwid)
+            profile = self._device_comm_service.find_or_create_profile(
+                device_type="pump",
+                fingerprint=fingerprint,
+                endpoint=port.device,
+                identity={
+                    "model": probe.model,
+                    "serial_number": probe.serial_number,
+                    "protocol_version": probe.protocol_version,
+                    "channel_count": str(probe.channel_count),
+                },
+                driver="reglo_icc",
             )
-        if assigned_error is not None:
-            last_error = assigned_error if last_error is None else f"{assigned_error}; {last_error}"
+            try:
+                self._device_comm_service.connect(profile.label)
+            except Exception:
+                pass
+            found_probes.append(probe)
+            found_profiles.append(profile)
+        if not found_probes:
+            if assigned_error is not None:
+                last_error = assigned_error if last_error is None else f"{assigned_error}; {last_error}"
+            return HardwareInitStepResult(
+                key="pump_scan",
+                label="Pump scan",
+                state="error",
+                message=last_error or "Pump scan completed with no usable device.",
+                connected=False,
+                error=last_error,
+                payload=[],
+            )
+        primary_probe = found_probes[0]
+        primary_profile = found_profiles[0]
+        names = ", ".join(p.label for p in found_profiles)
+        count = len(found_probes)
         return HardwareInitStepResult(
-            key="pump",
-            label="Pump controller",
-            state="error",
-            message=last_error or "Pump controller scan completed with no usable device.",
-            connected=False,
-            error=last_error,
-            payload=[],
+            key=primary_profile.label,
+            label="Pump scan",
+            state="connected",
+            message=f"{count} pump controller{'s' if count > 1 else ''} found: {names}.",
+            connected=True,
+            probe=primary_probe,
+            payload=found_probes,
         )
 
-    def _mswitch_init_step(self) -> HardwareInitStepResult:
+    def _selector_scan_step(self) -> HardwareInitStepResult:
         try:
-            devices = detect_amf_mswitch_devices()
+            devices = detect_amf_selector_devices()
         except Exception as exc:
             return HardwareInitStepResult(
-                key="mswitch",
-                label="M-Switch",
+                key="selector_scan",
+                label="Selector scan",
                 state="error",
-                message=f"M-Switch scan failed: {exc}",
+                message=f"Selector scan failed: {exc}",
                 connected=False,
                 error=str(exc),
                 payload=[],
             )
         if not devices:
             return HardwareInitStepResult(
-                key="mswitch",
-                label="M-Switch",
+                key="selector_scan",
+                label="Selector scan",
                 state="missing",
-                message="M-Switch not discovered at startup.",
+                message="Selector not discovered at startup.",
                 connected=False,
                 payload=[],
             )
+        found_profiles: list[DeviceProfile] = []
+        for device in devices:
+            port_name = getattr(device, "port", "")
+            sn = getattr(device, "serial_number", None) or ""
+            fingerprint = f"amf-selector:{sn}" if sn else extract_usb_fingerprint(getattr(device, "hwid", ""))
+            identity = {
+                "model": getattr(device, "model", ""),
+                "serial_number": sn,
+                "protocol_version": getattr(device, "protocol_version", "") or "",
+                "controller_type": getattr(device, "controller_type", "amf-mswitch"),
+            }
+            profile = self._device_comm_service.find_or_create_profile(
+                device_type="selector",
+                fingerprint=fingerprint,
+                endpoint=port_name,
+                identity=identity,
+                driver="amf-mswitch",
+            )
+            found_profiles.append(profile)
         first = devices[0]
         port_name = getattr(first, "port", "unknown")
+        primary_profile = found_profiles[0] if found_profiles else None
         return HardwareInitStepResult(
-            key="mswitch",
-            label="M-Switch",
+            key=primary_profile.label if primary_profile else "selector_scan",
+            label="Selector scan",
             state="discovered",
-            message=f"M-Switch discovered on {port_name}.",
+            message=f"Selector discovered on {port_name}.",
             connected=False,
             probe=first,
             payload=devices,
         )
 
-    def _valve_init_step(self) -> HardwareInitStepResult:
+    def _valve_scan_step(self) -> HardwareInitStepResult:
         all_ports = SerialController.list_ports()
         preferred_ports = [
             port
@@ -4042,8 +4152,8 @@ class MainWindow(QMainWindow):
         ports = preferred_ports + [port for port in likely_ports if port not in preferred_ports]
         if not ports:
             return HardwareInitStepResult(
-                key="valve",
-                label="Valve controller",
+                key="valve_scan",
+                label="Valve scan",
                 state="missing",
                 message="No valve controller discovered.",
                 connected=False,
@@ -4067,7 +4177,7 @@ class MainWindow(QMainWindow):
                 continue
             started = perf_counter()
             try:
-                client, probe = detect_valve_controller(port.device)
+                probe_result = self._device_comm_service.probe_endpoint(port.device, "valve")
             except Exception as exc:
                 last_error = str(exc)
                 if assignment == "valve" and assigned_error is None:
@@ -4083,34 +4193,69 @@ class MainWindow(QMainWindow):
                     duration_ms=(perf_counter() - started) * 1000.0,
                 )
                 continue
-            try:
-                client.close()
-            except Exception:
-                pass
+            if not probe_result.success:
+                last_error = probe_result.error or "Valve probe failed."
+                if assignment == "valve" and assigned_error is None:
+                    assigned_error = f"Assigned valve port {port.device} did not respond as a valve controller: {probe_result.error or 'unknown error'}"
+                self._record_port_probe_event(
+                    role="valve",
+                    port=port.device,
+                    assignment=assignment,
+                    action="probe",
+                    result="fail",
+                    message=probe_result.error or "Valve probe failed.",
+                    owner="startup:valve",
+                    duration_ms=(perf_counter() - started) * 1000.0,
+                )
+                continue
+            probe = ControllerProbe(
+                port=port.device,
+                controller_type=probe_result.detected_type or "valve",
+                model=probe_result.identity.get("model", ""),
+                serial_number=probe_result.identity.get("serial_number") or None,
+                protocol_version=probe_result.identity.get("protocol_version") or None,
+            )
             self._record_port_probe_event(
                 role="valve",
                 port=port.device,
                 assignment=assignment,
                 action="probe",
                 result="success",
-                message=getattr(probe, "model", "Valve controller") or "Valve controller",
+                message=probe.model or "Valve controller",
                 owner="startup:valve",
                 duration_ms=(perf_counter() - started) * 1000.0,
             )
+            fingerprint = extract_usb_fingerprint(port.hwid)
+            profile = self._device_comm_service.find_or_create_profile(
+                device_type="valve",
+                fingerprint=fingerprint,
+                endpoint=port.device,
+                identity={
+                    "model": probe.model,
+                    "serial_number": probe.serial_number or "",
+                    "protocol_version": probe.protocol_version or "",
+                    "controller_type": probe.controller_type,
+                },
+                driver=probe.controller_type,
+            )
+            try:
+                self._device_comm_service.connect(profile.label)
+            except Exception:
+                pass
             return HardwareInitStepResult(
-                key="valve",
-                label="Valve controller",
-                state="discovered",
-                message=f"Valve controller discovered on {probe.port}.",
-                connected=False,
+                key=profile.label,
+                label="Valve scan",
+                state="connected",
+                message=f"Valve controller connected on {port.device}.",
+                connected=True,
                 probe=probe,
                 payload=probe,
             )
         return HardwareInitStepResult(
-            key="valve",
-            label="Valve controller",
+            key="valve_scan",
+            label="Valve scan",
             state="error",
-            message=assigned_error or last_error or "Valve controller scan completed with no usable device.",
+            message=assigned_error or last_error or "Valve scan completed with no usable device.",
             connected=False,
             error=assigned_error or last_error,
             payload=None,
@@ -5347,10 +5492,7 @@ class MainWindow(QMainWindow):
 
     def _show_error(self, message: str) -> None:
         self.status_label.setText(message)
-        if self._closing:
-            return
         self._log_error(message)
-        QMessageBox.critical(self, "Acquisition error", message)
 
     def closeEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
         self._closing = True

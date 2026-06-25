@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
@@ -24,12 +24,13 @@ class HardwareInitResult:
     steps: list[HardwareInitStepResult]
     pump_probe: object | None
     pump_error: str | None
-    mswitch_devices: list[object]
-    mswitch_error: str | None
+    selector_devices: list[object]
+    selector_error: str | None
     valve_probe: object | None = None
     valve_error: str | None = None
     spectrometer_name: str | None = None
     spectrometer_error: str | None = None
+    by_label: dict[str, HardwareInitStepResult] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -55,10 +56,11 @@ class HardwareInitTask(QRunnable):
     def run(self) -> None:
         logger = logging.getLogger("lspr_app.hardware_init")
         steps: list[HardwareInitStepResult] = []
+        by_label: dict[str, HardwareInitStepResult] = {}
         pump_probe = None
         pump_error = None
-        mswitch_devices: list[object] = []
-        mswitch_error = None
+        selector_devices: list[object] = []
+        selector_error = None
         valve_probe = None
         valve_error = None
         spectrometer_name = None
@@ -82,20 +84,24 @@ class HardwareInitTask(QRunnable):
                     error=str(exc),
                 )
             steps.append(result)
+            by_label[result.key] = result
             self.signals.step.emit(result)
             self.signals.progress.emit(progress_base + max(int(90 / total_steps), 1), result.message)
-            if step.key == "pump":
-                pump_probe = result.probe
-                pump_error = result.error
-            elif step.key == "mswitch":
-                mswitch_devices = list(result.payload or [])
-                mswitch_error = result.error
-            elif step.key == "valve":
-                valve_probe = result.probe
-                valve_error = result.error
-            elif step.key == "spectrometer":
+            key = result.key
+            if key == "spectrometer":
                 spectrometer_name = str(result.payload or "") or None
                 spectrometer_error = result.error
+            elif key.startswith("pump"):
+                if pump_probe is None:
+                    pump_probe = result.probe
+                pump_error = result.error
+            elif key.startswith("selector") or key == "mswitch":
+                selector_devices = list(result.payload or [])
+                selector_error = result.error
+            elif key.startswith("valve"):
+                if valve_probe is None:
+                    valve_probe = result.probe
+                valve_error = result.error
 
         self.signals.progress.emit(98, "Finalizing hardware initialization...")
         self.signals.finished.emit(
@@ -103,11 +109,12 @@ class HardwareInitTask(QRunnable):
                 steps=steps,
                 pump_probe=pump_probe,
                 pump_error=pump_error,
-                mswitch_devices=mswitch_devices,
-                mswitch_error=mswitch_error,
+                selector_devices=selector_devices,
+                selector_error=selector_error,
                 valve_probe=valve_probe,
                 valve_error=valve_error,
                 spectrometer_name=spectrometer_name,
                 spectrometer_error=spectrometer_error,
+                by_label=by_label,
             )
         )

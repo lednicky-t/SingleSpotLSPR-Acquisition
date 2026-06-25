@@ -4,7 +4,7 @@ from dataclasses import asdict, replace
 from collections import deque
 from time import perf_counter
 
-from lspr_app.device.amf_mswitch import AMFSwitchController, amf_tools_available, detect_amf_mswitch_devices
+from lspr_app.device.amf_mswitch import AMFSwitchController, amf_tools_available, detect_amf_mswitch_devices, detect_amf_selector_devices
 from lspr_app.device.communication_models import (
     DeviceCommand,
     DeviceCommandResult,
@@ -17,7 +17,7 @@ from lspr_app.device.communication_models import (
     next_device_label,
     new_device_profile,
 )
-from lspr_app.device.connection_registry import release_port, snapshot_port_ownership, try_claim_port
+from lspr_app.device.connection_registry import release_port, snapshot_port_ownership
 from lspr_app.device.port_assignments import device_assignment_label, get_port_assignment, set_port_assignment
 from lspr_app.device.reglo_icc import RegloICCClient
 from lspr_app.device.serial_controllers import ControllerError, SerialController
@@ -28,13 +28,28 @@ from lspr_app.storage.app_config import load_app_setting, save_app_setting
 _DEVICE_PROFILE_SETTING_KEY = "device_profiles"
 _DEVICE_COMM_SERVICE: "DeviceCommunicationService" | None = None
 
+
+def extract_usb_fingerprint(hwid: str) -> str:
+    """Extract a stable device fingerprint from a USB port HWID string.
+
+    Looks for SER= (USB serial number) first, then falls back to VID:PID.
+    Returns an empty string if no useful identifier can be extracted.
+    """
+    for part in str(hwid or "").split():
+        if part.upper().startswith("SER="):
+            serial = part[4:].strip()
+            if serial and serial.upper() not in {"0", "000000", "NONE", "NULL", "N/A", ""}:
+                return f"usb-ser:{serial}"
+    return ""
+
 _LEGACY_LABEL_MIGRATIONS: dict[str, tuple[str, str, str | None, str | None]] = {
     "pump_main": ("pump_1", "Main Pump", "sample_pump", "pump_main"),
     "pump_aux": ("pump_2", "Aux Pump", "aux_pump", "pump_aux"),
     "pump_waste": ("pump_3", "Waste Pump", "waste_pump", "pump_waste"),
     "valve_inlet": ("valve_1", "Inlet Valve", "inlet_valve", "valve_inlet"),
     "valve_outlet": ("valve_2", "Outlet Valve", "outlet_valve", "valve_outlet"),
-    "switch_main": ("switch_1", "Main Switch", "main_switch", "switch_main"),
+    "switch_main": ("selector_1", "Main Selector", "main_selector", "switch_main"),
+    "switch_1": ("selector_1", "Main Selector", "main_selector", "switch_1"),
 }
 
 
@@ -147,8 +162,8 @@ class DeviceCommunicationService:
             valve_error = str(valve_exc)
 
         try:
-            if expected in {"mswitch", "switch", "auto"} and amf_tools_available():
-                controller, probe = self._probe_mswitch(endpoint)
+            if expected in {"selector", "auto"} and amf_tools_available():
+                controller, probe = self._probe_selector(endpoint)
                 try:
                     identity = {
                         "model": probe.model,
@@ -156,8 +171,8 @@ class DeviceCommunicationService:
                         "protocol_version": probe.protocol_version or "",
                         "controller_type": probe.controller_type,
                     }
-                    result = ProbeResult(endpoint, "switch", probe.controller_type, identity, True, None, (perf_counter() - started) * 1000.0)
-                    self._record_event(label="switch", endpoint=endpoint, owner=owner, action="probe", command=None, result="success", duration_ms=result.duration_ms, message=probe.model)
+                    result = ProbeResult(endpoint, "selector", probe.controller_type, identity, True, None, (perf_counter() - started) * 1000.0)
+                    self._record_event(label="selector", endpoint=endpoint, owner=owner, action="probe", command=None, result="success", duration_ms=result.duration_ms, message=probe.model)
                     return result
                 finally:
                     controller.close()
@@ -176,16 +191,13 @@ class DeviceCommunicationService:
         if not endpoint:
             raise ControllerError(f"Device profile {label!r} has no endpoint.")
 
-        owner = f"device_comm:connect:{profile.label}"
-        if not try_claim_port(endpoint, owner):
-            raise ControllerError(f"Endpoint {endpoint} is busy.")
         try:
             if profile.driver == "reglo_icc" or profile.type == "pump":
                 client = RegloICCClient()
                 client.connect(endpoint)
                 probe = client.get_probe()
                 self._connections[profile.label] = client
-                self._connection_owners[profile.label] = owner
+                self._connection_owners[profile.label] = client._claim_owner
                 self._last_errors.pop(profile.label, None)
                 status = self._make_status(profile.label, profile, True, None, {
                     "model": probe.model,
@@ -193,15 +205,15 @@ class DeviceCommunicationService:
                     "protocol_version": probe.protocol_version,
                     "channel_count": str(probe.channel_count),
                 })
-                self._record_event(label=profile.label, endpoint=endpoint, owner=owner, action="connect", command=None, result="success", duration_ms=0.0, message=probe.model)
+                self._record_event(label=profile.label, endpoint=endpoint, owner=client._claim_owner, action="connect", command=None, result="success", duration_ms=0.0, message=probe.model)
                 return status
 
-            if profile.driver == "amf-mswitch" or profile.type in {"switch", "mswitch"}:
+            if profile.driver == "amf-mswitch" or profile.type == "selector":
                 controller = AMFSwitchController()
                 controller.connect(endpoint)
                 probe = controller.get_probe()
                 self._connections[profile.label] = controller
-                self._connection_owners[profile.label] = owner
+                self._connection_owners[profile.label] = f"amf-mswitch:{id(controller)}"
                 self._last_errors.pop(profile.label, None)
                 status = self._make_status(profile.label, profile, True, None, {
                     "model": probe.model,
@@ -209,13 +221,13 @@ class DeviceCommunicationService:
                     "protocol_version": probe.protocol_version or "",
                     "controller_type": probe.controller_type,
                 })
-                self._record_event(label=profile.label, endpoint=endpoint, owner=owner, action="connect", command=None, result="success", duration_ms=0.0, message=probe.model)
+                self._record_event(label=profile.label, endpoint=endpoint, owner=self._connection_owners[profile.label], action="connect", command=None, result="success", duration_ms=0.0, message=probe.model)
                 return status
 
             if profile.type in {"valve"} or profile.driver not in {"auto", "unknown", ""}:
                 controller, probe = detect_valve_controller(endpoint)
                 self._connections[profile.label] = controller
-                self._connection_owners[profile.label] = owner
+                self._connection_owners[profile.label] = controller.controller_type
                 self._last_errors.pop(profile.label, None)
                 status = self._make_status(profile.label, profile, True, None, {
                     "model": probe.model,
@@ -223,7 +235,7 @@ class DeviceCommunicationService:
                     "protocol_version": probe.protocol_version or "",
                     "controller_type": probe.controller_type,
                 })
-                self._record_event(label=profile.label, endpoint=endpoint, owner=owner, action="connect", command=None, result="success", duration_ms=0.0, message=probe.model)
+                self._record_event(label=profile.label, endpoint=endpoint, owner=controller.controller_type, action="connect", command=None, result="success", duration_ms=0.0, message=probe.model)
                 return status
 
             raise ControllerError(
@@ -231,8 +243,7 @@ class DeviceCommunicationService:
                 "Probe the port first or assign a device type."
             )
         except Exception:
-            release_port(endpoint, owner)
-            self._record_event(label=profile.label, endpoint=endpoint, owner=owner, action="connect", command=None, result="fail", duration_ms=0.0, message="connection failed")
+            self._record_event(label=profile.label, endpoint=endpoint, owner=f"device_comm:{profile.label}", action="connect", command=None, result="fail", duration_ms=0.0, message="connection failed")
             raise
 
     def disconnect(self, label: str) -> DeviceStatus:
@@ -334,7 +345,7 @@ class DeviceCommunicationService:
             new_device_profile(label="pump_3", type="pump", driver="reglo_icc", role="waste_pump", display_name="Waste Pump", metadata=_default),
             new_device_profile(label="valve_1", type="valve", driver="auto", role="inlet_valve", display_name="Inlet Valve", metadata=_default),
             new_device_profile(label="valve_2", type="valve", driver="auto", role="outlet_valve", display_name="Outlet Valve", metadata=_default),
-            new_device_profile(label="switch_1", type="switch", driver="amf-mswitch", role="main_switch", display_name="Main Switch", metadata=_default),
+            new_device_profile(label="selector_1", type="selector", driver="amf-mswitch", role="main_selector", display_name="Main Selector", metadata=_default),
         )
         if not self._profiles:
             for profile in defaults:
@@ -351,6 +362,48 @@ class DeviceCommunicationService:
         profile = new_device_profile(label=normalized_label, type=device_type, driver=driver, endpoint=endpoint, role=role)
         self._profiles[normalized_label] = profile
         set_port_assignment(endpoint, device_assignment_label(device_type))
+        self.save_profiles()
+        return profile
+
+    def find_or_create_profile(
+        self,
+        *,
+        device_type: str,
+        fingerprint: str,
+        endpoint: str,
+        identity: dict[str, str],
+        driver: str = "auto",
+        display_name: str | None = None,
+        role: str | None = None,
+    ) -> DeviceProfile:
+        """Return an existing profile that matches (type, fingerprint) or create a new one.
+
+        If a matching profile is found on a different endpoint (COM port changed), the
+        endpoint is updated in place and persisted. On creation, the next available label
+        for *device_type* is auto-assigned (pump_1, pump_2, ...).
+        """
+        if fingerprint:
+            for profile in self._profiles.values():
+                if profile.type == device_type and profile.fingerprint == fingerprint:
+                    if profile.endpoint != endpoint:
+                        updated = replace(profile, endpoint=endpoint, identity=dict(identity))
+                        self._profiles[profile.label] = updated
+                        self.save_profiles()
+                        return updated
+                    return profile
+
+        label = next_device_label(set(self._profiles), device_type)
+        profile = new_device_profile(
+            label=label,
+            type=device_type,
+            driver=driver,
+            endpoint=endpoint,
+            role=role,
+            display_name=display_name,
+            fingerprint=fingerprint,
+        )
+        profile = replace(profile, identity=dict(identity))
+        self._profiles[label] = profile
         self.save_profiles()
         return profile
 
@@ -421,6 +474,7 @@ class DeviceCommunicationService:
             identity={str(k): str(v) for k, v in dict(item.get("identity", {}) or {}).items()},
             enabled=bool(item.get("enabled", True)),
             metadata=metadata,
+            fingerprint=str(item.get("fingerprint", "") or "").strip(),
         )
         return self._normalize_profile(profile)
 
@@ -475,6 +529,7 @@ class DeviceCommunicationService:
             identity={str(k): str(v) for k, v in dict(profile.identity or {}).items()},
             enabled=bool(profile.enabled),
             metadata=metadata,
+            fingerprint=str(profile.fingerprint or "").strip(),
         )
 
     def _dispatch_command(self, connection: object, command: DeviceCommand) -> object | None:
@@ -550,7 +605,7 @@ class DeviceCommunicationService:
             role=profile.role,
         )
 
-    def _probe_mswitch(self, endpoint: str):
+    def _probe_selector(self, endpoint: str):
         controller = AMFSwitchController()
         controller.connect(endpoint)
         return controller, controller.get_probe()
@@ -558,12 +613,12 @@ class DeviceCommunicationService:
     def refresh_device_ports(self, generation: int) -> object:
         pump_ports = RegloICCClient.list_ports()
         valve_ports = SerialController.list_ports()
-        mswitch_devices = detect_amf_mswitch_devices() if amf_tools_available() else []
+        selector_devices = detect_amf_selector_devices() if amf_tools_available() else []
         return PortRefreshData(
             generation=generation,
             pump_ports=list(pump_ports),
             valve_ports=list(valve_ports),
-            mswitch_devices=list(mswitch_devices),
+            selector_devices=list(selector_devices),
             amf_tools_available=amf_tools_available(),
         )
 
@@ -574,7 +629,10 @@ class DeviceCommunicationService:
         client, probe = detect_valve_controller(port)
         return client, probe
 
-    def connect_mswitch_port(self, port: str):
+    def connect_selector_port(self, port: str):
         client = AMFSwitchController()
         client.connect(port)
         return client, client.get_probe()
+
+    # Backward-compatible alias
+    connect_mswitch_port = connect_selector_port

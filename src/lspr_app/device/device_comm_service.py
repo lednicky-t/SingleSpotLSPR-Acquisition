@@ -13,7 +13,7 @@ def refresh_device_ports(generation: int) -> PortRefreshData:
         generation=payload.generation,
         pump_ports=list(payload.pump_ports),
         valve_ports=list(payload.valve_ports),
-        mswitch_devices=list(payload.mswitch_devices),
+        selector_devices=list(payload.selector_devices),
         amf_tools_available=bool(payload.amf_tools_available),
     )
 
@@ -22,9 +22,13 @@ def probe_pump_port(port: str) -> PumpProbe:
     return DeviceCommunicationService.shared().probe_pump_port(port)
 
 
-def connect_valve_port(port: str) -> tuple[SerialController, ControllerProbe]:
+def connect_valve_port(port: str) -> tuple[object, ControllerProbe]:
     return DeviceCommunicationService.shared().connect_valve_port(port)
 
 
-def connect_mswitch_port(port: str) -> tuple[AMFSwitchController, ControllerProbe]:
-    return DeviceCommunicationService.shared().connect_mswitch_port(port)
+def connect_selector_port(port: str) -> tuple[object, ControllerProbe]:
+    return DeviceCommunicationService.shared().connect_selector_port(port)
+
+
+# Backward-compatible alias
+connect_mswitch_port = connect_selector_port

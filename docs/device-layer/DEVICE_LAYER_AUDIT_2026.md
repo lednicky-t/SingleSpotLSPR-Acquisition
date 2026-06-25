@@ -211,15 +211,33 @@ a Python `set`, the duplicate add is idempotent and causes no bug. It is confusi
 
 ### B1 — `HardwareInitResult` assumes one device per type
 **File:** `hardware_initializer.py:23`  
-**Status:** ⬜ pending
+**Status:** ✅ done
 
-`HardwareInitResult` has `pump_probe: object | None` and `valve_probe: object | None`.
-With multiple pumps (pump_1, pump_2, pump_3), the step-result accumulation loop overwrites
-the previous probe result each time a second pump step completes. Doesn't fail today because
-only one pump step is registered, but will break when multi-pump init steps are added.
+Implemented multi-device init refactor + nomenclature standardization + device fingerprinting:
 
-**Fix:** Change to `pump_probes: list[object]` / `valve_probes: list[object]`, accumulated
-by key prefix rather than exact key match.
+- `HardwareInitResult`: renamed `mswitch_devices/mswitch_error` → `selector_devices/selector_error`;
+  added `by_label: dict[str, HardwareInitStepResult]` populated for every step.
+- `HardwareInitTask.run()`: key accumulation now uses prefix matching (`startswith("pump")`,
+  `startswith("valve")`, `startswith("selector")`). First probe found per type is kept; second
+  pump/valve probe goes into `by_label` keyed by its profile label.
+- Nomenclature: "mswitch"/"switch" → "selector" across `communication_models.py`,
+  `device_comm_service.py`, `device_manager.py`, `hardware_initializer.py`, `main_window.py`,
+  `main_window_lifecycle.py`. Legacy labels `switch_main` and `switch_1` auto-migrate to
+  `selector_1` via `_LEGACY_LABEL_MIGRATIONS`.
+- `DeviceProfile.fingerprint: str = ""` field added; persisted to / loaded from settings JSON.
+  `new_device_profile()` accepts `fingerprint` parameter.
+- `extract_usb_fingerprint(hwid)` module-level helper in `device_manager.py` parses `SER=`
+  from USB HWID string.
+- `DeviceCommunicationService.find_or_create_profile()`: looks up by (type, fingerprint);
+  creates with auto-assigned label on first discovery; updates endpoint if COM port changes.
+- `service.connect()` fixed: removed outer `try_claim_port` that was preventing inner clients
+  from claiming the same port (same double-claim bug as the R1 probe_endpoint fix).
+- `_hardware_init_steps()` now profile-driven: generates one connect step per configured
+  profile with an endpoint; falls back to scan steps (pump_scan / valve_scan / selector_scan)
+  for device types with no configured endpoint. Scan steps register profiles + connect.
+- `_profile_device_init_step(profile)` added for profile-driven connects.
+- Scan steps renamed: `_pump_scan_step`, `_valve_scan_step`, `_selector_scan_step`.
+- Pump scan: registers all found pumps, not just the first; returns summary result.
 
 ---
 

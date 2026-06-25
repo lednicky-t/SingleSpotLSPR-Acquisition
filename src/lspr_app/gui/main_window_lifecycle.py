@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import traceback
+
 from time import perf_counter
 from typing import Any
 
@@ -192,6 +194,7 @@ def ensure_experiment_control_panel_for(window) -> None:
             window._log_info("Experiment control panel created.")
     except Exception as exc:
         window._log_error(f"Experiment control panel creation failed: {exc}")
+        window._log_error(traceback.format_exc().rstrip())
 
 
 def ensure_flow_panel_for(window) -> None:
@@ -287,14 +290,19 @@ def handle_hardware_init_step_for(window, result: object) -> None:
         return
     window._hardware_status_overrides[result.key] = (bool(result.connected), result.message)
     window.status_label.setText(result.message)
-    if result.key == "spectrometer":
+    key = result.key
+    if key == "spectrometer":
         window._hardware_available = not isinstance(window._spectrometer, SimulatedSpectrometer)
-    elif result.key == "pump":
-        window._discovered_pump_probe = result.probe
-        window._update_pump_status(result.probe)
-    elif result.key == "mswitch":
+    elif key.startswith("pump"):
+        if result.probe is not None:
+            window._discovered_pump_probe = result.probe
+            window._update_pump_status(result.probe)
+    elif key.startswith("selector") or key == "mswitch":
         window._initial_mswitch_devices = list(result.payload or [])
         window._mswitch_probe = result.probe if result.probe is not None else None
+    elif key.startswith("valve"):
+        if result.probe is not None:
+            window._discovered_valve_probe = result.probe
     refresh_hw_device_status_strip(window)
 
 
@@ -322,15 +330,15 @@ def handle_hardware_init_finished_for(window, result: object) -> None:
     else:
         window._log_warning("Spectrometer initialization produced no name.")
 
-    window._initial_mswitch_devices = list(result.mswitch_devices)
-    window._mswitch_probe = result.mswitch_devices[0] if result.mswitch_devices else None
+    window._initial_mswitch_devices = list(result.selector_devices)
+    window._mswitch_probe = result.selector_devices[0] if result.selector_devices else None
     refresh_hw_device_status_strip(window)
     if window._mswitch_probe is not None:
-        window._log_info(f"M-Switch discovered on {window._mswitch_probe.port}.")
-    elif result.mswitch_error:
-        window._log_warning(f"M-Switch scan failed: {result.mswitch_error}")
+        window._log_info(f"Selector discovered on {window._mswitch_probe.port}.")
+    elif result.selector_error:
+        window._log_warning(f"Selector scan failed: {result.selector_error}")
     else:
-        window._log_warning("M-Switch not discovered at startup.")
+        window._log_warning("Selector not discovered at startup.")
 
     if result.valve_probe is not None:
         window._log_info(f"Valve controller discovered on {result.valve_probe.port}.")

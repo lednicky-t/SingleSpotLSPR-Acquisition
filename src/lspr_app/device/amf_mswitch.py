@@ -150,3 +150,6 @@ class AMFSwitchController:
         if target_int < 1:
             raise ControllerError("AMF switch port must be >= 1.")
         self._amf.valveShortestPath(target_int, block=block)
+
+
+detect_amf_selector_devices = detect_amf_mswitch_devices

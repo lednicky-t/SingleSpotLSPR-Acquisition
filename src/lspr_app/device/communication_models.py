@@ -20,7 +20,7 @@ class PortRefreshData:
     generation: int
     pump_ports: list[object]
     valve_ports: list[object]
-    mswitch_devices: list[object]
+    selector_devices: list[object]
     amf_tools_available: bool
 
 
@@ -36,6 +36,7 @@ class DeviceProfile:
     identity: dict[str, str] = field(default_factory=dict)
     enabled: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
+    fingerprint: str = ""
 
 
 def new_device_profile(
@@ -47,6 +48,7 @@ def new_device_profile(
     role: str | None = None,
     display_name: str | None = None,
     metadata: dict[str, Any] | None = None,
+    fingerprint: str = "",
 ) -> DeviceProfile:
     return DeviceProfile(
         uuid=str(uuid4()),
@@ -57,6 +59,7 @@ def new_device_profile(
         role=role,
         display_name=display_name,
         metadata=dict(metadata) if metadata else {},
+        fingerprint=str(fingerprint or "").strip(),
     )
 
 
