@@ -7,6 +7,7 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+from platformdirs import user_config_dir
 
 from lspr_app.domain.models import ProcessingSettings
 from lspr_app import __version__ as APP_VERSION
@@ -19,7 +20,7 @@ from lspr_io import (
 )
 
 
-DEFAULT_CONFIG_PATH = Path.cwd() / "lspr_settings.json"
+DEFAULT_CONFIG_PATH = Path(user_config_dir("lspr-suite", appauthor=False)) / "lspr_settings.json"
 
 
 def _load_payload(path: Path) -> dict:
