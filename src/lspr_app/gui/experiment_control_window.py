@@ -5722,10 +5722,12 @@ class ExperimentControlWindow(QWidget):
         if not isinstance(payload, PortRefreshData):
             self._update_experiment_control_busy_indicator()
             return
-        self._populate_ports(payload.pump_ports)
-        self._populate_valve_ports(payload.valve_ports)
-        self._populate_mswitch_ports(payload.mswitch_devices, amf_available=payload.amf_tools_available)
-        self._update_experiment_control_busy_indicator()
+        try:
+            self._populate_ports(payload.pump_ports)
+            self._populate_valve_ports(payload.valve_ports)
+            self._populate_mswitch_ports(payload.selector_devices, amf_available=payload.amf_tools_available)
+        finally:
+            self._update_experiment_control_busy_indicator()
         if self._experiment_control_bootstrap_in_progress:
             return
         self._schedule_startup_device_auto_connect()
