@@ -133,6 +133,7 @@ class DiagnosticsConfig:
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "DiagnosticsConfig":
         env = environ if environ is not None else os.environ
         profile = str(env.get("LSPR_DIAGNOSTICS_PROFILE", "")).strip().casefold()
+        top_content_trace = _env_flag("TOP_CONTENT_TRACE", env)
         old_quiet = _env_flag("LSPR_QUIET_DIAGNOSTICS", env)
         old_file_info = _env_flag("LSPR_SUPPRESS_DIAGNOSTIC_INFO_LOGS", env)
         if profile not in _VALID_PROFILES:
@@ -155,7 +156,24 @@ class DiagnosticsConfig:
             export_override = False
         else:
             export_override = None
-        return cls.for_profile(profile if profile in _VALID_PROFILES else "normal", export_override=export_override)
+        config = cls.for_profile(profile if profile in _VALID_PROFILES else "normal", export_override=export_override)
+        if top_content_trace:
+            config = cls(
+                profile=config.profile,
+                quiet_mode=config.quiet_mode,
+                suppress_info_logs=config.suppress_info_logs,
+                gui_log_enabled=config.gui_log_enabled,
+                gui_log_min_level=config.gui_log_min_level,
+                file_log_min_level=config.file_log_min_level,
+                export_diagnostic_events=config.export_diagnostic_events,
+                export_snapshot_interval_s=config.export_snapshot_interval_s,
+                runtime_drift_probe_enabled=config.runtime_drift_probe_enabled,
+                session_stats_recording_enabled_by_default=config.session_stats_recording_enabled_by_default,
+                debug_timing_enabled=True,
+                deep_timing_enabled=True,
+                diagnostics_panel_enabled=config.diagnostics_panel_enabled,
+            )
+        return config
 
     @classmethod
     def from_window(cls, window: Any) -> "DiagnosticsConfig":

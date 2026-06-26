@@ -30,3 +30,9 @@ Reuse split proposal:
 
 - [`CODEX_EXPERIMENT_CONTROL_REUSE_SPLIT_V49.md`](./CODEX_EXPERIMENT_CONTROL_REUSE_SPLIT_V49.md)
 
+Implementation scaffolding:
+
+- `src/lspr_app/gui/experiment_control_controller.py`
+- `src/lspr_app/gui/experiment_control_capabilities.py`
+- `src/lspr_app/gui/experiment_control_backend.py`
+
