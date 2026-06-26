@@ -149,7 +149,7 @@ def request_live_acquisition_poll(window, delay_ms: float | None = None) -> None
         delay,
         lambda: flush_live_visual_refreshes(window),
         priority=-20,
-        coalesce="latest",
+        coalesce="earliest",
     )
 
 
@@ -160,7 +160,7 @@ def request_live_visual_refresh(window, delay_ms: float | None = None) -> None:
         delay,
         lambda: flush_live_visual_refreshes(window),
         priority=-20,
-        coalesce="latest",
+        coalesce="earliest",
     )
 
 
