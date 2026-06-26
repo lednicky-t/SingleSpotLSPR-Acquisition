@@ -865,6 +865,7 @@ class MainWindow(QMainWindow):
         self._recording_blink_visible = True
         self._processing_debug_mode_enabled = bool(load_app_setting("processing_debug_mode", False))
         set_processing_debug_mode_enabled(self._processing_debug_mode_enabled)
+        self._startup_freeze_plots = bool(load_app_setting("startup_freeze_plots", False))
         self._device_comm_service = DeviceCommunicationService.shared()
         hdf5_compression_setting = load_app_setting("measurement_hdf5_compression_enabled", True)
         if isinstance(hdf5_compression_setting, str):
@@ -3003,6 +3004,10 @@ class MainWindow(QMainWindow):
 
     def _set_metric_plot_enabled(self, enabled: bool) -> None:
         set_metric_plot_enabled(self, enabled)
+
+    def _set_startup_freeze_plots_enabled(self, enabled: bool) -> None:
+        self._startup_freeze_plots = bool(enabled)
+        save_app_setting("startup_freeze_plots", self._startup_freeze_plots)
 
     def _apply_acquisition_state_to_widgets(self, state: dict[str, object]) -> None:
         apply_acquisition_state_to_widgets(self, state)

@@ -31,6 +31,11 @@ class PreferencesDialog(QDialog):
         self.acquisition_state_autosave_check = QCheckBox("Acquisition state autosave")
         self.log_buffering_check = QCheckBox("Log buffering")
         self.gui_housekeeping_check = QCheckBox("GUI housekeeping")
+        self.freeze_on_startup_check = QCheckBox("Start with Processed spectra frozen")
+        self.freeze_on_startup_check.setToolTip(
+            "When enabled, the Processed spectra plot starts frozen each time the application opens.\n"
+            "Freeze can always be toggled manually using the snowflake button in the toolbar."
+        )
         self.metric_plot_check = QCheckBox("Metric plot")
         self.processing_debug_check = QCheckBox("Processing debug mode")
         self.hdf5_compression_check = QCheckBox("Measurement HDF5 compression")
@@ -77,6 +82,7 @@ class PreferencesDialog(QDialog):
         display_layout.setFormAlignment(Qt.AlignmentFlag.AlignTop)
         display_layout.setHorizontalSpacing(16)
         display_layout.setVerticalSpacing(10)
+        display_layout.addRow(self.freeze_on_startup_check)
         display_layout.addRow(self.metric_plot_check)
         display_layout.addRow(self.processing_debug_check)
         display_layout.addRow(self.hdf5_compression_check)
@@ -105,6 +111,7 @@ class PreferencesDialog(QDialog):
         self.acquisition_state_autosave_check.setChecked(bool(getattr(self._window, "_acquisition_state_autosave_enabled", True)))
         self.log_buffering_check.setChecked(bool(getattr(self._window, "_log_buffering_enabled", True)))
         self.gui_housekeeping_check.setChecked(bool(getattr(self._window, "_gui_housekeeping_enabled", True)))
+        self.freeze_on_startup_check.setChecked(bool(getattr(self._window, "_startup_freeze_plots", False)))
         self.metric_plot_check.setChecked(bool(getattr(self._window, "_metric_plot_enabled", True)))
         self.processing_debug_check.setChecked(bool(getattr(self._window, "_processing_debug_mode_enabled", False)))
         self.hdf5_compression_check.setChecked(bool(getattr(self._window, "_hdf5_compression_enabled", True)))
@@ -122,6 +129,8 @@ class PreferencesDialog(QDialog):
             self._window._set_log_buffering_enabled(self.log_buffering_check.isChecked())
         if hasattr(self._window, "_set_gui_housekeeping_enabled"):
             self._window._set_gui_housekeeping_enabled(self.gui_housekeeping_check.isChecked())
+        if hasattr(self._window, "_set_startup_freeze_plots_enabled"):
+            self._window._set_startup_freeze_plots_enabled(self.freeze_on_startup_check.isChecked())
         if hasattr(self._window, "_set_metric_plot_enabled"):
             self._window._set_metric_plot_enabled(self.metric_plot_check.isChecked())
         if hasattr(self._window, "_set_processing_debug_mode_enabled"):

@@ -7,7 +7,7 @@ from copy import deepcopy
 
 from lspr_app.domain.pump_plan import to_core_experiment_plan
 from lspr_app.gui.main_window_processing import normalize_sensorgram_metric_name, sensorgram_metric_order, sync_legacy_metric_widgets_from_state
-from lspr_app.storage.app_config import save_acquisition_state, save_window_ui_state
+from lspr_app.storage.app_config import load_app_setting, save_acquisition_state, save_window_ui_state
 from lspr_core import LAUNCH_PROFILE_CONTROL_EDITOR, LAUNCH_PROFILE_FULL, LAUNCH_PROFILE_SIMULATION, launch_profile_spec, DEFAULT_LAUNCH_PROFILE
 
 
@@ -1494,7 +1494,7 @@ def apply_acquisition_state_to_widgets(window, state: dict[str, object]) -> None
         window._update_residual_axis_visibility(residual_visible)
         window._update_residual_button_icon()
 
-        frozen = bool(state.get("freeze_plots", False))
+        frozen = bool(load_app_setting("startup_freeze_plots", False))
         window.freeze_plots_button.blockSignals(True)
         window.freeze_plots_button.setChecked(frozen)
         window.freeze_plots_button.blockSignals(False)
