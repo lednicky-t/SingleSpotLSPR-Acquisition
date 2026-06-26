@@ -452,6 +452,10 @@ def flush_live_acquisition_results(window) -> None:
 
     window._ui_preview_replaced_count = int(getattr(window, "_ui_preview_replaced_count", 0)) + dropped_events
 
+    recording_backpressure = sum(e.recording_dropped_count for e in drained_events)
+    if recording_backpressure > 0:
+        window._raw_recording_backpressure_count = int(getattr(window, "_raw_recording_backpressure_count", 0)) + recording_backpressure
+
     latest_event: LiveAcquisitionEvent | None = None
     for event in reversed(drained_events):
         if event.error is None and event.result is not None:

@@ -53,6 +53,7 @@ class LiveAcquisitionEvent:
     source_epoch: int = 0
     source_sample_index: int = 0
     produced_at_perf: float | None = None
+    recording_dropped_count: int = 0
 
 
 @dataclass(slots=True)
@@ -435,6 +436,7 @@ def _live_acquisition_worker_main(
     recording_enabled = bool(recording_enabled)
     logger = logging.getLogger("lspr_app.acquisition")
     last_recording_backpressure_log_at = 0.0
+    recording_dropped_pending = 0
 
     try:
         try:
@@ -501,6 +503,7 @@ def _live_acquisition_worker_main(
                     try:
                         recording_queue.put_nowait(event)
                     except queue.Full:
+                        recording_dropped_pending += 1
                         now = perf_counter()
                         if now - last_recording_backpressure_log_at >= 1.0:
                             logger.warning(
@@ -509,6 +512,9 @@ def _live_acquisition_worker_main(
                                 _queue_qsize_safe(recording_queue),
                             )
                             last_recording_backpressure_log_at = now
+                if recording_dropped_pending > 0:
+                    event.recording_dropped_count = recording_dropped_pending
+                    recording_dropped_pending = 0
                 _queue_put_latest(result_queue, event)
                 _queue_put_latest(processing_queue, event)
             except Exception as exc:  # pragma: no cover - hardware/runtime path
