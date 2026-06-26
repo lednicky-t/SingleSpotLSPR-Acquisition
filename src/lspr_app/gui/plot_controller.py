@@ -615,6 +615,8 @@ def refresh_plot(window) -> None:
 
 
 def autoscale_spectrum_plot(window) -> None:
+    if bool(getattr(window, "_plots_frozen", False)):
+        return
     processed = window._last_processed_plot
     if processed is None or len(processed.wavelengths_nm) == 0:
         window.spectrum_plot.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
