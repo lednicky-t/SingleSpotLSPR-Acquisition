@@ -4736,6 +4736,8 @@ class MainWindow(QMainWindow):
         clear_trace_history_for(self)
 
     def _autoscale_spectrum_plot(self) -> None:
+        if self._plots_frozen:
+            return
         autoscale_spectrum_plot_for(self)
         apply_processing_range_to_spectrum_plot_for(self)
 
