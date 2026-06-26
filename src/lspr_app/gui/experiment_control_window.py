@@ -107,6 +107,9 @@ from lspr_app.gui.experiment_control_table import (
 )
 from lspr_app.gui.experiment_control_editing import ExperimentControlEditingController
 from lspr_app.gui.experiment_control_dialogs import ExperimentControlDialogs
+from lspr_app.gui.experiment_control_controller import ExperimentControlController
+from lspr_app.gui.experiment_control_backend import ExperimentControlBackend, NullExperimentControlBackend
+from lspr_app.gui.experiment_control_capabilities import ExperimentControlCapabilities
 from lspr_app.gui.icon_helpers import flow_tabler_icon, tint_tabler_icon, transport_icon
 from lspr_app.gui.ui_helpers import make_compact_spinbox
 from lspr_app.storage.app_config import load_app_setting, save_app_setting, save_window_ui_state
@@ -1551,6 +1554,71 @@ class PlanColorDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+@dataclass(slots=True)
+class _PlannedCommand:
+    label: str
+    command_type: str
+    payload: dict
+    description: str
+    is_switch_move: bool = False
+
+
+@dataclass(slots=True)
+class _StepApplyResult:
+    success: bool
+    step: PumpPlanStep
+    status_messages: list[str]
+    needs_mswitch_refresh: bool
+
+
+class _StepApplySignals(QObject):
+    done = pyqtSignal(object)
+
+
+class _StepApplyRunnable(QRunnable):
+    def __init__(
+        self,
+        device_service: DeviceCommunicationService,
+        commands: list[_PlannedCommand],
+        step: PumpPlanStep,
+        needs_mswitch_refresh: bool,
+        pre_status: list[str],
+    ) -> None:
+        super().__init__()
+        self.signals = _StepApplySignals()
+        self._device_service = device_service
+        self._commands = commands
+        self._step = step
+        self._needs_mswitch_refresh = needs_mswitch_refresh
+        self._pre_status = pre_status
+        self.setAutoDelete(True)
+
+    def run(self) -> None:
+        status_messages = list(self._pre_status)
+        success = True
+        needs_mswitch_refresh = self._needs_mswitch_refresh
+        try:
+            for cmd in self._commands:
+                result = self._device_service.send_command(cmd.label, DeviceCommand(cmd.command_type, cmd.payload))
+                if result.success:
+                    if cmd.is_switch_move:
+                        needs_mswitch_refresh = True
+                    _LOGGER.info("Step command OK | %s", cmd.description)
+                else:
+                    _LOGGER.warning("Step command failed | %s | error=%s", cmd.description, result.error)
+                    status_messages.append(f"{cmd.command_type} failed")
+        except Exception as exc:
+            _LOGGER.error("Step apply runnable failed | step=%s error=%s", self._step.step, exc)
+            success = False
+            status_messages.append(f"Error: {exc}")
+        self.signals.done.emit(_StepApplyResult(
+            success=success,
+            step=self._step,
+            status_messages=status_messages,
+            needs_mswitch_refresh=needs_mswitch_refresh,
+        ))
+
+
 class ExperimentControlWindow(QWidget):
     availability_changed = pyqtSignal(object)
     valve_availability_changed = pyqtSignal(object)
@@ -1599,18 +1667,23 @@ class ExperimentControlWindow(QWidget):
         initial_mswitch_devices: list[ControllerProbe] | None = None,
         auto_connect_devices: bool = False,
         show_runtime_controls: bool = True,
+        capabilities: ExperimentControlCapabilities | None = None,
+        backend: ExperimentControlBackend | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._bootstrap_t0 = perf_counter()
         self._bootstrap_batches_logged = 0
         self._ui_state = ui_state
+        self._capabilities = capabilities or ExperimentControlCapabilities.acquisition()
+        self._backend = backend or NullExperimentControlBackend(self._capabilities)
+        self._experiment_control_controller = ExperimentControlController(self, self._backend, self._capabilities)
         self._device_comm_service = DeviceCommunicationService.shared()
         self._pause_state_dialog_state: dict[str, object] = {}
         self._start_maximized = False
         self._updating_table = False
         self._plan_table_active_editor: tuple[int, int] | None = None
-        self._client = RegloICCClient()
+        self._client = None
         self._probe: PumpProbe | None = known_probe
         self._last_selected_port: str | None = None
         self._last_selected_valve_port: str | None = None
@@ -1619,11 +1692,9 @@ class ExperimentControlWindow(QWidget):
         self._connect_generation = 0
         self._connect_in_progress = False
         self._connect_task: PumpConnectTask | None = None
-        self._valve_client: SerialController | None = None
         self._valve_probe: ControllerProbe | None = None
         self._valve_connect_in_progress = False
         self._valve_connect_task: ValveConnectTask | None = None
-        self._mswitch_client: AMFSwitchController | None = None
         self._mswitch_probe: ControllerProbe | None = None
         self._mswitch_probe_cache: list[ControllerProbe] | None = list(initial_mswitch_devices or [])
         self._mswitch_connect_in_progress = False
@@ -1635,7 +1706,7 @@ class ExperimentControlWindow(QWidget):
         self._startup_auto_connect_active = False
         self._startup_auto_connect_stage: str | None = None
         self._startup_auto_connect_queue: list[str] = []
-        self._show_runtime_controls = bool(show_runtime_controls)
+        self._show_runtime_controls = bool(show_runtime_controls and self._capabilities.show_runtime_buttons)
         self._ui_startup_ready = False
         self._plan_running = False
         self._plan_holding = False
@@ -1713,8 +1784,9 @@ class ExperimentControlWindow(QWidget):
             channels=[PumpChannelStep() for _ in range(ACTIVE_PUMP_CHANNELS)],
         )
         self._plan_timer = QTimer(self)
-        self._plan_timer.setInterval(150)
+        self._plan_timer.setSingleShot(True)
         self._plan_timer.timeout.connect(self._advance_experiment_control_progress)
+        self._step_apply_pending = False
         loaded_theme = str(theme_mode or load_app_setting("theme_mode", "dark"))
         self._theme_mode = "dark" if loaded_theme not in {"light", "dark"} else loaded_theme
         if self._theme_mode != "dark":
@@ -1762,7 +1834,7 @@ class ExperimentControlWindow(QWidget):
         self.pump_info_button.setToolTip("Pump details")
         self.connection_dot = QLabel(self)
         self.connection_dot.setFixedSize(10, 10)
-        self.connection_status_label = QLabel("Pump not connected.")
+        self.connection_status_label = QLabel("Pump not connected.", self)
         self.connection_status_label.setWordWrap(True)
         self.protocol_value = QLabel("-", self)
         self.model_value = QLabel("-", self)
@@ -1771,7 +1843,7 @@ class ExperimentControlWindow(QWidget):
 
         self.valve_connection_dot = QLabel(self)
         self.valve_connection_dot.setFixedSize(10, 10)
-        self.valve_connection_status_label = QLabel("Valve controller offline.")
+        self.valve_connection_status_label = QLabel("Valve controller offline.", self)
         self.valve_port_combo = QComboBox(self)
         self.valve_port_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.valve_refresh_ports_button = QPushButton("Refresh", self)
@@ -1780,7 +1852,7 @@ class ExperimentControlWindow(QWidget):
 
         self.mswitch_connection_dot = QLabel(self)
         self.mswitch_connection_dot.setFixedSize(10, 10)
-        self.mswitch_connection_status_label = QLabel("M-Switch offline.")
+        self.mswitch_connection_status_label = QLabel("M-Switch offline.", self)
         self.mswitch_connection_status_label.setWordWrap(True)
         self.mswitch_port_combo = QComboBox(self)
         self.mswitch_port_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
@@ -1794,7 +1866,7 @@ class ExperimentControlWindow(QWidget):
         self.mswitch_target_spin.setRange(1, 12)
         self.mswitch_target_spin.setValue(1)
         self.mswitch_target_spin.setSuffix("")
-        self.mswitch_current_value = QLabel("-")
+        self.mswitch_current_value = QLabel("-", self)
 
         self.manual_flow_spins: list[QDoubleSpinBox] = []
         self.manual_direction_buttons: list[QToolButton] = []
@@ -2024,7 +2096,7 @@ class ExperimentControlWindow(QWidget):
             tint_tabler_icon(flow_tabler_icon("file_export"), QColor("#8fbaff")),
             "Export the current experiment plan to CSV or TXT.",
         )
-        self.import_plan_busy_label = QLabel("â—")
+        self.import_plan_busy_label = QLabel("â—", self)
         self.import_plan_busy_label.setVisible(False)
         self.import_plan_busy_label.setFixedSize(16, 16)
         self.import_plan_busy_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2069,6 +2141,7 @@ class ExperimentControlWindow(QWidget):
         self._refresh_switch_solution_combo(self.step_switch_spin.value())
         self._set_switch_solution_mode(self._switch_solution_mode)
         self._connect_signals()
+        self._apply_capabilities_to_ui()
         self._sync_device_connections_from_service()
         self._update_time_unit_ui()
         self._experiment_control_edit_controller.set_edit_mode(False)
@@ -2389,12 +2462,12 @@ class ExperimentControlWindow(QWidget):
     def _connect_signals(self) -> None:
         self.refresh_ports_button.clicked.connect(self._refresh_ports)
         self.connection_toggle_button.clicked.connect(self._toggle_connection)
-        self.plan_toggle_button.clicked.connect(self._toggle_experiment_control_run_hold)
-        self.hold_plan_button.clicked.connect(self._toggle_experiment_control_hold)
-        self.pause_plan_button.clicked.connect(self._toggle_experiment_control_pause)
-        self.stop_plan_button.clicked.connect(self._stop_experiment_control)
-        self.previous_step_button.clicked.connect(lambda _checked=False: self._move_to_relative_experiment_control_step(-1))
-        self.next_step_button.clicked.connect(lambda _checked=False: self._move_to_relative_experiment_control_step(1))
+        self.plan_toggle_button.clicked.connect(self._experiment_control_controller.toggle_run_hold)
+        self.hold_plan_button.clicked.connect(self._experiment_control_controller.toggle_hold)
+        self.pause_plan_button.clicked.connect(self._experiment_control_controller.toggle_pause)
+        self.stop_plan_button.clicked.connect(self._experiment_control_controller.stop)
+        self.previous_step_button.clicked.connect(lambda _checked=False: self._experiment_control_controller.move_relative(-1))
+        self.next_step_button.clicked.connect(lambda _checked=False: self._experiment_control_controller.move_relative(1))
         self.port_combo.currentTextChanged.connect(self._remember_selected_port)
         self.pump_info_button.clicked.connect(self._show_pump_info)
         self.valve_refresh_ports_button.clicked.connect(self._refresh_valve_ports)
@@ -2443,6 +2516,66 @@ class ExperimentControlWindow(QWidget):
         selection_model = self.plan_table.selectionModel()
         if selection_model is not None:
             selection_model.currentChanged.connect(self._handle_experiment_control_current_index_changed)
+
+    def capabilities(self) -> ExperimentControlCapabilities:
+        return self._capabilities
+
+    def backend(self) -> ExperimentControlBackend:
+        return self._backend
+
+    def set_capabilities(self, capabilities: ExperimentControlCapabilities) -> None:
+        self._capabilities = capabilities
+        self._show_runtime_controls = bool(self._capabilities.show_runtime_buttons)
+        self._experiment_control_controller.set_capabilities(capabilities)
+        self._apply_capabilities_to_ui()
+
+    def bind_backend(self, backend: ExperimentControlBackend | None) -> None:
+        self._backend = backend or NullExperimentControlBackend(self._capabilities)
+        self._experiment_control_controller.bind_backend(self._backend)
+        self._apply_capabilities_to_ui()
+
+    def _apply_capabilities_to_ui(self) -> None:
+        capabilities = self._capabilities
+        runtime_visible = bool(capabilities.show_runtime_buttons and self._show_runtime_controls)
+        self._experiment_control_flow_action_row.setVisible(runtime_visible)
+        self.previous_step_button.setVisible(bool(capabilities.show_step_navigation_controls))
+        self.next_step_button.setVisible(bool(capabilities.show_step_navigation_controls))
+        self.plan_toggle_button.setVisible(runtime_visible)
+        self.hold_plan_button.setVisible(runtime_visible)
+        self.pause_plan_button.setVisible(runtime_visible)
+        self.stop_plan_button.setVisible(runtime_visible)
+        self.record_with_flow_button.setVisible(runtime_visible)
+        self.plan_detail_toggle.setVisible(bool(capabilities.plan_import_export_enabled))
+        self.import_plan_button.setVisible(bool(capabilities.plan_import_export_enabled))
+        self.export_plan_button.setVisible(bool(capabilities.plan_import_export_enabled))
+        self.import_plan_busy_label.setVisible(bool(capabilities.plan_import_export_enabled))
+        device_visible = bool(capabilities.devices_enabled)
+        for widget in (
+            self.refresh_ports_button,
+            self.connection_toggle_button,
+            self.pump_info_button,
+            self.port_combo,
+            self.connection_dot,
+            self.connection_status_label,
+            self.protocol_value,
+            self.model_value,
+            self.serial_value,
+            self.channels_value,
+            self.valve_refresh_ports_button,
+            self.valve_connection_toggle_button,
+            self.valve_port_combo,
+            self.valve_connection_dot,
+            self.valve_connection_status_label,
+            self.mswitch_refresh_ports_button,
+            self.mswitch_connection_toggle_button,
+            self.mswitch_home_button,
+            self.mswitch_move_button,
+            self.mswitch_port_combo,
+            self.mswitch_connection_dot,
+            self.mswitch_connection_status_label,
+            self.mswitch_current_value,
+        ):
+            widget.setVisible(device_visible)
 
     def _make_icon_button(self, icon: QIcon, tooltip: str) -> QToolButton:
         button = QToolButton(self)
@@ -4379,9 +4512,8 @@ class ExperimentControlWindow(QWidget):
             self._apply_experiment_control_step_to_pump(restore_step, start=True)
         self._set_plan_runtime_flags(running=True, holding=False, paused=False)
         self._plan_started_monotonic = monotonic()
-        if self._plan_timer.isActive():
-            self._plan_timer.stop()
-        self._plan_timer.start()
+        self._plan_timer.stop()
+        self._schedule_plan_timer()
         self._update_experiment_control_toggle_button()
         self._set_status_message(status_message)
         _LOGGER.info(log_message)
@@ -4398,7 +4530,7 @@ class ExperimentControlWindow(QWidget):
         self._plan_started_monotonic = monotonic()
         self._update_experiment_control_toggle_button()
         self._activate_experiment_control_step_for_elapsed(0.0, force=True)
-        self._plan_timer.start()
+        self._schedule_plan_timer()
         self._set_status_message(f"Running experiment plan from step {self._plan_active_row + 1 if self._plan_active_row is not None else 1}.")
         _LOGGER.info("Experiment plan started | step=%s", self._plan_active_row + 1 if self._plan_active_row is not None else 1)
         if self._plan_active_row is not None and 0 <= self._plan_active_row < len(steps):
@@ -4407,14 +4539,13 @@ class ExperimentControlWindow(QWidget):
     def _begin_paused_experiment_plan_run(self, row: int, steps: list[PumpPlanStep]) -> None:
         self._paused_plan_step = deepcopy(steps[row])
         self._plan_active_row = row
-        if self._plan_timer.isActive():
-            self._plan_timer.stop()
-        self._plan_timer.start()
+        self._plan_timer.stop()
         self._reset_plan_runtime_counters()
         self._ensure_measurement_started()
         self._set_plan_runtime_flags(running=False, holding=False, paused=True)
         self._plan_started_monotonic = None
         self._step_started_monotonic = None
+        self._schedule_plan_timer()
         pause_applied = self._apply_pause_state()
         self._update_experiment_control_toggle_button()
         if pause_applied:
@@ -4458,9 +4589,8 @@ class ExperimentControlWindow(QWidget):
         self._plan_resume_elapsed_s = 0.0
         self._plan_started_monotonic = monotonic()
         self._step_started_monotonic = monotonic()
-        if self._plan_timer.isActive():
-            self._plan_timer.stop()
-        self._plan_timer.start()
+        self._plan_timer.stop()
+        self._schedule_plan_timer()
         self._update_experiment_control_toggle_button()
         self._sync_experiment_control_timeline(steps, row, refresh_status=True)
         self._set_status_message(status_message)
@@ -5155,9 +5285,7 @@ class ExperimentControlWindow(QWidget):
 
     def _show_error(self, message: str) -> None:
         self._set_status_message(message)
-        if getattr(self, "_closing", False):
-            return
-        QMessageBox.critical(self, "Experiment control error", message)
+        _LOGGER.error("%s", message)
 
     def _begin_plan_table_edit(self, row: int, column: int) -> None:
         self._plan_table_active_editor = (int(row), int(column))
@@ -5615,9 +5743,9 @@ class ExperimentControlWindow(QWidget):
 
     def _device_label_for(self, device_key: str) -> str:
         return {
-            "pump": "pump_main",
-            "valve": "valve_inlet",
-            "mswitch": "switch_main",
+            "pump": "pump_1",
+            "valve": "valve_1",
+            "mswitch": "switch_1",
         }.get(device_key, f"{device_key}_main")
 
     def _ensure_device_profile(self, device_key: str, port: str, *, driver: str) -> str:
@@ -5625,7 +5753,7 @@ class ExperimentControlWindow(QWidget):
         role = {
             "pump": "sample_pump",
             "valve": "inlet_valve",
-            "mswitch": "selector_switch",
+            "mswitch": "main_switch",
         }.get(device_key)
         self._device_comm_service.register_endpoint_assignment(
             label,
@@ -5638,11 +5766,7 @@ class ExperimentControlWindow(QWidget):
 
     def _sync_device_connections_from_service(self) -> None:
         pump = self._device_comm_service.connection(self._device_label_for("pump"))
-        self._client = pump if pump is not None else RegloICCClient()
-        valve = self._device_comm_service.connection(self._device_label_for("valve"))
-        self._valve_client = valve
-        mswitch = self._device_comm_service.connection(self._device_label_for("mswitch"))
-        self._mswitch_client = mswitch
+        self._client = pump if pump is not None else None
 
     def _service_device_connected(self, device_key: str) -> bool:
         label = self._device_label_for(device_key)
@@ -5651,6 +5775,16 @@ class ExperimentControlWindow(QWidget):
         except Exception:
             connection = self._device_comm_service.connection(label)
             return bool(connection is not None and getattr(connection, "is_connected", lambda: False)())
+
+    def _service_connection_detail(self, device_key: str) -> tuple[str | None, str | None]:
+        label = self._device_label_for(device_key)
+        connection = self._device_comm_service.connection(label)
+        if connection is None:
+            return None, None
+        return (
+            str(getattr(connection, "controller_type", None) or getattr(connection, "__class__", type(connection)).__name__ or ""),
+            str(getattr(connection, "port", None) or ""),
+        )
 
     def _send_device_command(self, device_key: str, command_type: str, payload: dict[str, object] | None = None) -> bool:
         label = self._device_label_for(device_key)
@@ -5841,7 +5975,6 @@ class ExperimentControlWindow(QWidget):
         port, client, probe, error = payload
         if client is None or probe is None:
             self._device_comm_service.disconnect_device(self._device_label_for("valve"))
-            self._valve_client = None
             self._valve_probe = None
             self._set_valve_connection_visual(False, f"Valve connect failed on {port}: {error}")
             self.valve_availability_changed.emit(None)
@@ -5859,7 +5992,6 @@ class ExperimentControlWindow(QWidget):
             _LOGGER.warning("Valve service connect failed on %s: %s", port, exc)
             self._finish_startup_device_auto_connect_stage("valve")
             return
-        self._valve_client = client
         self._valve_probe = probe
         claim_port(probe.port, "Experiment Control / Valve")
         self._set_valve_connection_visual(True, f"Connected to {probe.model} [{probe.controller_type}] on {probe.port}.")
@@ -5885,7 +6017,6 @@ class ExperimentControlWindow(QWidget):
     def _disconnect_valve_controller(self) -> None:
         port = getattr(self._valve_probe, "port", None)
         self._device_comm_service.disconnect_device(self._device_label_for("valve"))
-        self._valve_client = None
         self._valve_probe = None
         if port:
             release_port(port, "Experiment Control / Valve")
@@ -5948,10 +6079,9 @@ class ExperimentControlWindow(QWidget):
         self._set_mswitch_connection_visual(False, f"Connecting M-Switch on {port}...")
         _LOGGER.info("Connecting M-Switch on %s", port)
         try:
-            client, probe = connect_mswitch_port(port)
+            client, probe = self._device_comm_service.connect_mswitch_port(port)
         except Exception as exc:
             self._device_comm_service.disconnect_device(self._device_label_for("mswitch"))
-            self._mswitch_client = None
             self._mswitch_probe = None
             self._mswitch_connect_in_progress = False
             self._set_mswitch_connection_visual(False, f"M-Switch connect failed on {port}: {exc}")
@@ -5970,7 +6100,6 @@ class ExperimentControlWindow(QWidget):
             _LOGGER.error("M-Switch service connect failed on %s: %s", port, exc)
             self._finish_startup_device_auto_connect_stage("mswitch")
             return
-        self._mswitch_client = client
         self._mswitch_probe = probe
         claim_port(probe.port, "Experiment Control / M-Switch")
         self.mswitch_availability_changed.emit(probe)
@@ -5984,7 +6113,6 @@ class ExperimentControlWindow(QWidget):
     def _disconnect_mswitch_controller(self) -> None:
         port = getattr(self._mswitch_probe, "port", None)
         self._device_comm_service.disconnect_device(self._device_label_for("mswitch"))
-        self._mswitch_client = None
         self._mswitch_probe = None
         if port:
             release_port(port, "Experiment Control / M-Switch")
@@ -6127,7 +6255,7 @@ class ExperimentControlWindow(QWidget):
             self._show_info("Select a serial port first.")
             return
         try:
-            probe = probe_pump_port(port)
+            probe = self._device_comm_service.probe_pump_port(port)
         except Exception as exc:
             self._probe = None
             self._clear_probe_labels()
@@ -6163,7 +6291,7 @@ class ExperimentControlWindow(QWidget):
         self._connect_generation += 1
         self._connect_in_progress = False
         self._device_comm_service.disconnect_device(self._device_label_for("pump"))
-        self._client = RegloICCClient()
+        self._client: RegloICCClient | None = None
         self._probe = None
         if port:
             release_port(port, "Experiment Control / Pump")
@@ -6197,7 +6325,7 @@ class ExperimentControlWindow(QWidget):
             self._finish_startup_device_auto_connect_stage("pump")
             return
         claim_port(probe.port, "Experiment Control / Pump")
-        self._client = self._device_comm_service.connection(self._device_label_for("pump")) or self._client
+        self._client = self._device_comm_service.connection(self._device_label_for("pump"))
         self._probe = probe
         self._apply_probe(probe)
         self._set_connection_visual(True, f"Connected to {probe.model} on {probe.port}.")
@@ -6280,7 +6408,7 @@ class ExperimentControlWindow(QWidget):
 
     def _show_info(self, message: str) -> None:
         _LOGGER.info("%s", message)
-        QMessageBox.information(self, "Experiment control", message)
+        self._set_status_message(message)
 
     def _show_pump_info(self) -> None:
         details = (
@@ -7370,6 +7498,145 @@ class ExperimentControlWindow(QWidget):
         steps[row] = updated
         self._populate_experiment_control_table(steps, selected_row=row)
 
+    def _plan_step_commands(
+        self, step: PumpPlanStep, *, start: bool
+    ) -> tuple[list[_PlannedCommand], bool, list[str]]:
+        """Build an ordered command list for a step transition (main-thread only — reads widget state).
+
+        Returns (commands, needs_mswitch_refresh, pre_status_messages).
+        """
+        previous = self._applied_plan_step
+        status_messages: list[str] = []
+        commands: list[_PlannedCommand] = []
+        needs_mswitch_refresh = False
+
+        valve = str(step.valve or "").strip()
+        previous_valve = str(previous.valve or "").strip().lower() if previous is not None else ""
+        switch_position = int(max(min(int(step.switch_position), 12), 1))
+        previous_switch = int(max(min(int(previous.switch_position), 12), 1)) if previous is not None else -1
+        switch_changed = switch_position != previous_switch
+        wait_for_switch_first = bool(self._wait_for_mswitch_first and switch_changed)
+
+        pump_label = self._device_label_for("pump")
+        valve_label = self._device_label_for("valve")
+        switch_label = self._device_label_for("mswitch")
+        pump_connected = self._service_device_connected("pump")
+        valve_connected = self._service_device_connected("valve")
+        mswitch_connected = self._service_device_connected("mswitch")
+
+        channels_to_stop: list[int] = []
+        channels_to_start: list[int] = []
+        channels_to_configure: list[tuple[int, float, str, float]] = []
+        channels_to_restart_after_switch: list[int] = []
+
+        _LOGGER.info(
+            "Applying experiment-plan step | step=%s valve=%s previous_valve=%s controller=%s port=%s running=%s holding=%s start=%s",
+            step.step,
+            valve or "-",
+            str(previous.valve or "").strip() or "-" if previous is not None else "-",
+            *self._service_connection_detail("valve"),
+            self._plan_running,
+            self._plan_holding,
+            start,
+        )
+
+        if pump_connected:
+            for index, channel in enumerate(step.channels, start=1):
+                direction = str(channel.direction or "OFF").upper()
+                active = channel.flow_ul_min > 0.0 and direction != "OFF"
+                tube_mm = self.manual_tube_spins[index - 1].value()
+                previous_channel = previous.channels[index - 1] if previous is not None else None
+                previous_direction = (
+                    str(previous_channel.direction or "OFF").upper() if previous_channel is not None else "OFF"
+                )
+                previous_active = (
+                    previous_channel is not None
+                    and previous_channel.flow_ul_min > 0.0
+                    and previous_direction != "OFF"
+                )
+                previous_flow = float(previous_channel.flow_ul_min) if previous_channel is not None else 0.0
+                channel_changed = (
+                    previous is None
+                    or previous_channel is None
+                    or previous_direction != direction
+                    or abs(previous_flow - float(channel.flow_ul_min)) > 1e-9
+                )
+                if previous_active and (not active or channel_changed or (wait_for_switch_first and switch_changed)):
+                    channels_to_stop.append(index)
+                if wait_for_switch_first and switch_changed and previous_active and active and not channel_changed:
+                    channels_to_restart_after_switch.append(index)
+                if active and channel_changed:
+                    channels_to_configure.append((index, float(channel.flow_ul_min), direction, tube_mm))
+                    if start:
+                        channels_to_start.append(index)
+                elif active and start and not previous_active:
+                    channels_to_start.append(index)
+        else:
+            _LOGGER.warning("Pump controller offline; skipping pump channel updates | step=%s", step.step)
+            status_messages.append("Pump controller not connected.")
+
+        effective_starts_after_switch = list(channels_to_start)
+        if wait_for_switch_first and switch_changed:
+            for index in channels_to_restart_after_switch:
+                if index not in effective_starts_after_switch:
+                    effective_starts_after_switch.append(index)
+
+        def _pump_stop_cmds(indices: list[int]) -> list[_PlannedCommand]:
+            return [_PlannedCommand(pump_label, "pump.stop", {"channel": i}, f"pump.stop ch={i}") for i in indices]
+
+        def _pump_configure_cmds() -> list[_PlannedCommand]:
+            return [
+                _PlannedCommand(
+                    pump_label, "pump.set_flow",
+                    {"channel": i, "flow_ul_min": fl, "direction": d, "tube_mm": t, "start": False},
+                    f"pump.set_flow ch={i} flow={fl:.2f} dir={d}",
+                )
+                for i, fl, d, t in channels_to_configure
+            ]
+
+        def _pump_start_cmds(indices: list[int]) -> list[_PlannedCommand]:
+            return [_PlannedCommand(pump_label, "pump.start", {"channel": i}, f"pump.start ch={i}") for i in indices]
+
+        def _valve_cmd() -> list[_PlannedCommand]:
+            if not (valve and valve.lower() != previous_valve):
+                return []
+            if valve_connected:
+                return [_PlannedCommand(valve_label, "valve.set_position", {"position": valve}, f"valve.set_position pos={valve}")]
+            status_messages.append("Valve controller not connected.")
+            _LOGGER.warning("Valve command skipped | controller not connected | step=%s valve=%s", step.step, valve)
+            return []
+
+        def _switch_cmd() -> list[_PlannedCommand]:
+            if not switch_changed:
+                return []
+            if mswitch_connected:
+                return [_PlannedCommand(
+                    switch_label, "switch.move_to", {"position": switch_position, "block": True},
+                    f"switch.move_to pos={switch_position}", is_switch_move=True,
+                )]
+            status_messages.append("M-Switch not connected.")
+            _LOGGER.warning("M-Switch command skipped | controller not connected | step=%s switch=%s", step.step, switch_position)
+            return []
+
+        if wait_for_switch_first:
+            if pump_connected:
+                commands.extend(_pump_stop_cmds(channels_to_stop))
+            commands.extend(_switch_cmd())
+            commands.extend(_valve_cmd())
+            if pump_connected:
+                commands.extend(_pump_configure_cmds())
+                commands.extend(_pump_start_cmds(effective_starts_after_switch))
+        else:
+            if pump_connected:
+                commands.extend(_pump_stop_cmds(channels_to_stop))
+                commands.extend(_pump_configure_cmds())
+                commands.extend(_pump_start_cmds(channels_to_start))
+            commands.extend(_valve_cmd())
+            commands.extend(_switch_cmd())
+
+        needs_mswitch_refresh = any(c.is_switch_move for c in commands)
+        return commands, needs_mswitch_refresh, status_messages
+
     def _apply_experiment_control_step_to_pump(self, step: PumpPlanStep, *, start: bool) -> bool:
         previous = self._applied_plan_step
         _LOGGER.info(
@@ -7384,163 +7651,17 @@ class ExperimentControlWindow(QWidget):
             self._plan_holding,
             start,
         )
-        status_messages: list[str] = []
         try:
-            _LOGGER.info(
-                "Applying experiment-plan step | step=%s valve=%s previous_valve=%s controller=%s port=%s running=%s holding=%s start=%s",
-                step.step,
-                str(step.valve or "").strip() or "-",
-                str(previous.valve or "").strip() if previous is not None else "-",
-                getattr(self._valve_client, "controller_type", None),
-                getattr(self._valve_client, "port", None),
-                self._plan_running,
-                self._plan_holding,
-                start,
-            )
-            valve = str(step.valve or "").strip()
-            previous_valve = str(previous.valve or "").strip().lower() if previous is not None else ""
-            switch_position = int(max(min(int(step.switch_position), 12), 1))
-            previous_switch = int(max(min(int(previous.switch_position), 12), 1)) if previous is not None else -1
-            switch_changed = switch_position != previous_switch
-            wait_for_switch_first = bool(self._wait_for_mswitch_first and switch_changed)
-
-            pump_connected = self._service_device_connected("pump")
-            channels_to_stop: list[int] = []
-            channels_to_start: list[int] = []
-            channels_to_configure: list[tuple[int, float, str, float]] = []
-            channels_to_restart_after_switch: list[int] = []
-            if pump_connected:
-                for index, channel in enumerate(step.channels, start=1):
-                    direction = str(channel.direction or "OFF").upper()
-                    active = channel.flow_ul_min > 0.0 and direction != "OFF"
-                    tube_mm = self.manual_tube_spins[index - 1].value()
-                    previous_channel = previous.channels[index - 1] if previous is not None else None
-                    previous_direction = (
-                        str(previous_channel.direction or "OFF").upper()
-                        if previous_channel is not None
-                        else "OFF"
-                    )
-                    previous_active = (
-                        previous_channel is not None
-                        and previous_channel.flow_ul_min > 0.0
-                        and previous_direction != "OFF"
-                    )
-                    previous_flow = float(previous_channel.flow_ul_min) if previous_channel is not None else 0.0
-                    channel_changed = (
-                        previous is None
-                        or previous_channel is None
-                        or previous_direction != direction
-                        or abs(previous_flow - float(channel.flow_ul_min)) > 1e-9
-                    )
-
-                    if previous_active and (
-                        not active
-                        or channel_changed
-                        or (wait_for_switch_first and switch_changed)
-                    ):
-                        channels_to_stop.append(index)
-
-                    if wait_for_switch_first and switch_changed and previous_active and active and not channel_changed:
-                        channels_to_restart_after_switch.append(index)
-
-                    if active and channel_changed:
-                        channels_to_configure.append((index, float(channel.flow_ul_min), direction, tube_mm))
-                        if start:
-                            channels_to_start.append(index)
-                    elif active and start and not previous_active:
-                        channels_to_start.append(index)
-            else:
-                _LOGGER.warning(
-                    "Pump controller offline; skipping pump channel updates | step=%s",
-                    step.step,
-                )
-                status_messages.append("Pump controller not connected.")
-
-            def _apply_pump_updates(*, skip_stop: bool = False) -> None:
-                if not pump_connected:
-                    return
-                if channels_to_stop and not skip_stop:
-                    for index in channels_to_stop:
-                        self._send_device_command("pump", "pump.stop", {"channel": index})
-                for index, flow_ul_min, direction, tube_mm in channels_to_configure:
-                    self._send_device_command(
-                        "pump",
-                        "pump.set_flow",
-                        {
-                            "channel": index,
-                            "flow_ul_min": flow_ul_min,
-                            "direction": direction,
-                            "tube_mm": tube_mm,
-                            "start": False,
-                        },
-                    )
-                effective_starts = list(channels_to_start)
-                if wait_for_switch_first and switch_changed:
-                    for index in channels_to_restart_after_switch:
-                        if index not in effective_starts:
-                            effective_starts.append(index)
-                if effective_starts:
-                    for index in effective_starts:
-                        self._send_device_command("pump", "pump.start", {"channel": index})
-                if channels_to_stop or effective_starts or channels_to_configure:
-                    _LOGGER.debug(
-                        "Pump channels updated | stop=%s start=%s configure=%s",
-                        channels_to_stop,
-                        effective_starts,
-                        [index for index, _, _, _ in channels_to_configure],
-                    )
-
-            def _apply_valve_command() -> None:
-                nonlocal previous_valve
-                if valve and valve.lower() != previous_valve:
-                    _LOGGER.debug(
-                        "Valve transition | step=%s valve=%s previous=%s controller=%s port=%s",
-                        step.step,
-                        valve,
-                        previous_valve or "-",
-                        getattr(self._valve_client, "controller_type", None),
-                        getattr(self._valve_client, "port", None),
-                    )
-                    if self._service_device_connected("valve"):
-                        if self._send_device_command("valve", "valve.set_position", {"position": valve}):
-                            _LOGGER.info("Valve command sent | step=%s valve=%s", step.step, valve)
-                        else:
-                            status_messages.append("Valve command failed.")
-                    else:
-                        status_messages.append("Valve controller not connected.")
-                        _LOGGER.warning("Valve command skipped | controller not connected | step=%s valve=%s", step.step, valve)
-                elif valve:
-                    _LOGGER.debug(
-                        "Valve unchanged | step=%s valve=%s controller=%s port=%s",
-                        step.step,
-                        valve,
-                        getattr(self._valve_client, "controller_type", None),
-                        getattr(self._valve_client, "port", None),
-                    )
-
-            def _apply_switch_command() -> None:
-                if switch_changed:
-                    if self._service_device_connected("mswitch"):
-                        if self._send_device_command("mswitch", "switch.move_to", {"position": switch_position, "block": True}):
-                            self._update_mswitch_state_from_probe()
-                            _LOGGER.info("M-Switch command sent | step=%s switch=%s", step.step, switch_position)
-                        else:
-                            status_messages.append("Switch move failed.")
-                    else:
-                        status_messages.append("M-Switch not connected.")
-                        _LOGGER.warning("M-Switch command skipped | controller not connected | step=%s switch=%s", step.step, switch_position)
-
-            if wait_for_switch_first:
-                if channels_to_stop and pump_connected:
-                    for index in channels_to_stop:
-                        self._send_device_command("pump", "pump.stop", {"channel": index})
-                _apply_switch_command()
-                _apply_valve_command()
-                _apply_pump_updates(skip_stop=True)
-            else:
-                _apply_pump_updates()
-                _apply_valve_command()
-                _apply_switch_command()
+            commands, needs_mswitch_refresh, status_messages = self._plan_step_commands(step, start=start)
+            for cmd in commands:
+                result = self._device_comm_service.send_command(cmd.label, DeviceCommand(cmd.command_type, cmd.payload))
+                if result.success:
+                    _LOGGER.info("Step command OK | %s", cmd.description)
+                    if cmd.is_switch_move:
+                        self._update_mswitch_state_from_probe()
+                else:
+                    _LOGGER.warning("Device command failed | %s | error=%s", cmd.description, result.error)
+                    status_messages.append(f"{cmd.command_type} failed")
         except Exception as exc:
             self._set_status_message(f"Step apply failed: {exc}")
             _LOGGER.error("Experiment plan step apply failed | step=%s error=%s", step.step, exc)
@@ -7552,6 +7673,44 @@ class ExperimentControlWindow(QWidget):
         _LOGGER.info("Applied experiment-plan step %s", step.step)
         self._emit_experimental_control_state("step_applied", step, status="; ".join(status_messages))
         return True
+
+    def _apply_step_to_pump_async(self, step: PumpPlanStep, *, start: bool) -> None:
+        """Dispatch device commands for a step transition to a QRunnable (main-thread safe entry point)."""
+        previous = self._applied_plan_step
+        _LOGGER.info(
+            "Experiment control step apply (async) | step=%s pump_connected=%s valve_connected=%s switch_connected=%s",
+            step.step,
+            self._service_device_connected("pump"),
+            self._service_device_connected("valve"),
+            self._service_device_connected("mswitch"),
+        )
+        try:
+            commands, needs_mswitch_refresh, pre_status = self._plan_step_commands(step, start=start)
+        except Exception as exc:
+            _LOGGER.error("Step plan failed (async) | step=%s error=%s", step.step, exc)
+            self._set_status_message(f"Step apply failed: {exc}")
+            return
+        # Optimistic state update: record the new step as applied so back-to-back
+        # _plan_step_commands calls produce the correct diff even before the runnable finishes.
+        self._applied_plan_step = step
+        self._step_apply_pending = True
+        runnable = _StepApplyRunnable(
+            self._device_comm_service, commands, step, needs_mswitch_refresh, pre_status
+        )
+        runnable.signals.done.connect(self._on_step_apply_async_done)
+        QThreadPool.globalInstance().start(runnable)
+
+    def _on_step_apply_async_done(self, result: _StepApplyResult) -> None:
+        self._step_apply_pending = False
+        if result.needs_mswitch_refresh:
+            self._update_mswitch_state_from_probe()
+        status = "; ".join(result.status_messages)
+        self._set_status_message(
+            ((" | ".join(result.status_messages) + " | ") if result.status_messages else "")
+            + f"Applied experiment-plan step {result.step.step}."
+        )
+        _LOGGER.info("Applied experiment-plan step %s (async)", result.step.step)
+        self._emit_experimental_control_state("step_applied", result.step, status=status)
 
     def _experiment_control_step_change_summary(self, previous: PumpPlanStep | None, updated: PumpPlanStep | None) -> str:
         if previous is None or updated is None:
@@ -7711,6 +7870,25 @@ class ExperimentControlWindow(QWidget):
     def _stop_experiment_control(self) -> None:
         self._stop_experiment_plan(self._applied_plan_step)
 
+    def _schedule_plan_timer(self, steps: list | None = None) -> None:
+        if self._plan_timer.isActive():
+            return
+        if not self._plan_running and not self._plan_holding and not self._plan_paused:
+            return
+        if not self._plan_running or self._plan_started_monotonic is None or self._plan_holding or self._plan_paused:
+            self._plan_timer.start(150)
+            return
+        if steps is None:
+            steps = self._read_experiment_control_steps()
+        active_row = self._plan_active_row
+        if active_row is None or not steps or not (0 <= active_row < len(steps)):
+            self._plan_timer.start(150)
+            return
+        step = steps[active_row]
+        elapsed = self._plan_resume_elapsed_s + max(monotonic() - self._plan_started_monotonic, 0.0)
+        remaining_ms = int((float(step.duration_s) - elapsed) * 1000)
+        self._plan_timer.start(max(1, min(150, remaining_ms)))
+
     def _move_to_relative_experiment_control_step(self, delta: int) -> None:
         steps = self._read_experiment_control_steps()
         if not steps:
@@ -7792,13 +7970,20 @@ class ExperimentControlWindow(QWidget):
         self._emit_experimental_control_state(event, step, status=status)
 
     def _advance_experiment_control_progress(self) -> None:
+        steps: list | None = None
+
         def _callback() -> None:
+            nonlocal steps
             if self._plan_holding or self._plan_paused:
                 steps = self._read_experiment_control_steps()
                 if steps:
                     self._sync_experiment_control_timeline(steps, self._plan_active_row, refresh_status=True)
                 return
             if not self._plan_running or self._plan_started_monotonic is None:
+                return
+            if self._step_apply_pending:
+                # Previous step's device commands still running; wait and retry.
+                self._plan_timer.start(50)
                 return
             steps = self._read_experiment_control_steps()
             if not steps:
@@ -7819,7 +8004,7 @@ class ExperimentControlWindow(QWidget):
                     _LOGGER.info("Experiment plan finished.")
                     return
                 self._plan_active_row = next_row
-                self._apply_experiment_control_step_to_pump(steps[next_row], start=True)
+                self._apply_step_to_pump_async(steps[next_row], start=True)
                 self._plan_elapsed_s = 0.0
                 self._plan_resume_elapsed_s = 0.0
                 self._plan_started_monotonic = monotonic()
@@ -7830,6 +8015,7 @@ class ExperimentControlWindow(QWidget):
             self._sync_experiment_control_timeline(steps, current_row, refresh_status=True)
 
         self._run_gui_callback_timed("experiment_control_progress", _callback)
+        self._schedule_plan_timer(steps)
 
     def _activate_experiment_control_step_for_elapsed(self, elapsed_s: float, *, force: bool) -> None:
         steps = self._read_experiment_control_steps()
@@ -7875,13 +8061,11 @@ class ExperimentControlWindow(QWidget):
             self._stop_experiment_control()
             self._release_claimed_device_ports()
             self._device_comm_service.disconnect_device(self._device_label_for("valve"))
-            self._valve_client = None
             self._valve_probe = None
             self._device_comm_service.disconnect_device(self._device_label_for("mswitch"))
-            self._mswitch_client = None
             self._mswitch_probe = None
             self._device_comm_service.disconnect_device(self._device_label_for("pump"))
-            self._client = RegloICCClient()
+            self._client = None
             self._probe = None
             self.valve_availability_changed.emit(None)
             self.mswitch_availability_changed.emit(None)
@@ -8422,12 +8606,10 @@ class ExperimentControlWindow(QWidget):
         self._device_comm_service.disconnect_device(self._device_label_for("pump"))
         self._release_claimed_device_ports()
         self._device_comm_service.disconnect_device(self._device_label_for("valve"))
-        self._valve_client = None
         self._valve_probe = None
         self.availability_changed.emit(None)
         self.valve_availability_changed.emit(None)
         self._device_comm_service.disconnect_device(self._device_label_for("mswitch"))
-        self._mswitch_client = None
         self._mswitch_probe = None
         self.mswitch_availability_changed.emit(None)
         super().closeEvent(event)
