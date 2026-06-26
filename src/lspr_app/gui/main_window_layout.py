@@ -91,8 +91,6 @@ def build_main_layout_for(window) -> None:
     trace_title = QLabel("Sensorgram")
     trace_title.setObjectName("sensorgramHeaderLabel")
     trace_title.setStyleSheet("color: #8FE3A1;")
-    window.sensorgram_content_mode_button.clicked.connect(window._cycle_sensorgram_content_mode)
-    window._update_sensorgram_content_mode_button()
     window._update_sensorgram_metric_y_axis_mode_button()
     window.sensorgram_settings_button.clicked.connect(window._show_sensorgram_plot_settings_dialog)
 
@@ -114,7 +112,6 @@ def build_main_layout_for(window) -> None:
     trace_left_field.setSpacing(6)
     trace_left_field.addWidget(window.trace_record_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
     trace_left_field.addWidget(window.sensorgram_freeze_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-    trace_left_field.addWidget(window.sensorgram_content_mode_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
     trace_left_field.addWidget(window.sensorgram_reload_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
     trace_left_field.addWidget(window.clear_trace_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
     trace_left_field.addWidget(window.sensorgram_settings_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)

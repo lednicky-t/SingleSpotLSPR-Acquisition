@@ -6,8 +6,6 @@ from datetime import datetime, timedelta
 from html import escape
 from time import perf_counter
 
-from PyQt6.QtCore import QRectF
-
 import numpy as np
 import pyqtgraph as pg
 from scipy.interpolate import CubicSpline
@@ -15,16 +13,10 @@ from scipy.interpolate import CubicSpline
 from lspr_app.domain.models import Spectrum
 from lspr_app.gui.main_window_sensorgram import normalize_sensorgram_metric_y_axis_mode
 from lspr_app.gui.plot_view_cache import (
-    build_heatmap_arrays,
-    build_heatmap_history_token,
     build_metric_series_token,
-    derive_heatmap_levels_from_matrix,
     downsample_metric_series_for_view as _downsample_metric_series_for_view,
-    expand_heatmap_levels,
     level_raw_weight,
     sample_absolute_metric_series_for_view,
-    sample_absolute_heatmap_rows_for_view,
-    select_heatmap_rows_for_view,
 )
 
 
@@ -760,28 +752,9 @@ def apply_processing_range_to_spectrum_plot(window) -> None:
 
 def autoscale_metric_plot(window, *, force: bool = True) -> None:
     started = perf_counter()
-    content_mode = getattr(window, "_sensorgram_content_mode", "metric")
     axis_mode = _sensorgram_time_axis_mode(window)
     clock_mode = axis_mode == "clock"
     metric_y_axis_auto = _sensorgram_metric_y_axis_is_auto(window)
-    if content_mode == "heatmap":
-        if bool(getattr(window, "_live_active", False)):
-            _show_sensorgram_heatmap_unavailable(
-                window,
-                clock_mode=clock_mode,
-            )
-            window._metric_autoscale_pending = False
-            window._last_metric_autoscale_ms = (perf_counter() - started) * 1000.0
-            return
-        window._trace_view_autoscaling = True
-        try:
-            render_sensorgram_heatmap(window, window._sensorgram_heatmap_history, clock_mode=clock_mode)
-        finally:
-            window._trace_view_autoscaling = False
-            window._last_metric_autoscale_at = perf_counter()
-        window._metric_autoscale_pending = False
-        window._last_metric_autoscale_ms = (perf_counter() - started) * 1000.0
-        return
     series = window._active_trace_series()
     if not series:
         window.trace_plot.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
@@ -1037,11 +1010,8 @@ def refresh_metric_plot(window, trace_label: str) -> None:
     started = perf_counter()
     axis_mode = _sensorgram_time_axis_mode(window)
     clock_mode = axis_mode == "clock"
-    content_mode = getattr(window, "_sensorgram_content_mode", "metric")
     metric_plot_enabled = bool(getattr(window, "_metric_plot_enabled", True))
     window._last_metric_plot_disabled_fast_path = False
-    if content_mode != "heatmap":
-        window._last_sensorgram_heatmap_render_ms = None
     try:
         if not metric_plot_enabled:
             _show_metric_plot_unavailable(window, clock_mode)
@@ -1054,37 +1024,12 @@ def refresh_metric_plot(window, trace_label: str) -> None:
                     pass
             return
         active_series = window._active_trace_series()
-        if content_mode == "heatmap":
-            _set_plot_label_if_changed(window.trace_plot, "left", "Wavelength (nm)", window, "_trace_left_label_text")
-            _set_trace_time_axis_mode(window, axis_mode=axis_mode)
-            for curve in window.trace_curves.values():
-                if hasattr(curve, "setData"):
-                    curve.setData([], [])
-                _set_visible_if_changed(curve, False)
-            for band in getattr(window, "trace_metric_envelope_bands", {}).values():
-                if hasattr(band, "setVisible"):
-                    band.setVisible(False)
-            if hasattr(window, "trace_legend"):
-                _set_visible_if_changed(window.trace_legend, False)
-            render_sensorgram_heatmap(window, window._sensorgram_heatmap_history, clock_mode=clock_mode)
-            if _sensorgram_metric_y_axis_is_auto(window):
-                request_metric_autoscale(window)
-            sync_control_step_overlay = getattr(window, "_sync_sensorgram_control_step_overlay", None)
-            if callable(sync_control_step_overlay):
-                try:
-                    sync_control_step_overlay()
-                except Exception:
-                    pass
-            return
         if active_series:
             _set_plot_label_if_changed(window.trace_plot, "left", trace_label, window, "_trace_left_label_text")
             previous_visible_mode = getattr(window, "_visible_trace_mode", None)
             visible_mode = _set_trace_time_axis_mode(window, axis_mode=axis_mode)
             metric_changed = render_metric_series(window, active_series, clock_mode=clock_mode)
             window._visible_trace_mode = visible_mode
-            _set_visible_if_changed(window.trace_heatmap_image, False)
-            if hasattr(window, "trace_heatmap_notice_item"):
-                _set_visible_if_changed(window.trace_heatmap_notice_item, False)
             if hasattr(window, "trace_legend"):
                 _set_visible_if_changed(window.trace_legend, True)
             for curve in window.trace_curves.values():
@@ -1099,23 +1044,16 @@ def refresh_metric_plot(window, trace_label: str) -> None:
                     pass
             return
 
-        if content_mode == "heatmap":
-            _set_plot_label_if_changed(window.trace_plot, "left", "Wavelength (nm)", window, "_trace_left_label_text")
-        else:
-            _set_plot_label_if_changed(window.trace_plot, "left", trace_label, window, "_trace_left_label_text")
+        _set_plot_label_if_changed(window.trace_plot, "left", trace_label, window, "_trace_left_label_text")
         _set_trace_time_axis_mode(window, axis_mode=axis_mode)
         for curve in window.trace_curves.values():
             curve.setData([], [])
-            _set_visible_if_changed(curve, content_mode != "heatmap")
+            _set_visible_if_changed(curve, True)
         for band in getattr(window, "trace_metric_envelope_bands", {}).values():
             if hasattr(band, "setVisible"):
                 band.setVisible(False)
-        if hasattr(window, "trace_heatmap_image"):
-            _set_visible_if_changed(window.trace_heatmap_image, False)
-        if hasattr(window, "trace_heatmap_notice_item"):
-            _set_visible_if_changed(window.trace_heatmap_notice_item, False)
         if hasattr(window, "trace_legend"):
-            _set_visible_if_changed(window.trace_legend, content_mode != "heatmap")
+            _set_visible_if_changed(window.trace_legend, True)
         window._visible_trace_x = None
         window._visible_trace_y = None
         window._visible_trace_mode = axis_mode
@@ -1476,242 +1414,6 @@ def render_metric_series(
     return changed
 
 
-def render_sensorgram_heatmap(
-    window,
-    history: list[tuple[float, np.ndarray]],
-    clock_mode: bool,
-) -> None:
-    window._last_sensorgram_heatmap_arrays_ms = None
-    window._last_sensorgram_heatmap_image_ms = None
-    window._last_sensorgram_heatmap_axes_ms = None
-    if not hasattr(window, "trace_heatmap_image"):
-        return
-    if not bool(getattr(window, "_sensorgram_heatmap_enabled", True)):
-        _show_sensorgram_heatmap_unavailable(window, clock_mode)
-        return
-    if bool(getattr(window, "_live_active", False)):
-        _show_sensorgram_heatmap_unavailable(window, clock_mode)
-        return
-    request_signature_fn = getattr(window, "_sensorgram_heatmap_archive_request_signature", None)
-    request_signature = request_signature_fn() if callable(request_signature_fn) else None
-    archive_times = getattr(window, "_sensorgram_heatmap_archive_times", None)
-    archive_matrix = getattr(window, "_sensorgram_heatmap_archive_matrix", None)
-    archive_request_token = getattr(window, "_sensorgram_heatmap_archive_request_token", None)
-    archive_ready = (
-        isinstance(archive_times, np.ndarray)
-        and isinstance(archive_matrix, np.ndarray)
-        and len(archive_times) > 0
-        and archive_matrix.ndim == 2
-        and getattr(window, "_sensorgram_heatmap_wavelengths", None) is not None
-        and request_signature is not None
-        and archive_request_token == request_signature
-    )
-    if not archive_ready and getattr(window, "_metric_archive_path", None) and not bool(
-        getattr(window, "_sensorgram_heatmap_archive_loading", False)
-    ):
-        request_archive = getattr(window, "_request_sensorgram_heatmap_archive", None)
-        if callable(request_archive):
-            request_archive()
-    if not archive_ready and getattr(window, "_metric_archive_path", None):
-        _show_sensorgram_heatmap_loading(window, clock_mode)
-        return
-    if not archive_ready and (not history or getattr(window, "_sensorgram_heatmap_wavelengths", None) is None):
-        _set_visible_if_changed(window.trace_heatmap_image, False)
-        if hasattr(window, "trace_heatmap_notice_item"):
-            _set_visible_if_changed(window.trace_heatmap_notice_item, False)
-        for curve in window.trace_curves.values():
-            _set_visible_if_changed(curve, False)
-        if hasattr(window, "trace_legend"):
-            _set_visible_if_changed(window.trace_legend, False)
-        return
-
-    started = perf_counter()
-    view_mode = "absolute"
-    trace_view_locked = bool(getattr(window, "_trace_view_locked", False))
-    _, _, _view_width_px = _current_metric_view_state(window)
-    view_x_min = view_x_max = None
-    if trace_view_locked:
-        view_x_min, view_x_max, _view_width_px = _current_metric_view_state(window)
-    requested_view_x_min = view_x_min
-    requested_view_x_max = view_x_max
-    view_height_px = None
-    try:
-        scene_rect = window.trace_plot.getPlotItem().vb.sceneBoundingRect()
-        if scene_rect is not None:
-            view_height_px = float(scene_rect.height())
-            if not np.isfinite(view_height_px):
-                view_height_px = None
-    except Exception:
-        view_height_px = None
-    cache = getattr(window, "_plot_view_cache", None)
-    heatmap_token = build_heatmap_history_token(window)
-    arrays_started = perf_counter()
-    if archive_ready:
-        times = np.asarray(archive_times, dtype=np.float64)
-        matrix = np.asarray(archive_matrix, dtype=np.float64)
-    elif cache is not None:
-        times, matrix = cache.heatmap_arrays_from_history(heatmap_token, history, build_heatmap_arrays)
-    else:
-        times, matrix = build_heatmap_arrays(history)
-    if cache is not None:
-        if view_mode == "absolute" and not trace_view_locked:
-            times, matrix = cache.absolute_heatmap_view(
-                heatmap_token,
-                times,
-                matrix,
-                max_rows=int(getattr(window, "_sensorgram_heatmap_history_max_rows", 2000)),
-                view_height_px=view_height_px,
-                enabled=True,
-            )
-        else:
-            times, matrix = cache.heatmap_view(
-                heatmap_token,
-                times,
-                matrix,
-                view_x_min=view_x_min,
-                view_x_max=view_x_max,
-                max_rows=int(getattr(window, "_sensorgram_heatmap_history_max_rows", 2000)),
-                view_height_px=view_height_px,
-                enabled=True,
-            )
-    elif view_mode == "absolute" and not trace_view_locked:
-        times, matrix = sample_absolute_heatmap_rows_for_view(
-            times,
-            matrix,
-            max_rows=int(getattr(window, "_sensorgram_heatmap_history_max_rows", 2000)),
-            view_height_px=view_height_px,
-            enabled=True,
-        )
-    else:
-        times, matrix = select_heatmap_rows_for_view(
-            times,
-            matrix,
-            view_x_min=view_x_min,
-            view_x_max=view_x_max,
-            max_rows=int(getattr(window, "_sensorgram_heatmap_history_max_rows", 2000)),
-            view_height_px=view_height_px,
-            enabled=True,
-        )
-    window._last_sensorgram_heatmap_arrays_ms = (perf_counter() - arrays_started) * 1000.0
-    wavelengths = np.asarray(window._sensorgram_heatmap_wavelengths, dtype=np.float64)
-    if len(times) == 0 or len(wavelengths) == 0:
-        _set_visible_if_changed(window.trace_heatmap_image, False)
-        if hasattr(window, "trace_heatmap_notice_item"):
-            _set_visible_if_changed(window.trace_heatmap_notice_item, False)
-        return
-
-    expected_length = len(wavelengths)
-    if matrix.shape[1] != expected_length:
-        _set_visible_if_changed(window.trace_heatmap_image, False)
-        if hasattr(window, "trace_heatmap_notice_item"):
-            _set_visible_if_changed(window.trace_heatmap_notice_item, False)
-        return
-
-    finite = np.isfinite(matrix)
-    if not np.any(finite):
-        _set_visible_if_changed(window.trace_heatmap_image, False)
-        if hasattr(window, "trace_heatmap_notice_item"):
-            _set_visible_if_changed(window.trace_heatmap_notice_item, False)
-        return
-
-    image_data = matrix.T
-    image_started = perf_counter()
-    levels = getattr(window, "_sensorgram_heatmap_levels", None)
-    if levels is None:
-        levels = derive_heatmap_levels_from_matrix(matrix)
-        window._sensorgram_heatmap_levels = levels
-    else:
-        # Keep the displayed range stable, but expand it if new rows exceed the cached bounds.
-        latest_row = matrix[-1] if len(matrix) > 0 else matrix
-        updated_levels = expand_heatmap_levels(levels, latest_row)
-        if updated_levels != levels:
-            levels = updated_levels
-            window._sensorgram_heatmap_levels = levels
-    window.trace_heatmap_image.setImage(image_data, autoLevels=False)
-    if hasattr(window.trace_heatmap_image, "setLevels"):
-        window.trace_heatmap_image.setLevels(levels)
-    left = float(times[0])
-    right = float(times[-1])
-    if right <= left:
-        right = left + 1e-6
-    bottom = float(np.min(wavelengths))
-    top = float(np.max(wavelengths))
-    if top <= bottom:
-        top = bottom + 1e-6
-    window.trace_heatmap_image.setRect(QRectF(left, bottom, right - left, top - bottom))
-    window._last_sensorgram_heatmap_image_ms = (perf_counter() - image_started) * 1000.0
-    axes_started = perf_counter()
-    if requested_view_x_min is not None and requested_view_x_max is not None and requested_view_x_max > requested_view_x_min:
-        view_span = requested_view_x_max - requested_view_x_min
-    else:
-        view_span = right - left
-    x_pad = _metric_follow_latest_buffer_s(window, clock_mode=clock_mode, span_s=view_span)
-    if not getattr(window, "_trace_view_locked", False):
-        window._trace_view_autoscaling = True
-        try:
-            if requested_view_x_min is not None and requested_view_x_max is not None and requested_view_x_max > requested_view_x_min:
-                window.trace_plot.setXRange(requested_view_x_min, requested_view_x_max + x_pad, padding=0.0)
-            else:
-                window.trace_plot.setXRange(left, right + x_pad, padding=0.0)
-            window.trace_plot.setYRange(bottom, top, padding=0.0)
-        finally:
-            window._trace_view_autoscaling = False
-    _set_trace_time_axis_mode(window, axis_mode="clock" if clock_mode else "elapsed")
-    _set_visible_if_changed(window.trace_heatmap_image, True)
-    if hasattr(window, "trace_heatmap_notice_item"):
-        _set_visible_if_changed(window.trace_heatmap_notice_item, False)
-    for curve in window.trace_curves.values():
-        _set_visible_if_changed(curve, False)
-    for band in getattr(window, "trace_metric_envelope_bands", {}).values():
-        if hasattr(band, "setVisible"):
-            band.setVisible(False)
-    if hasattr(window, "trace_legend"):
-        _set_visible_if_changed(window.trace_legend, False)
-    window._visible_trace_x = times
-    safe_matrix = np.where(np.isfinite(matrix), matrix, -np.inf)
-    row_max = np.max(safe_matrix, axis=1)
-    row_max[~np.isfinite(row_max)] = np.nan
-    window._visible_trace_y = row_max
-    window._visible_trace_mode = "clock" if clock_mode else "elapsed"
-    window._last_sensorgram_heatmap_axes_ms = (perf_counter() - axes_started) * 1000.0
-    elapsed_ms = (perf_counter() - started) * 1000.0
-    window._last_sensorgram_heatmap_render_ms = elapsed_ms
-    if elapsed_ms >= 2.0:
-        window._log_throttled(
-            "sensorgram_heatmap_render",
-            (
-                "Sensorgram heatmap render "
-                f"| rows={len(history)} | cols={len(wavelengths)} | "
-                f"mode={view_mode} | {elapsed_ms:.2f} ms"
-            ),
-            level=logging.INFO,
-            min_interval=1.0,
-        )
-
-
-def _show_sensorgram_heatmap_unavailable(window, clock_mode: bool) -> None:
-    detail = (
-        "Live heatmap is disabled for performance. Use Freeze/Review to generate heatmap from recorded data."
-        if bool(getattr(window, "_live_active", False))
-        else "Enable it in Help > Performance switches."
-    )
-    _show_trace_plot_unavailable(
-        window,
-        "Heatmap unavailable",
-        detail,
-        clock_mode=clock_mode,
-    )
-
-
-def _show_sensorgram_heatmap_loading(window, clock_mode: bool) -> None:
-    _show_trace_plot_unavailable(
-        window,
-        "Heatmap loading",
-        "Preparing archive-backed heatmap in the background.",
-        clock_mode=clock_mode,
-    )
-
-
 def _show_metric_plot_unavailable(window, clock_mode: bool) -> None:
     _show_trace_plot_unavailable(
         window,
@@ -1722,17 +1424,7 @@ def _show_metric_plot_unavailable(window, clock_mode: bool) -> None:
 
 
 def _show_trace_plot_unavailable(window, title: str, detail: str, *, clock_mode: bool) -> None:
-    if hasattr(window, "trace_heatmap_image"):
-        _set_visible_if_changed(window.trace_heatmap_image, False)
     _set_trace_time_axis_mode(window, axis_mode="clock" if clock_mode else "elapsed")
-    if hasattr(window, "trace_heatmap_notice_item"):
-        notice = window.trace_heatmap_notice_item
-        if hasattr(notice, "setText"):
-            notice.setText(f"{title}\n{detail}")
-        notice.setVisible(True)
-        sync_overlay = getattr(window, "_sync_trace_heatmap_notice_overlay", None)
-        if callable(sync_overlay):
-            sync_overlay()
     for curve in window.trace_curves.values():
         _set_visible_if_changed(curve, False)
     for band in getattr(window, "trace_metric_envelope_bands", {}).values():
@@ -1925,14 +1617,6 @@ def handle_metric_mouse_moved(window, event) -> None:
     mouse_y = float(mouse_point.y())
     x = mouse_x
     y = mouse_y
-    if getattr(window, "_sensorgram_content_mode", "metric") == "heatmap":
-        window.trace_vline.setPos(x)
-        window.trace_hline.setPos(y)
-        cursor_x = _sensorgram_format_clock(window, float(x)) if _sensorgram_time_axis_clock_mode(window) else _sensorgram_format_elapsed(float(x))
-        window._trace_cursor_text = f"cursor: {cursor_x}, {y:.3f} nm"
-        window.trace_cursor_label.setText(window._trace_cursor_text)
-        return
-
     best_match: tuple[float, float, float] | None = None
     for x_values, y_values in window._active_trace_series().values():
         if len(x_values) == 0:

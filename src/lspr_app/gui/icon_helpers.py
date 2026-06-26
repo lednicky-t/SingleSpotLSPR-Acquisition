@@ -70,10 +70,6 @@ def storage_save_icon() -> QIcon:
         return tint_tabler_icon(flow_tabler_icon("device_floppy", "device_save", "floppy"), tint)
 
 
-def heatmap_icon() -> QIcon:
-    return QIcon(str(shared_icon_path("heatmap_icon_clean.svg")))
-
-
 def reload_icon() -> QIcon:
     tint = QColor("#4da3ff")
     try:
@@ -89,7 +85,6 @@ __all__ = [
     "flow_icon",
     "flow_tabler_icon",
     "math_function_tab_icon",
-    "heatmap_icon",
     "reload_icon",
     "prism_tab_icon",
     "reference_icon",

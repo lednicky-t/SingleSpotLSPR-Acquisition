@@ -25,7 +25,6 @@ from lspr_app.gui.main_window_processing import (
     sensorgram_metric_archive_names,
     sensorgram_metric_mode_name,
 )
-from lspr_app.gui.plot_view_cache import build_heatmap_arrays
 from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter, repack_measurement_hdf5_file
 
 
@@ -100,29 +99,6 @@ class MeasurementCompressionResult:
     path: Path
 
 
-@dataclass(slots=True)
-class HeatmapArchiveLoadRequest:
-    path: Path
-    source_epoch: int
-    request_token: tuple[object, ...] | None = None
-    max_rows: int = 800
-    time_range_s: float | None = None
-    wavelength_range_nm: tuple[float, float] | None = None
-    spectrum_group_name: str = "sample"
-
-
-@dataclass(slots=True)
-class HeatmapArchiveLoadResult:
-    path: Path
-    source_epoch: int
-    request_token: tuple[object, ...] | None
-    wavelengths: np.ndarray
-    times: np.ndarray
-    matrix: np.ndarray
-    row_count: int
-    load_ms: float
-    build_ms: float
-
 
 @dataclass(slots=True)
 class MetricArchiveReloadRequest:
@@ -153,11 +129,6 @@ class ProcessingSignals(QObject):
 
 
 class MeasurementCompressionSignals(QObject):
-    finished = pyqtSignal(object)
-    failed = pyqtSignal(str)
-
-
-class HeatmapArchiveLoadSignals(QObject):
     finished = pyqtSignal(object)
     failed = pyqtSignal(str)
 
@@ -243,58 +214,6 @@ class MeasurementCompressionTask(QRunnable):
         logger.info("Measurement file compression finished | path=%s", result_path)
         self.signals.finished.emit(MeasurementCompressionResult(path=result_path))
 
-
-class HeatmapArchiveLoadTask(QRunnable):
-    def __init__(self, request: HeatmapArchiveLoadRequest) -> None:
-        super().__init__()
-        self._request = request
-        self.signals = HeatmapArchiveLoadSignals()
-
-    def run(self) -> None:
-        logger = logging.getLogger("lspr_app.heatmap_archive")
-        load_started = perf_counter()
-        try:
-            from lspr_app.storage.hdf5_export import load_spectrum_heatmap_history
-
-            logger.info(
-                "Heatmap archive load started | path=%s | max_rows=%s",
-                self._request.path,
-                self._request.max_rows,
-            )
-            wavelengths, history = load_spectrum_heatmap_history(
-                self._request.path,
-                max_rows=self._request.max_rows,
-                time_range_s=self._request.time_range_s,
-                wavelength_range_nm=self._request.wavelength_range_nm,
-                spectrum_group_name=self._request.spectrum_group_name,
-            )
-            load_ms = (perf_counter() - load_started) * 1000.0
-            build_started = perf_counter()
-            times, matrix = build_heatmap_arrays(history)
-            build_ms = (perf_counter() - build_started) * 1000.0
-        except Exception as exc:  # pragma: no cover - GUI runtime path
-            logger.exception("Heatmap archive load failed | path=%s", self._request.path)
-            self.signals.failed.emit(str(exc))
-            return
-        logger.info(
-            "Heatmap archive load finished | path=%s | rows=%s | cols=%s",
-            self._request.path,
-            int(len(times)),
-            int(matrix.shape[1]) if matrix.ndim == 2 else 0,
-        )
-        self.signals.finished.emit(
-            HeatmapArchiveLoadResult(
-                path=self._request.path,
-                source_epoch=self._request.source_epoch,
-                request_token=self._request.request_token,
-                wavelengths=np.asarray(wavelengths, dtype=np.float64),
-                times=np.asarray(times, dtype=np.float64),
-                matrix=np.asarray(matrix, dtype=np.float64),
-                row_count=int(len(times)),
-                load_ms=load_ms,
-                build_ms=build_ms,
-            )
-        )
 
 
 class MetricArchiveReloadTask(QRunnable):
@@ -579,19 +498,17 @@ def _live_acquisition_worker_main(
                     produced_at_perf=finished,
                 )
                 if recording_enabled:
-                    while True:
-                        try:
-                            recording_queue.put(event, timeout=0.25)
-                            break
-                        except queue.Full:
-                            now = perf_counter()
-                            if now - last_recording_backpressure_log_at >= 1.0:
-                                logger.warning(
-                                    "Live recording queue backpressure | sample_index=%d | backlog=%d",
-                                    source_sample_index,
-                                    _queue_qsize_safe(recording_queue),
-                                )
-                                last_recording_backpressure_log_at = now
+                    try:
+                        recording_queue.put_nowait(event)
+                    except queue.Full:
+                        now = perf_counter()
+                        if now - last_recording_backpressure_log_at >= 1.0:
+                            logger.warning(
+                                "Live recording frame dropped (queue full) | sample_index=%d | backlog=%d",
+                                source_sample_index,
+                                _queue_qsize_safe(recording_queue),
+                            )
+                            last_recording_backpressure_log_at = now
                 _queue_put_latest(result_queue, event)
                 _queue_put_latest(processing_queue, event)
             except Exception as exc:  # pragma: no cover - hardware/runtime path

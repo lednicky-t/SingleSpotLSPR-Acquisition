@@ -658,7 +658,6 @@ def restore_ui_state(window) -> None:
     session_stats_splitter_sizes = ui_state.get("session_stats_splitter_sizes")
     maximized = ui_state.get("maximized")
     top_view_mode = ui_state.get("top_view_mode")
-    sensorgram_content_mode = ui_state.get("sensorgram_content_mode")
     sensorgram_time_axis_mode = ui_state.get("sensorgram_time_axis_mode")
     metric_display_points = ui_state.get("metric_display_points")
     sensorgram_compression_recent_tail_points = ui_state.get("sensorgram_compression_recent_tail_points")
@@ -678,7 +677,6 @@ def restore_ui_state(window) -> None:
     sensorgram_line_mode = ui_state.get("sensorgram_line_mode")
     sensorgram_line_width_px = ui_state.get("sensorgram_line_width_px")
     plot_antialias_enabled = ui_state.get("plot_antialias_enabled")
-    sensorgram_heatmap_history_max_rows = ui_state.get("sensorgram_heatmap_history_max_rows")
     sensorgram_frozen = ui_state.get("sensorgram_frozen")
     left_controls_visible = ui_state.get("left_controls_visible")
     sensorgram_visible = ui_state.get("sensorgram_visible")
@@ -802,9 +800,6 @@ def restore_ui_state(window) -> None:
         current_stats = normalize_sensorgram_metric_name(trace_stats_metric_name)
         if current_stats in sensorgram_metric_order(window):
             window._trace_stats_metric_name = current_stats
-    if isinstance(sensorgram_content_mode, str):
-        window._sensorgram_content_mode = window._normalize_sensorgram_content_mode(sensorgram_content_mode)
-        window._apply_sensorgram_content_mode(save=False)
     if isinstance(sensorgram_time_axis_mode, str):
         normalized_time_axis_mode = str(sensorgram_time_axis_mode).strip().lower()
         if normalized_time_axis_mode not in {"elapsed", "clock"}:
@@ -921,8 +916,6 @@ def restore_ui_state(window) -> None:
         import pyqtgraph as pg
 
         pg.setConfigOptions(antialias=window._plot_antialias_enabled)
-    if isinstance(sensorgram_heatmap_history_max_rows, (int, float)) and float(sensorgram_heatmap_history_max_rows) > 0:
-        window._sensorgram_heatmap_history_max_rows = int(max(int(sensorgram_heatmap_history_max_rows), 16))
     if isinstance(sensorgram_frozen, bool):
         window._sensorgram_frozen = bool(sensorgram_frozen)
         window._update_sensorgram_freeze_button_icon()
@@ -1008,7 +1001,6 @@ def save_ui_state(window) -> None:
             if hasattr(window, "session_stats_splitter") and window.session_stats_splitter is not None
             else [],
             "top_view_mode": window._top_view_mode,
-            "sensorgram_content_mode": window._sensorgram_content_mode,
             "sensorgram_time_axis_mode": str(getattr(window, "_sensorgram_time_axis_mode", "elapsed")),
             "metric_display_points": int(getattr(window, "_plot_display_points", 512)),
             "sensorgram_compression_recent_tail_points": int(
@@ -1052,7 +1044,6 @@ def save_ui_state(window) -> None:
             "sensorgram_line_mode": "linear" if getattr(window, "_sensorgram_line_step_mode", None) is None else str(window._sensorgram_line_step_mode),
             "sensorgram_line_width_px": float(getattr(window, "_sensorgram_line_width_px", 2.2)),
             "plot_antialias_enabled": bool(getattr(window, "_plot_antialias_enabled", False)),
-            "sensorgram_heatmap_history_max_rows": int(getattr(window, "_sensorgram_heatmap_history_max_rows", 800)),
             "sensorgram_frozen": bool(getattr(window, "_sensorgram_frozen", False)),
             "left_controls_visible": window._left_controls_scroll.isVisible(),
             "sensorgram_visible": window._sensorgram_block.isVisible(),
@@ -1121,20 +1112,6 @@ def set_gui_housekeeping_enabled(window, enabled: bool) -> None:
     window._request_deferred_ui_refresh(stats=True)
 
 
-def set_sensorgram_heatmap_enabled(window, enabled: bool) -> None:
-    from lspr_app.storage.app_config import save_app_setting
-
-    window._sensorgram_heatmap_enabled = bool(enabled)
-    save_app_setting("sensorgram_heatmap_enabled", window._sensorgram_heatmap_enabled)
-    state_text = "enabled" if window._sensorgram_heatmap_enabled else "disabled"
-    window.status_label.setText(f"Sensorgram heatmap {state_text}.")
-    window._log_info(f"Sensorgram heatmap {state_text}.")
-    if hasattr(window, "trace_heatmap_notice_item"):
-        window.trace_heatmap_notice_item.setVisible(False)
-    window._refresh_trace_plot("Metric position (nm)")
-    window._request_deferred_ui_refresh(trace_plot=True)
-
-
 def set_metric_plot_enabled(window, enabled: bool) -> None:
     from lspr_app.storage.app_config import save_app_setting
 
@@ -1143,10 +1120,21 @@ def set_metric_plot_enabled(window, enabled: bool) -> None:
     state_text = "enabled" if window._metric_plot_enabled else "disabled"
     window.status_label.setText(f"Metric plot {state_text}.")
     window._log_info(f"Metric plot {state_text}.")
-    if hasattr(window, "trace_heatmap_notice_item"):
-        window.trace_heatmap_notice_item.setVisible(False)
     window._refresh_trace_plot("Metric position (nm)")
     window._request_deferred_ui_refresh(trace_plot=True)
+
+
+def set_measurement_hdf5_flush_interval_s(window, interval_s: float) -> None:
+    from lspr_app.storage.app_config import save_app_setting
+
+    interval_s = max(float(interval_s), 0.25)
+    window._measurement_flush_interval_s = interval_s
+    save_app_setting("measurement_flush_interval_s", interval_s)
+    writer = getattr(window, "_measurement_writer", None)
+    if writer is not None and hasattr(writer, "_flush_interval_s"):
+        writer._flush_interval_s = interval_s
+    window.status_label.setText(f"HDF5 flush interval set to {interval_s:g} s.")
+    window._log_info(f"HDF5 flush interval set to {interval_s:g} s.")
 
 
 def toggle_experimental_control_panel_visibility(window, checked: bool | None = None) -> None:

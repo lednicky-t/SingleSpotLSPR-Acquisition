@@ -731,10 +731,6 @@ def start_live_acquisition(window) -> None:
     window._last_spectrum_marker_update_ms = None
     window._last_spectrum_residual_update_ms = None
     window._last_sensorgram_render_ms = None
-    window._last_sensorgram_heatmap_render_ms = None
-    window._last_sensorgram_heatmap_arrays_ms = None
-    window._last_sensorgram_heatmap_image_ms = None
-    window._last_sensorgram_heatmap_axes_ms = None
     window._last_metric_autoscale_ms = None
     window._last_metric_plot_disabled_fast_path = False
     window._last_metric_render_series_export_ms = None
@@ -900,10 +896,6 @@ def stop_live_acquisition(window, message: str = "Live acquisition stopped.") ->
     window._last_spectrum_marker_update_ms = None
     window._last_spectrum_residual_update_ms = None
     window._last_sensorgram_render_ms = None
-    window._last_sensorgram_heatmap_render_ms = None
-    window._last_sensorgram_heatmap_arrays_ms = None
-    window._last_sensorgram_heatmap_image_ms = None
-    window._last_sensorgram_heatmap_axes_ms = None
     window._last_metric_autoscale_ms = None
     window._last_metric_plot_disabled_fast_path = False
     window._last_metric_render_series_export_ms = None
@@ -1219,22 +1211,10 @@ def start_measurement_run(window) -> None:
     set_measurement_ui_locked(window, True)
     if hasattr(window, "_set_recording_blink_indicator"):
         window._set_recording_blink_indicator(True)
-    if hasattr(window, "_apply_sensorgram_content_mode"):
-        window._apply_sensorgram_content_mode(save=False)
     if hasattr(window, "_plot_view_cache") and hasattr(window._plot_view_cache, "clear_live_absolute_metric_cache"):
         window._plot_view_cache.clear_live_absolute_metric_cache()
-    if hasattr(window, "_sensorgram_heatmap_history"):
-        window._sensorgram_heatmap_history.clear()
-    if hasattr(window, "_sensorgram_heatmap_history_revision"):
-        window._sensorgram_heatmap_history_revision += 1
     if hasattr(window, "_plot_view_cache"):
         window._plot_view_cache.clear()
-    if hasattr(window, "_sensorgram_heatmap_wavelengths"):
-        window._sensorgram_heatmap_wavelengths = None
-    if hasattr(window, "_sensorgram_heatmap_axis_key"):
-        window._sensorgram_heatmap_axis_key = None
-    if hasattr(window, "_sensorgram_heatmap_levels"):
-        window._sensorgram_heatmap_levels = None
     window._trace_display_cursor_s = 0.0
     window._live_trace_started_at = None
     window._metric_reference_processed = None

@@ -152,7 +152,7 @@ def build_menu_bar(window) -> QMenuBar:
     metric_plot_action.setCheckable(True)
     metric_plot_action.setChecked(bool(getattr(window, "_metric_plot_enabled", True)))
     metric_plot_action.setToolTip(
-        "Enable the sensorgram metric line plot. Turn it off to isolate heatmap rendering performance."
+        "Enable the sensorgram metric line plot. Turn it off to isolate metric plot rendering performance."
     )
     metric_plot_action.toggled.connect(window._set_metric_plot_enabled)
 

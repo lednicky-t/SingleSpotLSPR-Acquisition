@@ -507,28 +507,8 @@ def clear_trace_history_for(window) -> None:
     if hasattr(window, "_metric_render_state_cache"):
         window._metric_render_state_cache.clear()
     plot_view_cache = getattr(window, "_plot_view_cache", None)
-    if hasattr(window, "_sensorgram_heatmap_history"):
-        window._sensorgram_heatmap_history.clear()
-    if hasattr(window, "_sensorgram_heatmap_history_revision"):
-        window._sensorgram_heatmap_history_revision += 1
     if hasattr(window, "_plot_view_cache"):
         window._plot_view_cache.clear()
-    if hasattr(window, "_sensorgram_heatmap_wavelengths"):
-        window._sensorgram_heatmap_wavelengths = None
-    if hasattr(window, "_sensorgram_heatmap_axis_key"):
-        window._sensorgram_heatmap_axis_key = None
-    if hasattr(window, "_sensorgram_heatmap_archive_times"):
-        window._sensorgram_heatmap_archive_times = None
-    if hasattr(window, "_sensorgram_heatmap_archive_matrix"):
-        window._sensorgram_heatmap_archive_matrix = None
-    if hasattr(window, "_sensorgram_heatmap_archive_request_token"):
-        window._sensorgram_heatmap_archive_request_token = None
-    if hasattr(window, "_sensorgram_heatmap_archive_pending_token"):
-        window._sensorgram_heatmap_archive_pending_token = None
-    if hasattr(window, "_sensorgram_heatmap_archive_loading"):
-        window._sensorgram_heatmap_archive_loading = False
-    if hasattr(window, "_sensorgram_heatmap_archive_task"):
-        window._sensorgram_heatmap_archive_task = None
     if hasattr(window, "_sensorgram_metric_archive_reload_request_token"):
         window._sensorgram_metric_archive_reload_request_token = None
     if hasattr(window, "_sensorgram_metric_archive_reload_pending_token"):

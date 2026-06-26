@@ -33,7 +33,6 @@ class RuntimeDriftSample:
     metric_history_points: int
     metric_history_buffer_points: int
     temporal_history_count: int
-    sensorgram_rows: int
     widget_count: int
     working_set_mb: float | None
 
@@ -150,7 +149,6 @@ def _sample_runtime_drift(window: Any) -> RuntimeDriftSample:
         metric_history_points=0,
         metric_history_buffer_points=metric_display_points,
         temporal_history_count=_safe_count(getattr(window, "_temporal_processed_history", None)),
-        sensorgram_rows=_safe_count(getattr(window, "_sensorgram_heatmap_history", None)),
         widget_count=_widget_count(),
         working_set_mb=_current_process_working_set_mb(),
     )
@@ -264,7 +262,6 @@ def _top_growth_contributors(first: RuntimeDriftSample, latest: RuntimeDriftSamp
         ("Log history", first.log_history_count, latest.log_history_count, "count", 1),
         ("Metric history", first.metric_history_points, latest.metric_history_points, "count", 1),
         ("Metric buffers", first.metric_history_buffer_points, latest.metric_history_buffer_points, "count", 1),
-        ("Sensorgram rows", first.sensorgram_rows, latest.sensorgram_rows, "count", 1),
         ("Widget count", first.widget_count, latest.widget_count, "count", 1),
         ("Scheduler pending", first.scheduler_pending, latest.scheduler_pending, "count", 1),
         ("Log buffer", first.log_buffer_count, latest.log_buffer_count, "count", 1),
@@ -309,7 +306,6 @@ def build_runtime_drift_lines_for(window) -> list[str]:
     max_plot_refresh = max((sample.plot_refresh_total_ms or 0.0) for sample in samples)
     max_metric_history_points = max(sample.metric_history_points for sample in samples)
     max_metric_history_buffer_points = max(sample.metric_history_buffer_points for sample in samples)
-    max_sensorgram_rows = max(sample.sensorgram_rows for sample in samples)
     max_widget_count = max(sample.widget_count for sample in samples)
     max_working_set_mb = max((sample.working_set_mb or 0.0) for sample in samples)
     top_growth = _top_growth_contributors(first, latest, span_s)
@@ -329,7 +325,6 @@ def build_runtime_drift_lines_for(window) -> list[str]:
         f"  Metric history points: {_format_count(first.metric_history_points)} -> {_format_count(latest.metric_history_points)} | max {_format_count(max_metric_history_points)}",
         f"  Metric buffer points: {_format_count(first.metric_history_buffer_points)} -> {_format_count(latest.metric_history_buffer_points)} | max {_format_count(max_metric_history_buffer_points)}",
         f"  Temporal history points: {_format_count(first.temporal_history_count)} -> {_format_count(latest.temporal_history_count)}",
-        f"  Sensorgram rows: {_format_count(first.sensorgram_rows)} -> {_format_count(latest.sensorgram_rows)} | max {_format_count(max_sensorgram_rows)}",
         f"  Live result queue: {_format_count(first.live_result_queue_size)} -> {_format_count(latest.live_result_queue_size)}",
         f"  Live processed queue: {_format_count(first.live_processed_queue_size)} -> {_format_count(latest.live_processed_queue_size)}",
         f"  Widget count: {_format_count(first.widget_count)} -> {_format_count(latest.widget_count)} | max {_format_count(max_widget_count)}",
@@ -338,7 +333,6 @@ def build_runtime_drift_lines_for(window) -> list[str]:
         f"  Per-minute log history: {_per_minute_delta(first.log_history_count, latest.log_history_count, span_s, precision=1)}",
         f"  Per-minute metric history: {_per_minute_delta(first.metric_history_points, latest.metric_history_points, span_s, precision=1)}",
         f"  Per-minute metric buffers: {_per_minute_delta(first.metric_history_buffer_points, latest.metric_history_buffer_points, span_s, precision=1)}",
-        f"  Per-minute sensorgram rows: {_per_minute_delta(first.sensorgram_rows, latest.sensorgram_rows, span_s, precision=1)}",
         f"  Per-minute working set: {_per_minute_delta(first.working_set_mb, latest.working_set_mb, span_s, precision=2)} MB/min",
         "  Top growth contributors:",
         *top_growth,

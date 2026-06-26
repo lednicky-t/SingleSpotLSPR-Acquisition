@@ -489,14 +489,6 @@ class SessionDiagnosticsSnapshot:
     spectrum_left_axis_tick_text: str
     trace_left_axis_tick_text: str
     sensorgram_x_domain_text: str
-    sensorgram_heatmap_arrays_text: str
-    sensorgram_heatmap_image_text: str
-    sensorgram_heatmap_axes_text: str
-    heatmap_rows_text: str
-    heatmap_archive_rows_text: str
-    heatmap_archive_load_text: str
-    heatmap_archive_build_text: str
-    heatmap_archive_loading_text: str
     live_result_queue_text: str
     live_result_queue_max_text: str
     live_processed_queue_text: str
@@ -558,14 +550,6 @@ class SessionDiagnosticsSnapshot:
         metric_render_view_text = "-"
         metric_render_setdata_text = "-"
         metric_autoscale_text = "-"
-        sensorgram_heatmap_arrays_text = "-"
-        sensorgram_heatmap_image_text = "-"
-        sensorgram_heatmap_axes_text = "-"
-        heatmap_rows_text = "-"
-        heatmap_archive_rows_text = "-"
-        heatmap_archive_load_text = "-"
-        heatmap_archive_build_text = "-"
-        heatmap_archive_loading_text = "-"
         raw_acquired_text = str(max(int(getattr(window, "_raw_acquired_count", 0)), 0))
         raw_recording_enqueued_text = str(max(int(getattr(window, "_raw_recording_enqueued_count", 0)), 0))
         raw_recording_written_text = str(max(int(getattr(window, "_raw_recording_written_count", 0)), 0))
@@ -694,14 +678,6 @@ class SessionDiagnosticsSnapshot:
         spectrum_left_axis_tick_text = _axis_tick_summary_text(window, "spectrum_left_axis")
         trace_left_axis_tick_text = _axis_tick_summary_text(window, "trace_left_axis")
         sensorgram_x_domain_text = _sensorgram_x_domain_text(window)
-        sensorgram_heatmap_arrays_text = _timing_plain_text(getattr(window, "_last_sensorgram_heatmap_arrays_ms", None))
-        sensorgram_heatmap_image_text = _timing_plain_text(getattr(window, "_last_sensorgram_heatmap_image_ms", None))
-        sensorgram_heatmap_axes_text = _timing_plain_text(getattr(window, "_last_sensorgram_heatmap_axes_ms", None))
-        heatmap_rows_text = str(len(getattr(window, "_sensorgram_heatmap_history", []) or []))
-        heatmap_archive_rows_text = str(max(int(getattr(window, "_sensorgram_heatmap_archive_rows", 0)), 0))
-        heatmap_archive_load_text = _timing_plain_text(getattr(window, "_sensorgram_heatmap_archive_load_ms", None))
-        heatmap_archive_build_text = _timing_plain_text(getattr(window, "_sensorgram_heatmap_archive_build_ms", None))
-        heatmap_archive_loading_text = "yes" if bool(getattr(window, "_sensorgram_heatmap_archive_loading", False)) else "no"
         reference_ms = None
         spacing_ms = getattr(window, "_last_spacing_ms", None)
         if spacing_ms is not None and spacing_ms > 0:
@@ -749,7 +725,6 @@ class SessionDiagnosticsSnapshot:
         plot_refresh_delay_ms = getattr(window, "_last_plot_refresh_delay_ms", None)
         plot_render_ms = getattr(window, "_last_plot_refresh_ms", None)
         sensorgram_render_ms = getattr(window, "_last_sensorgram_render_ms", None)
-        sensorgram_heatmap_render_ms = getattr(window, "_last_sensorgram_heatmap_render_ms", None)
         deferred_ui_ms = getattr(window, "_last_deferred_ui_refresh_ms", None)
         known_total_ms = sum(
             value
@@ -769,7 +744,6 @@ class SessionDiagnosticsSnapshot:
                 plot_refresh_delay_ms,
                 plot_render_ms,
                 sensorgram_render_ms,
-                sensorgram_heatmap_render_ms,
                 deferred_ui_ms,
             )
             if value is not None and value > 0
@@ -791,7 +765,6 @@ class SessionDiagnosticsSnapshot:
             _timing_line("Plot refresh timer delay", plot_refresh_delay_ms),
             _timing_line("Plot render", plot_render_ms),
             _timing_line("Sensorgram render", sensorgram_render_ms),
-            _timing_line("Sensorgram heatmap render", sensorgram_heatmap_render_ms),
             _timing_line("Deferred UI flush", deferred_ui_ms),
             _timing_line("Unattributed / idle", idle_ms),
         ]
@@ -924,14 +897,6 @@ class SessionDiagnosticsSnapshot:
             spectrum_left_axis_tick_text=spectrum_left_axis_tick_text,
             trace_left_axis_tick_text=trace_left_axis_tick_text,
             sensorgram_x_domain_text=sensorgram_x_domain_text,
-            sensorgram_heatmap_arrays_text=sensorgram_heatmap_arrays_text,
-            sensorgram_heatmap_image_text=sensorgram_heatmap_image_text,
-            sensorgram_heatmap_axes_text=sensorgram_heatmap_axes_text,
-            heatmap_rows_text=heatmap_rows_text,
-            heatmap_archive_rows_text=heatmap_archive_rows_text,
-            heatmap_archive_load_text=heatmap_archive_load_text,
-            heatmap_archive_build_text=heatmap_archive_build_text,
-            heatmap_archive_loading_text=heatmap_archive_loading_text,
             live_result_queue_text=_queue_depth_text(window, "_live_result_queue"),
             live_result_queue_max_text=_queue_depth_max_text(getattr(window, "_live_result_queue_max_depth", None)),
             live_processed_queue_text=_queue_depth_text(window, "_live_processed_queue"),
@@ -1070,14 +1035,6 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         f"  Spectrum left axis tickStrings: {snapshot.spectrum_left_axis_tick_text}",
         f"  Trace left axis tickStrings: {snapshot.trace_left_axis_tick_text}",
         f"  Sensorgram x-domain: {snapshot.sensorgram_x_domain_text}",
-        f"  Sensorgram heatmap arrays: {snapshot.sensorgram_heatmap_arrays_text}",
-        f"  Sensorgram heatmap image: {snapshot.sensorgram_heatmap_image_text}",
-        f"  Sensorgram heatmap axes: {snapshot.sensorgram_heatmap_axes_text}",
-        f"  Heatmap rows: {snapshot.heatmap_rows_text}",
-        f"  Heatmap archive rows: {snapshot.heatmap_archive_rows_text}",
-        f"  Heatmap archive load: {snapshot.heatmap_archive_load_text}",
-        f"  Heatmap archive build: {snapshot.heatmap_archive_build_text}",
-        f"  Heatmap archive loading: {snapshot.heatmap_archive_loading_text}",
         f"  Live result queue: {snapshot.live_result_queue_text} | max: {snapshot.live_result_queue_max_text}",
         f"  Live processed queue: {snapshot.live_processed_queue_text} | max: {snapshot.live_processed_queue_max_text}",
         f"  Live recording queue: {snapshot.live_recording_queue_text} | max: {snapshot.live_recording_queue_max_text}",

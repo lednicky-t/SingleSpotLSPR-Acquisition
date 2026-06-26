@@ -6,9 +6,9 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
-    QHBoxLayout,
     QLabel,
     QVBoxLayout,
     QWidget,
@@ -31,10 +31,18 @@ class PreferencesDialog(QDialog):
         self.acquisition_state_autosave_check = QCheckBox("Acquisition state autosave")
         self.log_buffering_check = QCheckBox("Log buffering")
         self.gui_housekeeping_check = QCheckBox("GUI housekeeping")
-        self.sensorgram_heatmap_check = QCheckBox("Sensorgram heatmap")
         self.metric_plot_check = QCheckBox("Metric plot")
         self.processing_debug_check = QCheckBox("Processing debug mode")
         self.hdf5_compression_check = QCheckBox("Measurement HDF5 compression")
+        self.hdf5_flush_interval_spin = QDoubleSpinBox()
+        self.hdf5_flush_interval_spin.setRange(0.25, 60.0)
+        self.hdf5_flush_interval_spin.setSingleStep(0.5)
+        self.hdf5_flush_interval_spin.setDecimals(2)
+        self.hdf5_flush_interval_spin.setSuffix(" s")
+        self.hdf5_flush_interval_spin.setToolTip(
+            "How often the HDF5 measurement file is flushed to disk during acquisition.\n"
+            "Lower values reduce data loss on crash but increase I/O load. Range: 0.25 – 60 s."
+        )
 
         self._build_ui()
         self._load_from_window()
@@ -69,10 +77,10 @@ class PreferencesDialog(QDialog):
         display_layout.setFormAlignment(Qt.AlignmentFlag.AlignTop)
         display_layout.setHorizontalSpacing(16)
         display_layout.setVerticalSpacing(10)
-        display_layout.addRow(self.sensorgram_heatmap_check)
         display_layout.addRow(self.metric_plot_check)
         display_layout.addRow(self.processing_debug_check)
         display_layout.addRow(self.hdf5_compression_check)
+        display_layout.addRow("HDF5 flush interval", self.hdf5_flush_interval_spin)
 
         layout.addWidget(general_box)
         layout.addWidget(display_box)
@@ -97,10 +105,10 @@ class PreferencesDialog(QDialog):
         self.acquisition_state_autosave_check.setChecked(bool(getattr(self._window, "_acquisition_state_autosave_enabled", True)))
         self.log_buffering_check.setChecked(bool(getattr(self._window, "_log_buffering_enabled", True)))
         self.gui_housekeeping_check.setChecked(bool(getattr(self._window, "_gui_housekeeping_enabled", True)))
-        self.sensorgram_heatmap_check.setChecked(bool(getattr(self._window, "_sensorgram_heatmap_enabled", True)))
         self.metric_plot_check.setChecked(bool(getattr(self._window, "_metric_plot_enabled", True)))
         self.processing_debug_check.setChecked(bool(getattr(self._window, "_processing_debug_mode_enabled", False)))
         self.hdf5_compression_check.setChecked(bool(getattr(self._window, "_hdf5_compression_enabled", True)))
+        self.hdf5_flush_interval_spin.setValue(float(getattr(self._window, "_measurement_flush_interval_s", 5.0)))
 
     def apply_changes(self) -> None:
         theme = str(self.theme_combo.currentData() or "dark")
@@ -114,14 +122,14 @@ class PreferencesDialog(QDialog):
             self._window._set_log_buffering_enabled(self.log_buffering_check.isChecked())
         if hasattr(self._window, "_set_gui_housekeeping_enabled"):
             self._window._set_gui_housekeeping_enabled(self.gui_housekeeping_check.isChecked())
-        if hasattr(self._window, "_set_sensorgram_heatmap_enabled"):
-            self._window._set_sensorgram_heatmap_enabled(self.sensorgram_heatmap_check.isChecked())
         if hasattr(self._window, "_set_metric_plot_enabled"):
             self._window._set_metric_plot_enabled(self.metric_plot_check.isChecked())
         if hasattr(self._window, "_set_processing_debug_mode_enabled"):
             self._window._set_processing_debug_mode_enabled(self.processing_debug_check.isChecked())
         if hasattr(self._window, "_set_measurement_hdf5_compression_enabled"):
             self._window._set_measurement_hdf5_compression_enabled(self.hdf5_compression_check.isChecked())
+        if hasattr(self._window, "_set_measurement_hdf5_flush_interval_s"):
+            self._window._set_measurement_hdf5_flush_interval_s(self.hdf5_flush_interval_spin.value())
 
 
 def show_preferences_dialog_for(window) -> None:

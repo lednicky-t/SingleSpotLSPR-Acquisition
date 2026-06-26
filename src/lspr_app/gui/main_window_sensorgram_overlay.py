@@ -214,8 +214,7 @@ def sensorgram_control_step_overlay_text_color(window, color_text: str) -> QColo
 def sensorgram_control_step_overlay_reserved_y_padding(window, y_min: float, y_max: float) -> tuple[float, float]:
     enabled = bool(getattr(window, "_sensorgram_control_step_overlay_enabled", True))
     style = normalize_sensorgram_control_step_overlay_style(window, getattr(window, "_sensorgram_control_step_overlay_style", "bar"))
-    content_mode = window._normalize_sensorgram_content_mode(getattr(window, "_sensorgram_content_mode", "metric"))
-    if not enabled or style != "bar" or content_mode == "heatmap":
+    if not enabled or style != "bar":
         return 0.0, 0.0
     bounds = sensorgram_control_step_overlay_view_bounds(window)
     if bounds is None:
@@ -311,8 +310,7 @@ def sync_sensorgram_control_step_overlay(window) -> None:
         window._sensorgram_control_step_overlay_items = items
     enabled = bool(getattr(window, "_sensorgram_control_step_overlay_enabled", True))
     style = normalize_sensorgram_control_step_overlay_style(window, getattr(window, "_sensorgram_control_step_overlay_style", "bar"))
-    content_mode = window._normalize_sensorgram_content_mode(getattr(window, "_sensorgram_content_mode", "metric"))
-    if not enabled or content_mode == "heatmap":
+    if not enabled:
         for item in items:
             try:
                 item.setVisible(False)

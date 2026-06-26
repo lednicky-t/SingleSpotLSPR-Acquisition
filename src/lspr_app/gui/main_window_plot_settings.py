@@ -924,26 +924,6 @@ class SensorgramPlotSettingsDialog(QDialog):
         preview_form = QFormLayout()
         preview_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
-        heatmap_points_row = QHBoxLayout()
-        heatmap_points_row.setContentsMargins(0, 0, 0, 0)
-        heatmap_points_row.setSpacing(8)
-
-        heatmap_label = QLabel("Heatmap")
-        heatmap_label.setToolTip("Display-point cap for the preview heatmap row history.")
-        heatmap_points_row.addWidget(heatmap_label)
-
-        self.heatmap_rows_spin = QSpinBox()
-        make_compact_spinbox(self.heatmap_rows_spin)
-        self.heatmap_rows_spin.setRange(16, 100000)
-        self.heatmap_rows_spin.setValue(int(getattr(self._window, "_sensorgram_heatmap_history_max_rows", 800)))
-        self.heatmap_rows_spin.setToolTip("Maximum number of heatmap rows kept in the preview history.")
-        heatmap_points_row.addWidget(self.heatmap_rows_spin)
-        heatmap_points_row.addStretch(1)
-
-        heatmap_points_row_widget = QWidget(self)
-        heatmap_points_row_widget.setLayout(heatmap_points_row)
-        preview_form.addRow("Points rendered", heatmap_points_row_widget)
-
         preview_note = QLabel("Coming soon: preview mode settings are still in development.")
         preview_note.setWordWrap(True)
         preview_form.addRow("", preview_note)
@@ -967,7 +947,6 @@ class SensorgramPlotSettingsDialog(QDialog):
         window._plot_display_points = int(self.metric_display_points_spin.value())
         window._sensorgram_line_step_mode = _normalize_line_mode(self.line_mode_combo.currentData())
         window._sensorgram_line_width_px = max(float(self.line_width_spin.value()), 0.5)
-        window._sensorgram_heatmap_history_max_rows = int(self.heatmap_rows_spin.value())
         buffer_fraction = self.follow_latest_buffer_combo.currentData()
         window._metric_autoscale_follow_latest_buffer_fraction = 0.0 if buffer_fraction is None else float(buffer_fraction)
         throttle_s = self.autoscale_throttle_combo.currentData()

@@ -301,7 +301,6 @@ def build_pipeline_timing_breakdown_for(window) -> dict[str, float | None]:
     plot_refresh_delay_ms = _timing_value_ms(getattr(window, "_last_plot_refresh_delay_ms", None))
     plot_render_ms = _timing_value_ms(getattr(window, "_last_plot_refresh_ms", None))
     sensorgram_render_ms = _timing_value_ms(getattr(window, "_last_sensorgram_render_ms", None))
-    sensorgram_heatmap_render_ms = _timing_value_ms(getattr(window, "_last_sensorgram_heatmap_render_ms", None))
     deferred_display_ms = _timing_value_ms(getattr(window, "_last_deferred_display_refresh_ms", None))
     deferred_stats_ms = _timing_value_ms(getattr(window, "_last_deferred_stats_refresh_ms", None))
     known_total_ms = sum(
@@ -322,7 +321,6 @@ def build_pipeline_timing_breakdown_for(window) -> dict[str, float | None]:
             plot_refresh_delay_ms,
             plot_render_ms,
             sensorgram_render_ms,
-            sensorgram_heatmap_render_ms,
             deferred_display_ms,
             deferred_stats_ms,
         )
@@ -348,7 +346,6 @@ def build_pipeline_timing_breakdown_for(window) -> dict[str, float | None]:
         "plot_refresh_delay_ms": plot_refresh_delay_ms,
         "plot_render_ms": plot_render_ms,
         "sensorgram_render_ms": sensorgram_render_ms,
-        "sensorgram_heatmap_render_ms": sensorgram_heatmap_render_ms,
         "deferred_display_ms": deferred_display_ms,
         "deferred_stats_ms": deferred_stats_ms,
         "idle_ms": idle_ms,
