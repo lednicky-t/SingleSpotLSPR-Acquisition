@@ -577,6 +577,8 @@ def main() -> None:
     bootstrap_level = logging.WARNING if diagnostics.profile == "off" else logging.INFO
     bootstrap_logger.log(bootstrap_level, diagnostics.startup_summary_text())
     app = QApplication(sys.argv)
+    from lspr_app import pyqtgraph_patches
+    pyqtgraph_patches.apply()
     startup_widget_tracer = StartupSuspiciousWidgetTracer(
         bootstrap_logger,
         enabled=bool(diagnostics.debug_timing_enabled or diagnostics.deep_timing_enabled),
