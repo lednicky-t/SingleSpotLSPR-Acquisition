@@ -45,9 +45,13 @@ class ExperimentControlController(QObject):
             self.window._move_to_relative_experiment_control_step(int(delta))  # noqa: SLF001
 
     def refresh_devices(self, *_args) -> bool:
-        if hasattr(self.window, "refresh_device_ports"):
-            return bool(self.window.refresh_device_ports())
-        return False
+        return self.backend.refresh_devices()
+
+    def device_states(self) -> list:
+        return self.backend.device_states()
+
+    def is_device_connected(self, device_key: str) -> bool:
+        return self.backend.is_device_connected(device_key)
 
     def shutdown_devices(self, *_args) -> None:
         if hasattr(self.window, "shutdown_devices"):

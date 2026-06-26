@@ -108,7 +108,7 @@ from lspr_app.gui.experiment_control_table import (
 from lspr_app.gui.experiment_control_editing import ExperimentControlEditingController
 from lspr_app.gui.experiment_control_dialogs import ExperimentControlDialogs
 from lspr_app.gui.experiment_control_controller import ExperimentControlController
-from lspr_app.gui.experiment_control_backend import ExperimentControlBackend, NullExperimentControlBackend
+from lspr_app.gui.experiment_control_backend import AcquisitionExperimentControlBackend, ExperimentControlBackend, NullExperimentControlBackend
 from lspr_app.gui.experiment_control_capabilities import ExperimentControlCapabilities
 from lspr_app.gui.icon_helpers import flow_tabler_icon, tint_tabler_icon, transport_icon
 from lspr_app.gui.ui_helpers import make_compact_spinbox
@@ -1676,7 +1676,7 @@ class ExperimentControlWindow(QWidget):
         self._bootstrap_batches_logged = 0
         self._ui_state = ui_state
         self._capabilities = capabilities or ExperimentControlCapabilities.acquisition()
-        self._backend = backend or NullExperimentControlBackend(self._capabilities)
+        self._backend = backend or AcquisitionExperimentControlBackend(self)
         self._experiment_control_controller = ExperimentControlController(self, self._backend, self._capabilities)
         self._device_comm_service = DeviceCommunicationService.shared()
         self._pause_state_dialog_state: dict[str, object] = {}
