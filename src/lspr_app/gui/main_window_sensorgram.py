@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
 from time import perf_counter
 
 import numpy as np
-from lspr_app.gui.main_window_processing import normalize_sensorgram_metric_name, sensorgram_metric_order
+from lspr_app.gui.main_window_processing import normalize_sensorgram_metric_name, sensorgram_metric_order, sensorgram_metric_archive_names
+from lspr_app.gui.plot_view_cache import build_active_trace_series_token
+from lspr_app.storage.hdf5_export import load_processed_metric_history
 
 
 def sensorgram_metric_selection(window) -> tuple[list[str], str]:
@@ -240,3 +243,33 @@ def toggle_sensorgram_time_axis_mode(window) -> None:
     window._sensorgram_time_axis_mode = "clock" if current_mode != "clock" else "elapsed"
     apply_sensorgram_time_axis_mode(window)
     window._schedule_ui_state_persist()
+
+
+def active_trace_series_for(window) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Return the current active metric series, using the plot-view cache if available."""
+    cache = getattr(window, "_plot_view_cache", None)
+
+    def _build_active_series() -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        selected_metrics = set(window._selected_trace_metrics())
+        if cache is not None:
+            active = cache.live_absolute_metric_series(selected_metrics)
+            if active:
+                return active
+        archive_path = getattr(window, "_metric_archive_path", None)
+        if archive_path is not None:
+            try:
+                archive_series = load_processed_metric_history(
+                    Path(archive_path),
+                    sensorgram_metric_archive_names(selected_metrics),
+                    time_range_s=None,
+                )
+            except Exception:
+                archive_series = {}
+            if archive_series:
+                return archive_series
+        return {}
+
+    if cache is None:
+        return _build_active_series()
+    token = build_active_trace_series_token(window)
+    return cache.cached_active_trace_series(token, _build_active_series)

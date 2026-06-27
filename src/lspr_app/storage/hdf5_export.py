@@ -745,6 +745,7 @@ class AsyncHDF5MeasurementWriter:
         pending_spectra: list[Spectrum] = []
         pending_times: list[float] = []
         pending_peaks: list[float] = []
+        pending_metrics: list[dict] = []
         last_flush = monotonic()
         try:
             while True:
@@ -771,32 +772,44 @@ class AsyncHDF5MeasurementWriter:
                     pending_times.extend(time_series_s)
                     pending_peaks.extend(peak_positions_nm)
                 elif kind == "metrics" and isinstance(payload, list):
-                    writer.append_metrics(payload)
+                    # Accumulate metric rows and write as a single batch on the next
+                    # flush.  Writing one row at a time caused one HDF5 resize per
+                    # dataset per spectrum (h5py holds the GIL), which progressively
+                    # blocked the GUI thread and degraded acquisition rate.
+                    pending_metrics.extend(payload)
                 elif kind == "experiment_control_runtime" and isinstance(payload, dict):
                     writer.append_flow_state([payload])
                 elif kind == "device_state" and isinstance(payload, dict):
                     writer.append_device_state(payload)
                 elif kind == "flush":
+                    if pending_metrics:
+                        writer.append_metrics(pending_metrics)
+                        pending_metrics.clear()
                     if pending_spectra:
                         writer.append_batch(pending_spectra, pending_times, pending_peaks)
-                        writer.flush()
                         pending_spectra.clear()
                         pending_times.clear()
                         pending_peaks.clear()
+                    writer.flush()
                     last_flush = monotonic()
                 elif kind == "close":
+                    if pending_metrics:
+                        writer.append_metrics(pending_metrics)
                     if pending_spectra:
                         writer.append_batch(pending_spectra, pending_times, pending_peaks)
-                        writer.flush()
+                    writer.flush()
                     break
                 elif kind == "timeout":
+                    if pending_metrics:
+                        writer.append_metrics(pending_metrics)
+                        pending_metrics.clear()
                     if pending_spectra:
                         writer.append_batch(pending_spectra, pending_times, pending_peaks)
-                        writer.flush()
                         pending_spectra.clear()
                         pending_times.clear()
                         pending_peaks.clear()
-                        last_flush = monotonic()
+                    writer.flush()
+                    last_flush = monotonic()
                 if self._stop_event.is_set() and self._queue.empty():
                     break
         finally:

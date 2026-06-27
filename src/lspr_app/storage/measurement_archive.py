@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import inspect
@@ -15,68 +15,159 @@ from lspr_app.storage.output_paths import recording_experiment_base_dir_for
 _WRITER_ATTR = "_metric_archive_writer"
 _WRITER_PATH_ATTR = "_metric_archive_writer_path"
 _WRITER_TEMP_ATTR = "_metric_archive_writer_is_temp"
+_SESSION_WRITER_ATTR = "_session_writer"
+_SESSION_PATH_ATTR = "_session_writer_path"
 
 
-def ensure_temp_measurement_path(window: Any) -> Path:
-    path = getattr(window, _WRITER_PATH_ATTR, None)
-    if path:
-        return Path(path)
-
-    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+def _session_file_path(window: Any) -> Path:
+    existing = getattr(window, _SESSION_PATH_ATTR, None)
+    if existing:
+        return Path(existing)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     session_name = getattr(getattr(window, "_session", None), "name", None) or "session"
     safe_session = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(session_name))
-
     base_dir = recording_experiment_base_dir_for(window, fallback_base=Path.cwd() / "data")
-    candidate = base_dir / f"temp_measurement_{safe_session}_{stamp}.h5"
-    setattr(window, _WRITER_PATH_ATTR, candidate)
-    return candidate
+    path = base_dir / f"session_{safe_session}_{stamp}.h5"
+    setattr(window, _SESSION_PATH_ATTR, path)
+    # Keep _metric_archive_writer_path in sync for backwards compat with reload tasks
+    setattr(window, _WRITER_PATH_ATTR, path)
+    return path
 
 
-def _builder_kwargs(window: Any, path: Path) -> dict[str, Any]:
-    session = getattr(window, "_session", None)
-    kwargs: dict[str, Any] = {
-        "path": path,
-        "file_path": path,
-        "measurement_path": path,
-        "output_path": path,
-        "session": session,
-        "window": window,
-        "logger": getattr(window, "logger", None),
-        "name": getattr(session, "name", None),
-        "temporary": True,
-        "is_temporary": True,
-        "temp": True,
-        "metadata": getattr(window, "_session_metadata", None),
-    }
-    kwargs = {key: value for key, value in kwargs.items() if value is not None}
-    return kwargs
+def ensure_session_writer(window: Any, spectrum: Any = None) -> Any:
+    """Get-or-create the always-on session writer that records the full session.
 
+    Uses a full AsyncHDF5MeasurementWriter (same schema as the measurement file) so
+    the session file can be loaded by the evaluation app or used for reload after clear.
+    Requires at least one spectrum to know the wavelength axis — returns None until then.
+    """
+    writer = getattr(window, _SESSION_WRITER_ATTR, None)
+    if writer is not None:
+        return writer
 
-def _instantiate_official_writer(window: Any, path: Path):
-    from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter
-
-    candidate = AsyncHDF5MeasurementWriter
-    kwargs = _builder_kwargs(window, path)
-    try:
-        signature = inspect.signature(candidate)
-    except Exception:
-        signature = None
-
-    if signature is not None:
-        params = signature.parameters
-        filtered: dict[str, Any] = {}
-        for name, value in kwargs.items():
-            if name in params:
-                filtered[name] = value
-        try:
-            return candidate(**filtered)
-        except Exception:
-            pass
+    if spectrum is None:
+        return None
 
     try:
-        return candidate(path)
+        wavelengths_nm = np.asarray(spectrum.wavelengths_nm, dtype=np.float64)
     except Exception:
         return None
+    if len(wavelengths_nm) == 0:
+        return None
+
+    path = _session_file_path(window)
+
+    try:
+        from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter
+        from lspr_app.domain.models import ProcessingSettings
+    except Exception:
+        return None
+
+    try:
+        processing = window._current_processing_settings()
+    except Exception:
+        return None
+
+    session_name = getattr(getattr(window, "_session", None), "name", None) or "session"
+    started_at = getattr(window, "_live_trace_started_at", None) or spectrum.acquired_at
+
+    signal_mode = "sample"
+    try:
+        text = window.plot_selector.currentText().lower()
+        if text in {"sample", "absorbance"}:
+            signal_mode = text
+    except Exception:
+        pass
+
+    flush_interval = float(getattr(window, "_measurement_flush_interval_s", 1.0))
+
+    try:
+        writer = AsyncHDF5MeasurementWriter(
+            path,
+            signal_mode,
+            wavelengths_nm,
+            processing,
+            experiment_name=str(session_name),
+            started_at_utc=started_at,
+            flush_interval_s=flush_interval,
+        )
+    except Exception:
+        return None
+
+    setattr(window, _SESSION_WRITER_ATTR, writer)
+    # Keep backwards-compat aliases so reload tasks and plot-settings code keep working
+    setattr(window, _WRITER_ATTR, writer)
+    setattr(window, "_metric_archive_path", path)
+
+    try:
+        session = getattr(window, "_session", None)
+        if session is not None:
+            state = session.state
+            writer.update_baselines(state.dark, state.reference)
+    except Exception:
+        pass
+    try:
+        if hasattr(window, "_acquisition_state_payload"):
+            writer.update_acquisition_state(window._acquisition_state_payload())
+    except Exception:
+        pass
+
+    return writer
+
+
+def close_session_writer(window: Any) -> None:
+    """Close and clear the always-on session writer."""
+    writer = getattr(window, _SESSION_WRITER_ATTR, None)
+    if writer is None:
+        writer = getattr(window, _WRITER_ATTR, None)
+    if writer is not None:
+        try:
+            close_fn = getattr(writer, "close", None)
+            if callable(close_fn):
+                close_fn()
+        except Exception:
+            pass
+    setattr(window, _SESSION_WRITER_ATTR, None)
+    setattr(window, _WRITER_ATTR, None)
+    setattr(window, _WRITER_TEMP_ATTR, False)
+    # Clear path attrs so the next live session generates a fresh timestamped file.
+    setattr(window, _SESSION_PATH_ATTR, None)
+    setattr(window, _WRITER_PATH_ATTR, None)
+
+
+# ---------------------------------------------------------------------------
+# Legacy helpers — kept for backwards compatibility
+# ---------------------------------------------------------------------------
+
+def ensure_temp_measurement_path(window: Any) -> Path:
+    """Return the session file path (legacy name kept for callers that use it)."""
+    return _session_file_path(window)
+
+
+def ensure_temp_measurement_writer(window: Any) -> Any:
+    """Return the session writer if one already exists, otherwise fall back to the
+    lightweight metric-only writer so callers that invoke this before a spectrum
+    is available still get *something* usable."""
+    writer = getattr(window, _SESSION_WRITER_ATTR, None) or getattr(window, _WRITER_ATTR, None)
+    if writer is not None:
+        return writer
+
+    path = _session_file_path(window)
+    writer = _FallbackTempMeasurementWriter.open(path)
+
+    setattr(window, _WRITER_ATTR, writer)
+    setattr(window, "_metric_archive_path", path)
+    setattr(window, _WRITER_TEMP_ATTR, True)
+    return writer
+
+
+def close_temp_measurement_writer(window: Any) -> None:
+    """Close the session writer (legacy name)."""
+    close_session_writer(window)
+
+
+def metric_archive_path(window: Any) -> Path:
+    return _session_file_path(window)
 
 
 @dataclass
@@ -155,37 +246,3 @@ class _FallbackTempMeasurementWriter:
     def close(self) -> None:
         self.handle.flush()
         self.handle.close()
-
-
-def ensure_temp_measurement_writer(window: Any):
-    writer = getattr(window, _WRITER_ATTR, None)
-    if writer is not None:
-        return writer
-
-    path = ensure_temp_measurement_path(window)
-    writer = _instantiate_official_writer(window, path)
-    if writer is None:
-        writer = _FallbackTempMeasurementWriter.open(path)
-
-    setattr(window, _WRITER_ATTR, writer)
-    setattr(window, _WRITER_PATH_ATTR, path)
-    setattr(window, "_metric_archive_path", path)
-    setattr(window, _WRITER_TEMP_ATTR, True)
-    return writer
-
-
-def close_temp_measurement_writer(window: Any) -> None:
-    writer = getattr(window, _WRITER_ATTR, None)
-    if writer is None:
-        return
-    try:
-        close = getattr(writer, "close", None)
-        if callable(close):
-            close()
-    finally:
-        setattr(window, _WRITER_ATTR, None)
-        setattr(window, _WRITER_TEMP_ATTR, False)
-
-
-def metric_archive_path(window: Any) -> Path:
-    return ensure_temp_measurement_path(window)

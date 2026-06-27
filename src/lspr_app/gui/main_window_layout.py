@@ -3,6 +3,7 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
     QLayout,
     QLabel,
@@ -14,7 +15,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from lspr_app.gui.main_window_panels import build_spectra_processing_group
+from lspr_app.gui.main_window_panels import build_spectra_processing_group, configure_spectra_processing_group_controls
 from lspr_app.gui.icon_helpers import flow_tabler_icon, storage_compression_icon, tint_tabler_icon
 from lspr_app.gui.widgets import CollapsibleSection, CompactSplitter
 from lspr_app.gui.main_window_titlebar import refresh_hw_device_status_strip
@@ -456,3 +457,79 @@ def build_main_layout_for(window) -> None:
     container.installEventFilter(window)
     window.setCentralWidget(container)
     window._sensorgram_header_controls_ready = True
+
+
+def apply_control_sizing_for(window) -> None:
+    """Set minimum sizes and size policies for all acquisition-panel controls."""
+    tall_widgets = [
+        window.integration_spin,
+        window.averages_spin,
+        window.auto_integration_button,
+        window.correct_dark_check,
+        window.correct_nonlinearity_check,
+        window.live_rate_spin,
+        window.trace_noise_window_spin,
+        window.range_min_spin,
+        window.range_max_spin,
+        window.baseline_method_combo,
+        window.smoothing_method_combo,
+        window.smoothing_window_spin,
+        window.temporal_smoothing_spin,
+        window.crop_method_combo,
+        window.fit_method_combo,
+        window.poly_order_spin,
+        window.fit_window_spin,
+        window.analysis_resolution_spin,
+        window.plot_selector,
+        window.save_processing_button,
+        window.load_processing_button,
+        window.clear_trace_button,
+        window.trace_record_button,
+        window.show_residual_button,
+        window.freeze_plots_button,
+        window.autoscale_spectrum_button,
+        window.autoscale_trace_button,
+        window.sim_resolution_spin,
+    ]
+    for widget in tall_widgets:
+        widget.setMinimumHeight(26)
+
+    compact_combos = [
+        window.baseline_method_combo,
+        window.smoothing_method_combo,
+        window.crop_method_combo,
+        window.fit_method_combo,
+        window.analysis_resolution_spin,
+        window.plot_selector,
+    ]
+    for combo in compact_combos:
+        combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        combo.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        combo.setMinimumContentsLength(1)
+        combo.view().setTextElideMode(Qt.TextElideMode.ElideRight)
+
+    configure_spectra_processing_group_controls(window)
+
+    for button in (
+        window.measurement_toggle_button,
+        window.stop_measurement_button,
+        window.next_measurement_button,
+        window.acquire_dark_button,
+        window.acquire_reference_button,
+    ):
+        button.setMinimumSize(QSize(34, 34))
+
+    for slider in (
+        window.sim_peak_center_slider,
+        window.sim_peak_width_slider,
+        window.sim_peak_height_slider,
+        window.sim_secondary_peak_offset_slider,
+        window.sim_secondary_peak_height_slider,
+        window.sim_secondary_peak_width_slider,
+        window.sim_baseline_slider,
+        window.sim_slope_slider,
+        window.sim_noise_slider,
+    ):
+        slider.setMinimumHeight(18)
+
+    window.source_tabs.setMinimumHeight(220)

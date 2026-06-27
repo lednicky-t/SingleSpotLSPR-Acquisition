@@ -5,7 +5,7 @@ import traceback
 from time import perf_counter
 from typing import Any
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QEvent, Qt, QTimer
 
 from lspr_app.device.simulated import SimulatedSpectrometer
 from lspr_app.gui.hardware_initializer import HardwareInitResult, HardwareInitStepResult, HardwareInitTask
@@ -158,6 +158,7 @@ def ensure_experiment_control_panel_for(window) -> None:
             window._experiment_control_window.experimental_control_state_recorded.connect(window._handle_experimental_control_state_recorded)
             window._experiment_control_window.recording_controller = window
             window._experiment_control_window.theme_changed.connect(window.set_theme)
+            window._experiment_control_window.set_theme(str(getattr(window, "_theme_mode", "dark")))
             if hasattr(window._experiment_control_window, "_set_record_with_flow_recording_active"):
                 window._experiment_control_window._set_record_with_flow_recording_active(bool(window._measurement_active))
             window._experiment_control_window._ui_startup_ready = bool(getattr(window, "_ui_startup_ready", False))
@@ -308,6 +309,8 @@ def handle_hardware_init_step_for(window, result: object) -> None:
 
 def handle_hardware_init_finished_for(window, result: object) -> None:
     window._hardware_init_task = None
+    if getattr(window, "_closing", False):
+        return
     experiment_control_window = getattr(window, "_experiment_control_window", None)
     if not isinstance(result, HardwareInitResult):
         window._log_warning("Hardware initialization finished with an unexpected result payload.")
@@ -350,3 +353,195 @@ def handle_hardware_init_finished_for(window, result: object) -> None:
     window._emit_hardware_init_progress(100, "Hardware initialization complete.")
     finish_hardware_initialization_for(window, "Hardware initialization complete.")
     sync_experiment_control_startup_ports_for(window)
+
+
+def close_event_for(window, event) -> None:  # pragma: no cover - GUI runtime path
+    """Perform all cleanup before the window closes.
+
+    The caller (``MainWindow.closeEvent``) is responsible for calling
+    ``super().closeEvent(event)`` and ``QApplication.instance().quit()``
+    after this function returns.
+    """
+    if (
+        getattr(window, "_measurement_active", False)
+        and getattr(window, "_confirm_exit_if_recording", True)
+    ):
+        from PyQt6.QtWidgets import QMessageBox
+        answer = QMessageBox.question(
+            window,
+            "Recording in progress",
+            "A measurement recording is currently active.\nClose the application and stop recording?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            event.ignore()
+            return
+
+    window._closing = True
+    window._log_info("Closing application.")
+    settings_dialog = getattr(window, "_sensorgram_settings_dialog", None)
+    if settings_dialog is not None:
+        try:
+            settings_dialog.close()
+        except Exception:
+            pass
+        window._sensorgram_settings_dialog = None
+    window._acquisition_state_timer.stop()
+    window._ui_state_timer.stop()
+    window._persist_acquisition_state()
+    window._save_ui_state()
+    if window._experiment_control_window is not None:
+        try:
+            window._experiment_control_window.shutdown_devices()
+        except Exception as exc:
+            window._log_warning(f"Experimental control device shutdown failed: {exc}")
+        window._experiment_control_window.save_ui_state()
+        ecw = window._experiment_control_window
+        try:
+            ecw.availability_changed.disconnect(window._handle_flow_availability_changed)
+            ecw.valve_availability_changed.disconnect(window._handle_valve_availability_changed)
+            ecw.mswitch_availability_changed.disconnect(window._handle_mswitch_availability_changed)
+            ecw.recording_control_requested.disconnect(window._handle_flow_recording_control)
+            ecw.experimental_control_state_recorded.disconnect(window._handle_experimental_control_state_recorded)
+            ecw.theme_changed.disconnect(window.set_theme)
+        except RuntimeError:
+            pass
+        ecw.close()
+    window._pending_manual_kind = None
+    window._pending_source_mode = None
+    window._pending_auto_integration = False
+    window._resume_live_after_manual = False
+    window._resume_live_after_source_switch = False
+    window._resume_live_after_auto_integration = False
+    window._live_active = False
+    window._simulation_refresh_timer.stop()
+    window._ui_task_scheduler.clear()
+    window._ui_heartbeat_timer.stop()
+    window._live_stop_event.set()
+    if window._live_worker is not None and window._live_worker.is_alive():
+        try:
+            window._live_worker.stop()
+            window._live_worker.join(timeout=2.0)
+            if window._live_worker.is_alive():
+                window._log_warning("Live acquisition worker did not exit cleanly; terminating it.")
+                window._live_worker.terminate()
+                window._live_worker.join(timeout=1.0)
+        except Exception as exc:
+            window._log_warning(f"Live acquisition worker shutdown failed: {exc}")
+    window._live_worker = None
+    if window._live_processing_worker is not None:
+        try:
+            window._live_processing_worker.stop()
+            window._live_processing_worker.join(timeout=2.0)
+            if window._live_processing_worker.is_alive():
+                window._log_warning("Live processing worker did not exit cleanly; terminating it.")
+                window._live_processing_worker.terminate()
+                window._live_processing_worker.join(timeout=1.0)
+        except Exception as exc:
+            window._log_warning(f"Live processing worker shutdown failed: {exc}")
+    window._live_processing_worker = None
+    window._reset_live_accumulator()
+    if window._measurement_active:
+        window._stop_measurement_run()
+    elif window._measurement_writer is not None:
+        window._flush_measurement_frames(force=True)
+        window._measurement_writer.close()
+        window._measurement_writer = None
+    from lspr_app.storage.measurement_archive import close_session_writer
+    close_session_writer(window)
+    window._busy = False
+    try:
+        window._thread_pool.waitForDone(3000)
+    except TypeError:
+        window._thread_pool.waitForDone()
+    try:
+        log_handler = getattr(window, "_log_handler", None)
+        if log_handler is not None:
+            window._ui_logger.removeHandler(log_handler)
+    except Exception:
+        pass
+
+
+def event_filter_for(window, obj, event) -> bool | None:
+    """Handle watched-object events for the main window.
+
+    Returns ``True`` to consume the event, or ``None`` to fall through to
+    ``super().eventFilter(obj, event)`` (the caller is responsible for that
+    call).
+    """
+    if obj is getattr(window, "project_destination_edit", None):
+        event_type = event.type()
+        if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            window._choose_recording_project_destination()
+            return True
+    if obj is getattr(window, "trace_stats_label", None):
+        event_type = event.type()
+        if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            window._cycle_trace_stats_metric()
+            return True
+    if obj is getattr(window, "_processed_spectra_header_label", None):
+        event_type = event.type()
+        if event_type == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+            window._activate_experimental_control_view()
+            return True
+    experiment_header = getattr(getattr(window, "_experiment_control_window", None), "_experiment_control_header_label", None)
+    if obj is experiment_header:
+        event_type = event.type()
+        if event_type == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+            window._activate_spectra_view()
+            return True
+    if event.type() == QEvent.Type.Paint:
+        startup_painted = False
+        startup_widget_label = None
+        if obj is getattr(window, "_main_content_widget", None):
+            startup_widget_label = "main_content"
+            startup_painted = True
+        elif obj is getattr(window, "_spectra_block", None):
+            startup_widget_label = "spectra_block"
+            startup_painted = True
+        elif obj is getattr(window, "_sensorgram_block", None):
+            startup_widget_label = "sensorgram_block"
+            startup_painted = True
+        else:
+            spectrum_viewport = getattr(getattr(window, "spectrum_plot", None), "viewport", None)
+            if spectrum_viewport is not None and obj is spectrum_viewport():
+                startup_widget_label = "spectrum_viewport"
+                startup_painted = True
+            else:
+                trace_viewport = getattr(getattr(window, "trace_plot", None), "viewport", None)
+                if trace_viewport is not None and obj is trace_viewport():
+                    startup_widget_label = "trace_viewport"
+                    startup_painted = True
+        if startup_painted:
+            startup_show_t0 = getattr(window, "_startup_show_requested_t0", None)
+            if startup_show_t0 is not None:
+                startup_elapsed_ms = (perf_counter() - startup_show_t0) * 1000.0
+                if not getattr(window, "_startup_widget_paint_reported", False):
+                    window._startup_widget_paint_reported = set()
+                painted = getattr(window, "_startup_widget_paint_reported", set())
+                if startup_widget_label not in painted:
+                    painted.add(startup_widget_label)
+                    window._startup_widget_paint_reported = painted
+                    window._log_info(
+                        f"Startup +{startup_elapsed_ms:.1f} ms: first paint on {startup_widget_label}"
+                    )
+    spectrum_viewport = getattr(getattr(window, "spectrum_plot", None), "viewport", None)
+    if spectrum_viewport is not None and obj is spectrum_viewport():
+        pass  # reserved for future viewport-level event handling
+    if obj is window._title_bar_widget:
+        event_type = event.type()
+        if event_type == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+            window._toggle_window_max_restore()
+            return True
+        if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            window._title_bar_drag_active = True
+            window._title_bar_drag_offset = event.globalPosition().toPoint() - window.frameGeometry().topLeft()
+            return True
+        if event_type == QEvent.Type.MouseMove and window._title_bar_drag_active:
+            if not window.isMaximized() and event.buttons() & Qt.MouseButton.LeftButton:
+                window.move(event.globalPosition().toPoint() - window._title_bar_drag_offset)
+            return True
+        if event_type in {QEvent.Type.MouseButtonRelease, QEvent.Type.Leave}:
+            window._title_bar_drag_active = False
+    return None

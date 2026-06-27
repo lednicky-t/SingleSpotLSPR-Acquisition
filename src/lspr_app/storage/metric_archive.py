@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import tempfile
@@ -77,7 +77,7 @@ def ensure_metric_archive_path(window: Any) -> Path:
 
         candidate = ensure_temp_measurement_path(window)
     except Exception:
-        stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
         session_name = getattr(getattr(window, "_session", None), "name", None) or "session"
         safe_session = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(session_name))
         candidate = Path(tempfile.gettempdir()) / f"temp_metric_archive_{safe_session}_{stamp}.h5"

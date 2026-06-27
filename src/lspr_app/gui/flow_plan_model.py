@@ -161,7 +161,7 @@ class ExperimentPlanTableModel(QAbstractTableModel):
             palette = self._theme_palette
             background = palette.get("button") if row % 2 else palette.get("bg")
             if not background:
-                background = "#1a2027" if row % 2 else "#151a20"
+                return None
             return QBrush(QColor(background))
         if role == Qt.ItemDataRole.ForegroundRole:
             valve_column = 4 + ACTIVE_PUMP_CHANNELS * 3
@@ -170,7 +170,9 @@ class ExperimentPlanTableModel(QAbstractTableModel):
                 color = _safe_color_name(self._valve_state_colors.get(normalized, ""))
                 if color:
                     return QBrush(QColor(_contrast_text_color(color)))
-            foreground = self._theme_palette.get("fg", "#e6ebf1")
+            foreground = self._theme_palette.get("fg")
+            if not foreground:
+                return None
             return QBrush(QColor(foreground))
         if role == Qt.ItemDataRole.ToolTipRole:
             if column in {2, 3}:
@@ -472,26 +474,16 @@ class _BaseFlowDelegate(QStyledItemDelegate):
         editor.setFrame(False)
         if width is not None:
             editor.setFixedWidth(width)
+        p = self._window._theme_palette()
+        bg = p.get("field", "#f4f6f8")
+        fg = p.get("fg", "#1d2733")
+        hl = p.get("selection", "#dbeafe")
         editor.setStyleSheet(
-            "QComboBox {"
-            " background-color: palette(base);"
-            " color: palette(text);"
-            " border: none;"
-            " padding: 0px 1px;"
-            " margin: 0px;"
-            "}"
-            "QComboBox QLineEdit {"
-            " background-color: palette(base);"
-            " color: palette(text);"
-            " border: none;"
-            " padding: 0px;"
-            " margin: 0px;"
-            "}"
+            f"QComboBox {{ background-color: {bg}; color: {fg}; border: none; padding: 0px 1px; margin: 0px; }}"
+            f"QComboBox QLineEdit {{ background-color: {bg}; color: {fg}; border: none; padding: 0px; margin: 0px; }}"
             "QComboBox::drop-down { border: none; width: 0px; }"
             "QComboBox::down-arrow { width: 0px; height: 0px; }"
-            "QComboBox QAbstractItemView {"
-            " selection-background-color: palette(highlight);"
-            "}"
+            f"QComboBox QAbstractItemView {{ selection-background-color: {hl}; }}"
         )
 
     def _match_editor_height(self, editor, option) -> None:
@@ -504,25 +496,13 @@ class _BaseFlowDelegate(QStyledItemDelegate):
     def _style_spin_editor(self, editor: QDoubleSpinBox) -> None:
         editor.setAutoFillBackground(True)
         editor.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        p = self._window._theme_palette()
+        bg = p.get("field", "#f4f6f8")
+        fg = p.get("fg", "#1d2733")
         editor.setStyleSheet(
-            "QDoubleSpinBox {"
-            " background-color: palette(base);"
-            " color: palette(text);"
-            " border: none;"
-            " padding: 0px 2px;"
-            " margin: 0px;"
-            "}"
-            "QDoubleSpinBox QLineEdit {"
-            " background-color: palette(base);"
-            " color: palette(text);"
-            " border: none;"
-            " padding: 0px;"
-            " margin: 0px;"
-            "}"
-            "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {"
-            " width: 0px;"
-            " border: none;"
-            "}"
+            f"QDoubleSpinBox {{ background-color: {bg}; color: {fg}; border: none; padding: 0px 2px; margin: 0px; }}"
+            f"QDoubleSpinBox QLineEdit {{ background-color: {bg}; color: {fg}; border: none; padding: 0px; margin: 0px; }}"
+            "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 0px; border: none; }"
         )
 
     def _commit_combo_editor_value(self, editor, index: QModelIndex) -> None:
@@ -603,7 +583,7 @@ class ExperimentPlanValveDelegate(_BaseFlowDelegate):
             painter.fillRect(option.rect, bg_brush)
             bg_color = bg_brush.color()
         else:
-            bg_color = QColor(self._window._theme_palette().get("bg", "#151a20"))
+            bg_color = QColor(self._window._theme_palette().get("bg", "#f4f6f8"))
             painter.fillRect(option.rect, bg_color)
 
         fg_brush = index.data(Qt.ItemDataRole.ForegroundRole)
@@ -643,7 +623,7 @@ class _ColorPopupDelegate(QStyledItemDelegate):
         elif isinstance(bg_brush, QColor) and bg_brush.isValid():
             bg_color = bg_brush
         else:
-            bg_color = QColor(self._window._theme_palette().get("field", "#1a2027"))
+            bg_color = QColor(self._window._theme_palette().get("field", "#f4f6f8"))
         painter.fillRect(option.rect, bg_color)
 
         text = str(index.data(Qt.ItemDataRole.DisplayRole) or index.data(Qt.ItemDataRole.EditRole) or "").strip()
@@ -816,8 +796,8 @@ class ExperimentPlanCommentDelegate(_BaseFlowDelegate):
         if isinstance(background, QBrush) and background.color().isValid():
             bg_color = background.color().name()
         else:
-            bg_color = self._window._theme_palette().get("bg", "#151a20")
-        fg_color = self._window._theme_palette().get("fg", "#e6ebf1")
+            bg_color = self._window._theme_palette().get("bg", "#f4f6f8")
+        fg_color = self._window._theme_palette().get("fg", "#1d2733")
         editor.setStyleSheet(
             "QLineEdit {"
             f" background: {bg_color};"

@@ -17,7 +17,7 @@ from lspr_app.app import create_spectrometer
 from lspr_app.domain.models import Spectrum
 from lspr_app.domain.processing import processing_debug_mode_enabled
 from lspr_app.domain.session import MeasurementError
-from lspr_app.device.simulated import SimulatedSpectrometer
+from lspr_app.device.simulated import SimulatedSpectrometer, SimulationParameters
 from lspr_app.gui.icon_helpers import flow_tabler_icon, math_function_tab_icon, prism_tab_icon, tint_tabler_icon, transport_icon
 from lspr_app.gui.experiment_control_runtime import (
     experiment_runtime_label,
@@ -25,6 +25,7 @@ from lspr_app.gui.experiment_control_runtime import (
     experiment_runtime_state_name,
 )
 from lspr_app.gui.main_window_headers import update_source_link_buttons
+from lspr_app.gui.main_window_state import apply_source_mode_for
 from lspr_app.gui.workers import (
     AcquisitionRequest,
     AcquisitionResult,
@@ -124,6 +125,8 @@ def _handle_measurement_file_compression_finished(window, result: object) -> Non
     window._measurement_compression_task = None
     if hasattr(window, "_set_measurement_compression_busy_indicator"):
         window._set_measurement_compression_busy_indicator(False)
+    if getattr(window, "_closing", False):
+        return
     if not isinstance(result, MeasurementCompressionResult):
         window._measurement_path = None
         window.status_label.setText("Measurement stopped.")
@@ -148,6 +151,8 @@ def _handle_measurement_file_compression_failed(window, message: str) -> None:
     window._measurement_compression_task = None
     if hasattr(window, "_set_measurement_compression_busy_indicator"):
         window._set_measurement_compression_busy_indicator(False)
+    if getattr(window, "_closing", False):
+        return
     window._measurement_path = None
     window.status_label.setText("Measurement stopped.")
     window._log_warning(f"Measurement file compression failed: {message}")
@@ -158,24 +163,49 @@ def _handle_measurement_file_compression_failed(window, message: str) -> None:
     window._update_window_mode_label()
 
 
-def _archive_live_sample_if_needed(window, spectrum: Spectrum) -> bool:
-    if window._measurement_writer is None:
-        return False
+def _peak_nm_from_spectrum(spectrum: Spectrum) -> float:
     values = np.asarray(spectrum.values, dtype=np.float64)
     wavelengths = np.asarray(spectrum.wavelengths_nm, dtype=np.float64)
-    peak_nm = float("nan")
     if len(values) > 0 and len(wavelengths) > 0:
         finite = np.isfinite(values)
         if np.any(finite):
             safe_values = np.where(finite, values, -np.inf)
             peak_index = int(np.argmax(safe_values))
             if 0 <= peak_index < len(wavelengths):
-                peak_nm = float(wavelengths[peak_index])
+                return float(wavelengths[peak_index])
+    return float("nan")
+
+
+def _archive_to_session_writer_if_available(window, spectrum: Spectrum) -> None:
+    """Write a raw sample spectrum to the always-on session file."""
+    from lspr_app.storage.measurement_archive import ensure_session_writer
+    writer = ensure_session_writer(window, spectrum)
+    if writer is None:
+        return
+    # Skip if the session writer IS the measurement writer (only during recording when
+    # they're not separate objects — they're always separate objects here, but be safe).
+    if writer is window._measurement_writer:
+        return
+    session_started_at = getattr(window, "_live_trace_started_at", None)
+    if session_started_at is not None:
+        elapsed_s = max((spectrum.acquired_at - session_started_at).total_seconds(), 0.0)
+    else:
+        elapsed_s = 0.0
+    try:
+        writer.append_batch([spectrum], [elapsed_s], [_peak_nm_from_spectrum(spectrum)])
+    except Exception:
+        pass
+
+
+def _archive_live_sample_if_needed(window, spectrum: Spectrum) -> bool:
+    _archive_to_session_writer_if_available(window, spectrum)
+    if window._measurement_writer is None:
+        return False
     elapsed_s = 0.0
     if window._measurement_started_at is not None:
         elapsed_s = (spectrum.acquired_at - window._measurement_started_at).total_seconds()
     try:
-        window._measurement_writer.append_batch([spectrum], [elapsed_s], [peak_nm])
+        window._measurement_writer.append_batch([spectrum], [elapsed_s], [_peak_nm_from_spectrum(spectrum)])
     except Exception:
         logging.getLogger("lspr_app.storage").exception("Failed to enqueue measurement frame for storage.")
         return False
@@ -273,15 +303,16 @@ def request_manual_acquisition(window, kind: str) -> None:
             window._session.set_dark(current_sample)
         else:
             window._session.set_reference(current_sample)
-        from lspr_app.storage.measurement_archive import ensure_temp_measurement_writer
-        ensure_temp_measurement_writer(window)
-
-
+        dark = window._session.state.dark
+        reference = window._session.state.reference
+        session_writer = getattr(window, "_session_writer", None)
+        if session_writer is not None:
+            try:
+                session_writer.update_baselines(dark, reference)
+            except Exception:
+                pass
         if window._measurement_writer is not None:
-            window._measurement_writer.update_baselines(
-                window._session.state.dark,
-                window._session.state.reference,
-            )
+            window._measurement_writer.update_baselines(dark, reference)
         target_plot = "Dark" if kind == "dark" else "Reference"
         if window.plot_selector.currentText() != target_plot:
             window.plot_selector.blockSignals(True)
@@ -390,7 +421,7 @@ def handle_acquisition_success(window, kind: str, result: AcquisitionResult) -> 
         window.source_tabs.blockSignals(True)
         window.source_tabs.setCurrentIndex(0 if pending_mode == "spectrometer" else 1)
         window.source_tabs.blockSignals(False)
-        window._apply_source_mode(pending_mode, restart_live=restart_live)
+        apply_source_mode_for(window, pending_mode, restart_live=restart_live)
         return
 
     if window._live_active and kind == "sample":
@@ -701,7 +732,7 @@ def handle_acquisition_error(window, source_epoch: int, message: str) -> None:
         window.source_tabs.blockSignals(True)
         window.source_tabs.setCurrentIndex(0 if pending_mode == "spectrometer" else 1)
         window.source_tabs.blockSignals(False)
-        window._apply_source_mode(pending_mode, restart_live=restart_live)
+        apply_source_mode_for(window, pending_mode, restart_live=restart_live)
         return
     if window._live_active:
         window._stop_live_acquisition(f"Live acquisition stopped: {message}")
@@ -1222,6 +1253,9 @@ def start_measurement_run(window) -> None:
     window._trace_display_cursor_s = 0.0
     window._live_trace_started_at = None
     window._metric_reference_processed = None
+    # Auto-switch to measurement view so the plot shows only the current recording.
+    window._sensorgram_display_mode = "measurement"
+    window._last_metric_autoscale_range = None
     window._refresh_session_statistics(force=True)
     window._refresh_trace_plot("Metric position (nm)")
     window._request_trace_autoscale()
@@ -1263,10 +1297,20 @@ def stop_measurement_run(window) -> None:
     set_measurement_ui_locked(window, False)
     if hasattr(window, "_set_recording_blink_indicator"):
         window._set_recording_blink_indicator(False)
-    window._sync_simulation_backend_from_controls()
+    sync_simulation_backend_from_controls_for(window)
     window._trace_view_locked = False
     window._live_trace_started_at = None
     window._metric_reference_processed = None
+    # Auto-switch back to session view so the full session history is visible again.
+    window._sensorgram_display_mode = "session"
+    window._sensorgram_axis_started_at = None
+    window._last_metric_autoscale_range = None
+    # Reload session archive so the cache gets repopulated with the full session.
+    try:
+        from lspr_app.gui.main_window_sensorgram_archive import request_absolute_sensorgram_metric_archive_reload
+        request_absolute_sensorgram_metric_archive_reload(window)
+    except Exception:
+        pass
     window._refresh_session_statistics(force=True)
     window._refresh_trace_plot("Metric position (nm)")
     window._request_trace_autoscale()
@@ -1330,9 +1374,8 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
     if updated:
         # Store the derived metric so the live archive and the recording file share the same format.
         acquired_at_unix_ms = int(round(processed.acquired_at.astimezone(timezone.utc).timestamp() * 1000.0))
-        metric_row = {
+        common_fields = {
             "acquired_at_unix_ms": acquired_at_unix_ms,
-            "t_ms": int(round(elapsed_s * 1000.0)),
             "sample_index": -1,
             "centroid_nm": metrics.get("centroid", np.nan),
             "smoothed_max_nm": metrics.get("smoothed_max", np.nan),
@@ -1342,14 +1385,31 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
             "mse": fit.metadata.get("mse", np.nan) if fit is not None else np.nan,
             "snr": metrics.get("snr", np.nan),
         }
-        from lspr_app.storage.measurement_archive import ensure_temp_measurement_writer
 
-        writer = window._measurement_writer
-        if writer is None:
-            writer = getattr(window, "_metric_archive_writer", None)
-        if writer is None:
-            writer = ensure_temp_measurement_writer(window)
-        writer.append_metrics([metric_row])
+        # Always write to the session file with session-relative t_ms.
+        from lspr_app.storage.measurement_archive import ensure_session_writer
+        session_writer = ensure_session_writer(window, processed)
+        if session_writer is not None:
+            session_started_at = getattr(window, "_live_trace_started_at", None)
+            if session_started_at is not None:
+                sess_elapsed_s = max((processed.acquired_at - session_started_at).total_seconds(), 0.0)
+            else:
+                sess_elapsed_s = elapsed_s
+            session_metric_row = dict(common_fields)
+            session_metric_row["t_ms"] = int(round(sess_elapsed_s * 1000.0))
+            try:
+                session_writer.append_metrics([session_metric_row])
+            except Exception:
+                pass
+
+        # Also write to the measurement file during active recording with measurement-relative t_ms.
+        if measurement_active and window._measurement_writer is not None:
+            meas_metric_row = dict(common_fields)
+            meas_metric_row["t_ms"] = int(round(elapsed_s * 1000.0))
+            try:
+                window._measurement_writer.append_metrics([meas_metric_row])
+            except Exception:
+                pass
         window._request_deferred_ui_refresh(trace_plot=True, trace_label="Metric position (nm)")
         window._request_trace_autoscale()
         notify_startup_data_rendered = getattr(window, "_notify_startup_data_rendered", None)
@@ -1497,9 +1557,8 @@ _original_start_live_acquisition = start_live_acquisition
 
 
 def start_live_acquisition(*args: Any, **kwargs: Any):
-    window = args[0] if args else kwargs.get("window")
-    if window is not None:
-        ensure_temp_measurement_writer(window)
+    # Session writer is initialized lazily on the first processed spectrum because
+    # the wavelength axis is not available yet.  No eager creation here.
     return _original_start_live_acquisition(*args, **kwargs)
 
 
@@ -1513,3 +1572,71 @@ def stop_live_acquisition(*args: Any, **kwargs: Any):
     finally:
         if window is not None and not _is_recording_active(window):
             close_temp_measurement_writer(window)
+
+
+def auto_set_integration_time_for(window) -> None:
+    """Auto-tune the spectrometer integration time.
+
+    Defers to ``window._auto_set_integration_time`` for the recursive re-try
+    case so the thin wrapper stays in the call chain.
+    """
+    if window._source_mode == "simulation":
+        window.status_label.setText("Auto integration is only available for the spectrometer source.")
+        window._log_warning("Auto integration requested while simulation source is active.")
+        return
+
+    if window._busy:
+        window._pending_auto_integration = True
+        if window._live_active:
+            window._resume_live_after_auto_integration = True
+            window._live_active = False
+        window.status_label.setText("Auto integration queued. Waiting for current acquisition to finish...")
+        return
+
+    if window._live_active:
+        window._resume_live_after_auto_integration = True
+        window._live_active = False
+        window._reset_live_accumulator()
+        window.status_label.setText("Pausing live acquisition for auto integration...")
+        QTimer.singleShot(0, window._auto_set_integration_time)
+        return
+
+    try:
+        tuned_ms = window._spectrometer.auto_integration_time_ms(window._current_settings())
+    except Exception as exc:
+        window._show_error(str(exc))
+        return
+
+    window.integration_spin.setValue(round(tuned_ms, 3))
+    window.status_label.setText(f"Integration time set to {tuned_ms:.3f} ms.")
+    window._log_success(f"Integration time tuned to {tuned_ms:.3f} ms.")
+    if window._resume_live_after_auto_integration:
+        window._resume_live_after_auto_integration = False
+        QTimer.singleShot(0, window._start_live_acquisition)
+
+
+def sync_simulation_backend_from_controls_for(window) -> None:
+    """Push current slider/spin values to the simulation backend and live worker."""
+    window._simulation_backend.set_simulation_parameters(
+        SimulationParameters(
+            wavelength_min_nm=400.0,
+            wavelength_max_nm=900.0,
+            wavelength_resolution_nm=max(window.sim_resolution_spin.value(), 0.001),
+            peak_center_nm=float(window.sim_peak_center_slider.value()),
+            peak_width_nm=float(max(window.sim_peak_width_slider.value(), 1)),
+            peak_height=float(window.sim_peak_height_slider.value()),
+            secondary_peak_offset_nm=float(window.sim_secondary_peak_offset_slider.value()),
+            secondary_peak_height_percent=float(window.sim_secondary_peak_height_slider.value()),
+            secondary_peak_width_percent=float(max(window.sim_secondary_peak_width_slider.value(), 1)),
+            baseline=float(window.sim_baseline_slider.value()),
+            slope=float(window.sim_slope_slider.value()) / 100.0,
+            noise=float(window.sim_noise_slider.value()),
+        )
+    )
+    if (
+        window._live_active
+        and window._source_mode == "simulation"
+        and window._live_worker is not None
+        and window._live_worker.is_alive()
+    ):
+        window._live_worker.update_simulation_parameters(window._simulation_backend.simulation_parameters())

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -9,10 +11,16 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
-    QLabel,
     QVBoxLayout,
     QWidget,
 )
+
+_GUI_LOG_LEVELS = [
+    ("Errors only", logging.ERROR),
+    ("Warnings+", logging.WARNING),
+    ("Info+", logging.INFO),
+    ("Debug", logging.DEBUG),
+]
 
 
 class PreferencesDialog(QDialog):
@@ -21,24 +29,34 @@ class PreferencesDialog(QDialog):
         self._window = window
         self.setWindowTitle("Preferences")
         self.setModal(True)
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(420)
 
+        # Appearance
         self.theme_combo = QComboBox()
         self.theme_combo.addItem("Dark", "dark")
         self.theme_combo.addItem("Light", "light")
 
-        self.ui_state_autosave_check = QCheckBox("UI state autosave")
-        self.acquisition_state_autosave_check = QCheckBox("Acquisition state autosave")
-        self.log_buffering_check = QCheckBox("Log buffering")
-        self.gui_housekeeping_check = QCheckBox("GUI housekeeping")
-        self.freeze_on_startup_check = QCheckBox("Start with Processed spectra frozen")
+        # Startup
+        self.start_maximized_check = QCheckBox("Start maximized")
+        self.start_maximized_check.setToolTip(
+            "Open the application window in maximized state on every launch."
+        )
+        self.freeze_on_startup_check = QCheckBox("Start with plots frozen")
         self.freeze_on_startup_check.setToolTip(
-            "When enabled, the Processed spectra plot starts frozen each time the application opens.\n"
+            "When enabled, the processed spectra plot starts frozen each time the application opens.\n"
             "Freeze can always be toggled manually using the snowflake button in the toolbar."
         )
-        self.metric_plot_check = QCheckBox("Metric plot")
-        self.processing_debug_check = QCheckBox("Processing debug mode")
+        self.confirm_exit_check = QCheckBox("Confirm exit when recording is active")
+        self.confirm_exit_check.setToolTip(
+            "Show a confirmation dialog before closing the application while a measurement recording is running."
+        )
+
+        # Acquisition & storage
         self.hdf5_compression_check = QCheckBox("Measurement HDF5 compression")
+        self.hdf5_compression_check.setToolTip(
+            "Enable gzip compression for measurement HDF5 files. "
+            "Reduces file size at the cost of slightly higher CPU load during recording."
+        )
         self.hdf5_flush_interval_spin = QDoubleSpinBox()
         self.hdf5_flush_interval_spin.setRange(0.25, 60.0)
         self.hdf5_flush_interval_spin.setSingleStep(0.5)
@@ -48,6 +66,54 @@ class PreferencesDialog(QDialog):
             "How often the HDF5 measurement file is flushed to disk during acquisition.\n"
             "Lower values reduce data loss on crash but increase I/O load. Range: 0.25 – 60 s."
         )
+        self.default_live_rate_spin = QDoubleSpinBox()
+        self.default_live_rate_spin.setRange(0.1, 200.0)
+        self.default_live_rate_spin.setSingleStep(0.5)
+        self.default_live_rate_spin.setDecimals(2)
+        self.default_live_rate_spin.setSuffix(" Hz")
+        self.default_live_rate_spin.setToolTip(
+            "Default GUI refresh rate for live spectra and sensorgram updates.\n"
+            "This value is applied on first launch and when no saved session state exists."
+        )
+
+        # Performance
+        self.ui_state_autosave_check = QCheckBox("UI state autosave")
+        self.ui_state_autosave_check.setToolTip(
+            "Automatically persist panel visibility, splitter positions, and other UI state to disk."
+        )
+        self.acquisition_state_autosave_check = QCheckBox("Acquisition state autosave")
+        self.acquisition_state_autosave_check.setToolTip(
+            "Automatically save acquisition state (processing settings, source mode, etc.) during changes."
+        )
+        self.log_buffering_check = QCheckBox("Log buffering")
+        self.log_buffering_check.setToolTip(
+            "Batch log writes before rendering them in the log panel. "
+            "Disable to see log entries immediately at the cost of more frequent repaints."
+        )
+        self.gui_housekeeping_check = QCheckBox("GUI housekeeping")
+        self.gui_housekeeping_check.setToolTip(
+            "Enable deferred GUI maintenance tasks such as log flushing and state saves. "
+            "Turn off to isolate housekeeping overhead during profiling."
+        )
+        self.metric_plot_check = QCheckBox("Metric plot")
+        self.metric_plot_check.setToolTip(
+            "Enable the sensorgram metric line plot. "
+            "Disable to reduce rendering load when the sensorgram is not needed."
+        )
+
+        # Developer
+        self.processing_debug_check = QCheckBox("Processing debug mode")
+        self.processing_debug_check.setToolTip(
+            "Enable slow-spectrum profiling and extended processing diagnostics.\n"
+            "Intended for development and performance investigation."
+        )
+        self.gui_log_level_combo = QComboBox()
+        for label, level in _GUI_LOG_LEVELS:
+            self.gui_log_level_combo.addItem(label, level)
+        self.gui_log_level_combo.setToolTip(
+            "Minimum severity level shown in the in-app log panel.\n"
+            "Lower levels show more detail but may increase log volume."
+        )
 
         self._build_ui()
         self._load_from_window()
@@ -55,51 +121,73 @@ class PreferencesDialog(QDialog):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
-        intro = QLabel(
-            "These are the main application-level preferences currently exposed through the File menu."
+        # ── Appearance ────────────────────────────────────────────────────────
+        appearance_box = QGroupBox("Appearance")
+        appearance_layout = QFormLayout(appearance_box)
+        appearance_layout.setHorizontalSpacing(16)
+        appearance_layout.setVerticalSpacing(8)
+        appearance_layout.addRow("Theme", self.theme_combo)
+
+        # ── Startup ───────────────────────────────────────────────────────────
+        startup_box = QGroupBox("Startup")
+        startup_layout = QFormLayout(startup_box)
+        startup_layout.setHorizontalSpacing(16)
+        startup_layout.setVerticalSpacing(8)
+        startup_layout.addRow(self.start_maximized_check)
+        startup_layout.addRow(self.freeze_on_startup_check)
+        startup_layout.addRow(self.confirm_exit_check)
+
+        # ── Acquisition & storage ─────────────────────────────────────────────
+        acquisition_box = QGroupBox("Acquisition && storage")
+        acquisition_layout = QFormLayout(acquisition_box)
+        acquisition_layout.setHorizontalSpacing(16)
+        acquisition_layout.setVerticalSpacing(8)
+        acquisition_layout.addRow(self.hdf5_compression_check)
+        acquisition_layout.addRow("HDF5 flush interval", self.hdf5_flush_interval_spin)
+        acquisition_layout.addRow("Default live rate", self.default_live_rate_spin)
+
+        # ── Performance ───────────────────────────────────────────────────────
+        performance_box = QGroupBox("Performance")
+        performance_layout = QFormLayout(performance_box)
+        performance_layout.setHorizontalSpacing(16)
+        performance_layout.setVerticalSpacing(8)
+        performance_layout.addRow(self.ui_state_autosave_check)
+        performance_layout.addRow(self.acquisition_state_autosave_check)
+        performance_layout.addRow(self.log_buffering_check)
+        performance_layout.addRow(self.gui_housekeeping_check)
+        performance_layout.addRow(self.metric_plot_check)
+
+        # ── Developer ─────────────────────────────────────────────────────────
+        developer_box = QGroupBox("Developer")
+        developer_layout = QFormLayout(developer_box)
+        developer_layout.setHorizontalSpacing(16)
+        developer_layout.setVerticalSpacing(8)
+        developer_layout.addRow(self.processing_debug_check)
+        developer_layout.addRow("Log panel level", self.gui_log_level_combo)
+
+        layout.addWidget(appearance_box)
+        layout.addWidget(startup_box)
+        layout.addWidget(acquisition_box)
+        layout.addWidget(performance_box)
+        layout.addWidget(developer_box)
+
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Apply
+            | QDialogButtonBox.StandardButton.Cancel
         )
-        intro.setWordWrap(True)
-        intro.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        layout.addWidget(intro)
-
-        general_box = QGroupBox("General")
-        general_layout = QFormLayout(general_box)
-        general_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        general_layout.setFormAlignment(Qt.AlignmentFlag.AlignTop)
-        general_layout.setHorizontalSpacing(16)
-        general_layout.setVerticalSpacing(10)
-        general_layout.addRow("Theme", self.theme_combo)
-        general_layout.addRow(self.ui_state_autosave_check)
-        general_layout.addRow(self.acquisition_state_autosave_check)
-        general_layout.addRow(self.log_buffering_check)
-        general_layout.addRow(self.gui_housekeeping_check)
-
-        display_box = QGroupBox("Display and processing")
-        display_layout = QFormLayout(display_box)
-        display_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        display_layout.setFormAlignment(Qt.AlignmentFlag.AlignTop)
-        display_layout.setHorizontalSpacing(16)
-        display_layout.setVerticalSpacing(10)
-        display_layout.addRow(self.freeze_on_startup_check)
-        display_layout.addRow(self.metric_plot_check)
-        display_layout.addRow(self.processing_debug_check)
-        display_layout.addRow(self.hdf5_compression_check)
-        display_layout.addRow("HDF5 flush interval", self.hdf5_flush_interval_spin)
-
-        layout.addWidget(general_box)
-        layout.addWidget(display_box)
-
-        footer = QLabel("Changes are applied when you click OK.")
-        footer.setWordWrap(True)
-        footer.setObjectName("PreferencesFooter")
-        layout.addWidget(footer)
-
-        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        button_box.accepted.connect(self.accept)
+        button_box.accepted.connect(self._on_ok)
         button_box.rejected.connect(self.reject)
+        apply_btn = button_box.button(QDialogButtonBox.StandardButton.Apply)
+        if apply_btn is not None:
+            apply_btn.clicked.connect(self.apply_changes)
         layout.addWidget(button_box)
+
+    def _on_ok(self) -> None:
+        self.apply_changes()
+        self.accept()
 
     def _load_from_window(self) -> None:
         theme = str(getattr(self._window, "_theme_mode", "dark"))
@@ -107,20 +195,51 @@ class PreferencesDialog(QDialog):
         if index >= 0:
             self.theme_combo.setCurrentIndex(index)
 
+        self.start_maximized_check.setChecked(bool(getattr(self._window, "_start_maximized", False)))
+        self.freeze_on_startup_check.setChecked(bool(getattr(self._window, "_startup_freeze_plots", False)))
+        self.confirm_exit_check.setChecked(bool(getattr(self._window, "_confirm_exit_if_recording", True)))
+
+        self.hdf5_compression_check.setChecked(bool(getattr(self._window, "_hdf5_compression_enabled", True)))
+        self.hdf5_flush_interval_spin.setValue(float(getattr(self._window, "_measurement_flush_interval_s", 1.0)))
+        self.default_live_rate_spin.setValue(float(getattr(self._window, "_default_live_rate_hz", 4.0)))
+
         self.ui_state_autosave_check.setChecked(bool(getattr(self._window, "_ui_state_autosave_enabled", True)))
         self.acquisition_state_autosave_check.setChecked(bool(getattr(self._window, "_acquisition_state_autosave_enabled", True)))
         self.log_buffering_check.setChecked(bool(getattr(self._window, "_log_buffering_enabled", True)))
         self.gui_housekeeping_check.setChecked(bool(getattr(self._window, "_gui_housekeeping_enabled", True)))
-        self.freeze_on_startup_check.setChecked(bool(getattr(self._window, "_startup_freeze_plots", False)))
         self.metric_plot_check.setChecked(bool(getattr(self._window, "_metric_plot_enabled", True)))
+
         self.processing_debug_check.setChecked(bool(getattr(self._window, "_processing_debug_mode_enabled", False)))
-        self.hdf5_compression_check.setChecked(bool(getattr(self._window, "_hdf5_compression_enabled", True)))
-        self.hdf5_flush_interval_spin.setValue(float(getattr(self._window, "_measurement_flush_interval_s", 5.0)))
+
+        current_level = int(getattr(self._window, "_gui_log_min_level", logging.WARNING))
+        best_index = 0
+        best_delta = float("inf")
+        for i, (_, level) in enumerate(_GUI_LOG_LEVELS):
+            delta = abs(level - current_level)
+            if delta < best_delta:
+                best_delta = delta
+                best_index = i
+        self.gui_log_level_combo.setCurrentIndex(best_index)
 
     def apply_changes(self) -> None:
         theme = str(self.theme_combo.currentData() or "dark")
         if hasattr(self._window, "set_theme"):
             self._window.set_theme(theme)
+
+        if hasattr(self._window, "_set_start_maximized"):
+            self._window._set_start_maximized(self.start_maximized_check.isChecked())
+        if hasattr(self._window, "_set_startup_freeze_plots_enabled"):
+            self._window._set_startup_freeze_plots_enabled(self.freeze_on_startup_check.isChecked())
+        if hasattr(self._window, "_set_confirm_exit_if_recording"):
+            self._window._set_confirm_exit_if_recording(self.confirm_exit_check.isChecked())
+
+        if hasattr(self._window, "_set_measurement_hdf5_compression_enabled"):
+            self._window._set_measurement_hdf5_compression_enabled(self.hdf5_compression_check.isChecked())
+        if hasattr(self._window, "_set_measurement_hdf5_flush_interval_s"):
+            self._window._set_measurement_hdf5_flush_interval_s(self.hdf5_flush_interval_spin.value())
+        if hasattr(self._window, "_set_default_live_rate_hz"):
+            self._window._set_default_live_rate_hz(self.default_live_rate_spin.value())
+
         if hasattr(self._window, "_set_ui_state_autosave_enabled"):
             self._window._set_ui_state_autosave_enabled(self.ui_state_autosave_check.isChecked())
         if hasattr(self._window, "_set_acquisition_state_autosave_enabled"):
@@ -129,20 +248,17 @@ class PreferencesDialog(QDialog):
             self._window._set_log_buffering_enabled(self.log_buffering_check.isChecked())
         if hasattr(self._window, "_set_gui_housekeeping_enabled"):
             self._window._set_gui_housekeeping_enabled(self.gui_housekeeping_check.isChecked())
-        if hasattr(self._window, "_set_startup_freeze_plots_enabled"):
-            self._window._set_startup_freeze_plots_enabled(self.freeze_on_startup_check.isChecked())
         if hasattr(self._window, "_set_metric_plot_enabled"):
             self._window._set_metric_plot_enabled(self.metric_plot_check.isChecked())
+
         if hasattr(self._window, "_set_processing_debug_mode_enabled"):
             self._window._set_processing_debug_mode_enabled(self.processing_debug_check.isChecked())
-        if hasattr(self._window, "_set_measurement_hdf5_compression_enabled"):
-            self._window._set_measurement_hdf5_compression_enabled(self.hdf5_compression_check.isChecked())
-        if hasattr(self._window, "_set_measurement_hdf5_flush_interval_s"):
-            self._window._set_measurement_hdf5_flush_interval_s(self.hdf5_flush_interval_spin.value())
+        if hasattr(self._window, "_set_gui_log_level"):
+            level = self.gui_log_level_combo.currentData()
+            if isinstance(level, int):
+                self._window._set_gui_log_level(level)
 
 
 def show_preferences_dialog_for(window) -> None:
     dialog = PreferencesDialog(window)
-    if dialog.exec() != QDialog.DialogCode.Accepted:
-        return
-    dialog.apply_changes()
+    dialog.exec()

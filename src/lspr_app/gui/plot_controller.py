@@ -757,14 +757,10 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
     metric_y_axis_auto = _sensorgram_metric_y_axis_is_auto(window)
     series = window._active_trace_series()
     if not series:
-        window.trace_plot.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
-        window.trace_plot.autoRange()
         window._metric_autoscale_pending = False
         return
     visible_series = [tuple(np.asarray(item, dtype=np.float64) for item in series_values) for series_values in series.values()]
     if not visible_series:
-        window.trace_plot.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
-        window.trace_plot.autoRange()
         window._metric_autoscale_pending = False
         return
     display_series: list[tuple[np.ndarray, np.ndarray]] = []
@@ -886,9 +882,11 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
                 overlay_y_pad_low, overlay_y_pad_high = reserved_y_padding(float(y_min), float(y_max))
             except Exception:
                 overlay_y_pad_low, overlay_y_pad_high = 0.0, 0.0
-        y_low = float(y_min - y_pad - overlay_y_pad_low)
-        y_high = float(y_max + y_pad + overlay_y_pad_high)
+        y_low = float(y_min - y_pad)
+        y_high = float(y_max + y_pad)
         y_low, y_high = _quantize_sensorgram_metric_y_range(window, y_low, y_high)
+        y_low -= overlay_y_pad_low
+        y_high += overlay_y_pad_high
     else:
         y_low = y_high = None
         if isinstance(current_y_range, (list, tuple)) and len(current_y_range) == 2:

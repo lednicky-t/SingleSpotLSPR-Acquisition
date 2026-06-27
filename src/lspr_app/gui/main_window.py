@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import math
@@ -109,6 +109,7 @@ from lspr_app.gui.main_window_headers import (
     update_source_tab_headers,
 )
 from lspr_app.gui.main_window_runtime_state import UiRefreshState
+from lspr_app.gui.ui_persistence import UIPersistenceBinder
 from lspr_app.gui.icon_helpers import (
     dark_icon,
     reference_icon,
@@ -149,7 +150,9 @@ from lspr_app.gui.main_window_runtime import (
 )
 from lspr_app.gui.main_window_lifecycle import (
     acquisition_state_payload_for,
+    close_event_for,
     collapsible_section_state_for,
+    event_filter_for,
     disconnect_all_devices_for,
     ensure_experiment_control_panel_for,
     finish_hardware_initialization_for,
@@ -168,9 +171,14 @@ from lspr_app.gui.main_window_lifecycle import (
     sync_experiment_control_startup_ports_for,
     sync_hardware_menu_actions_for,
 )
-from lspr_app.gui.main_window_layout import build_main_layout_for, build_recording_context_row_for
-from lspr_app.gui.main_window_logging_ui import initialize_logging_ui_for
+from lspr_app.gui.main_window_layout import apply_control_sizing_for, build_main_layout_for, build_recording_context_row_for
+from lspr_app.gui.main_window_logging_ui import (
+    initialize_logging_ui_for,
+    apply_text_widget_font_size_for,
+    adjust_text_widget_font_size_for,
+)
 from lspr_app.gui.main_window_sensorgram import (
+    active_trace_series_for,
     apply_sensorgram_metric_selection,
     apply_sensorgram_metric_y_axis_mode,
     apply_sensorgram_time_axis_mode,
@@ -209,6 +217,8 @@ from lspr_app.gui.main_window_sensorgram_overlay import (
 )
 from lspr_app.gui.main_window_state import (
     acquisition_state_payload,
+    apply_source_mode_for,
+    fit_window_to_available_screen_for,
     activate_experimental_control_view,
     activate_experiment_control_view,
     activate_spectra_view,
@@ -259,7 +269,9 @@ from lspr_app.gui.main_window_processing import (
 from lspr_app.gui.main_window_plotting import (
     analysis_cache_token_for,
     analysis_metrics_cache_token_for,
+    apply_metric_color_styles_for,
     apply_temporal_smoothing_for,
+    export_current_plot_for,
     autoscale_residual_axis_for,
     autoscale_spectrum_plot_for,
     apply_processing_range_to_spectrum_plot_for,
@@ -288,6 +300,7 @@ from lspr_app.gui.main_window_plotting import (
     needs_gaussian_metric_for,
     processing_cache_token_for,
     refresh_plot_for,
+    refresh_spectrum_plot_for,
     refresh_telemetry_for,
     refresh_spectrometer_stats_for,
     refresh_metric_plot_for,
@@ -338,9 +351,12 @@ from lspr_app.gui.main_window_logging import (
     set_log_following,
     set_log_view_mode,
     save_session_stats_log_for,
+    set_session_stats_recording_active_for,
 )
 from lspr_app.gui.acquisition_controller import (
     append_processed_trace_history,
+    auto_set_integration_time_for,
+    sync_simulation_backend_from_controls_for,
     flush_measurement_frames,
     flush_live_acquisition_results,
     flush_live_recording_results,
@@ -432,148 +448,27 @@ from lspr_app.gui.widgets import (
     FlexibleTimeAxis,
     ScientificAxis,
 )
+from lspr_app.gui.main_window_plot_widgets import (
+    LogTerminalTextEdit,
+    TimedPlotWidget,
+    _spline_render_series,
+)
+from lspr_app.gui.main_window_hardware_scan import hardware_init_steps_for
+from lspr_app.gui.main_window_style import apply_modern_style_for, style_plot_widgets_for
+from lspr_app.gui.main_window_startup_diagnostics import (
+    close_startup_splash_for,
+    complete_startup_show_for,
+    log_startup_plot_state_for,
+    log_startup_widget_snapshot_for,
+    notify_startup_data_rendered_for,
+    notify_startup_plot_painted_for,
+    paint_event_body_for,
+    render_startup_loading_indicator_for,
+    show_event_body_for,
+)
 if TYPE_CHECKING:
     from lspr_app.device.reglo_icc import PumpProbe
     from lspr_app.gui.experiment_control_window import ExperimentControlWindow
-
-
-class LogTerminalTextEdit(QTextEdit):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._min_font_size = 7.0
-        self._max_font_size = 16.0
-
-    def wheelEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            delta_y = event.angleDelta().y()
-            if delta_y == 0:
-                event.ignore()
-                return
-            factor = 1.1 if delta_y > 0 else 1 / 1.1
-            current_font = QFont(self.font())
-            current_size = float(current_font.pointSizeF())
-            if current_size <= 0:
-                current_size = float(current_font.pointSize()) if current_font.pointSize() > 0 else 9.0
-            if current_size <= 0:
-                current_size = 9.0
-            font = QFont(current_font)
-            new_size = max(self._min_font_size, min(current_size * factor, self._max_font_size))
-            if new_size <= 0:
-                new_size = self._min_font_size
-            font.setPointSizeF(new_size)
-            self.setFont(font)
-            self.document().setDefaultFont(font)
-            event.accept()
-            return
-        super().wheelEvent(event)
-
-
-class TimedPlotWidget(pg.PlotWidget):
-    def __init__(self, *args, paint_owner=None, paint_prefix: str = "", **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._paint_owner = paint_owner
-        self._paint_prefix = str(paint_prefix)
-        self._diagnostics_owner = paint_owner
-        self._diagnostics_prefix = str(paint_prefix)
-
-    def _record_operation(self, operation: str) -> None:
-        owner = getattr(self, "_diagnostics_owner", None)
-        prefix = getattr(self, "_diagnostics_prefix", "")
-        if owner is None or not prefix:
-            return
-        try:
-            events = getattr(owner, "_plot_operation_events", None)
-            if events is not None:
-                events.append((perf_counter(), prefix, str(operation)))
-            total_name = f"_{prefix}_{operation}_count"
-            setattr(owner, total_name, int(getattr(owner, total_name, 0)) + 1)
-        except Exception:
-            return
-
-    def paintEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
-        started = perf_counter()
-        super().paintEvent(event)
-        elapsed_ms = (perf_counter() - started) * 1000.0
-        owner = getattr(self, "_paint_owner", None)
-        prefix = getattr(self, "_paint_prefix", "")
-        if owner is None or not prefix:
-            return
-        count_name = f"_{prefix}_paint_count"
-        total_name = f"_{prefix}_paint_total_ms"
-        max_name = f"_{prefix}_paint_max_ms"
-        try:
-            setattr(owner, count_name, int(getattr(owner, count_name, 0)) + 1)
-            setattr(owner, total_name, float(getattr(owner, total_name, 0.0) or 0.0) + elapsed_ms)
-            current_max = float(getattr(owner, max_name, 0.0) or 0.0)
-            setattr(owner, max_name, max(current_max, elapsed_ms))
-            events = getattr(owner, "_plot_paint_events", None)
-            if events is not None:
-                now = perf_counter()
-                events.append((now, prefix, float(elapsed_ms)))
-                recent_values = [value for ts, name, value in events if name == prefix and (now - float(ts)) <= 10.0]
-                recent_count_name = f"_{prefix}_paint_recent_count"
-                recent_total_name = f"_{prefix}_paint_recent_total_ms"
-                recent_max_name = f"_{prefix}_paint_recent_max_ms"
-                recent_avg_name = f"_{prefix}_paint_recent_avg_ms"
-                if recent_values:
-                    recent_total_ms = float(sum(recent_values))
-                    setattr(owner, recent_count_name, len(recent_values))
-                    setattr(owner, recent_total_name, recent_total_ms)
-                    setattr(owner, recent_max_name, max(recent_values))
-                    setattr(owner, recent_avg_name, recent_total_ms / len(recent_values))
-                else:
-                    setattr(owner, recent_count_name, 0)
-                    setattr(owner, recent_total_name, 0.0)
-                    setattr(owner, recent_max_name, 0.0)
-                    setattr(owner, recent_avg_name, 0.0)
-            notify_startup_paint = getattr(owner, "_notify_startup_plot_painted", None)
-            if callable(notify_startup_paint):
-                notify_startup_paint(prefix)
-        except Exception:
-            return
-
-    def setLabel(self, *args, **kwargs):  # pragma: no cover - GUI runtime path
-        self._record_operation("setLabel")
-        plot_item = self.getPlotItem()
-        return plot_item.setLabel(*args, **kwargs)
-
-    def setXRange(self, *args, **kwargs):  # pragma: no cover - GUI runtime path
-        self._record_operation("setXRange")
-        return super().setXRange(*args, **kwargs)
-
-    def setYRange(self, *args, **kwargs):  # pragma: no cover - GUI runtime path
-        self._record_operation("setYRange")
-        return super().setYRange(*args, **kwargs)
-
-    def enableAutoRange(self, *args, **kwargs):  # pragma: no cover - GUI runtime path
-        self._record_operation("enableAutoRange")
-        return super().enableAutoRange(*args, **kwargs)
-
-    def autoRange(self, *args, **kwargs):  # pragma: no cover - GUI runtime path
-        self._record_operation("autoRange")
-        return super().autoRange(*args, **kwargs)
-
-
-def _spline_render_series(x: np.ndarray, y: np.ndarray, *, max_points: int = 4096) -> tuple[np.ndarray, np.ndarray]:
-    x_values = np.asarray(x, dtype=np.float64)
-    y_values = np.asarray(y, dtype=np.float64)
-    finite = np.isfinite(x_values) & np.isfinite(y_values)
-    x_values = x_values[finite]
-    y_values = y_values[finite]
-    if len(x_values) < 4:
-        return x_values, y_values
-    unique_x, unique_indices = np.unique(x_values, return_index=True)
-    y_values = y_values[unique_indices]
-    x_values = unique_x
-    if len(x_values) < 4:
-        return x_values, y_values
-    point_count = min(max(len(x_values) * 3, len(x_values)), max_points)
-    if point_count <= len(x_values):
-        return x_values, y_values
-    spline = CubicSpline(x_values, y_values, bc_type="natural")
-    dense_x = np.linspace(float(x_values[0]), float(x_values[-1]), point_count, dtype=np.float64)
-    dense_y = spline(dense_x)
-    return dense_x, np.asarray(dense_y, dtype=np.float64)
 
 
 class MainWindow(QMainWindow):
@@ -705,8 +600,10 @@ class MainWindow(QMainWindow):
         self._measurement_signal_mode = "absorbance"
         self._measurement_started_at: datetime | None = None
         self._measurement_experiment_name = ""
-        self._measurement_flush_interval_s = float(load_app_setting("measurement_flush_interval_s", 5.0))
+        self._measurement_flush_interval_s = float(load_app_setting("measurement_flush_interval_s", 1.0))
         self._measurement_axis_lock: np.ndarray | None = None
+        self._session_writer: AsyncHDF5MeasurementWriter | None = None
+        self._session_writer_path: Path | None = None
         self._metric_archive_writer: AsyncHDF5MeasurementWriter | None = None
         self._metric_archive_path: Path | None = None
         self._metric_archive_started_at: datetime | None = None
@@ -866,12 +763,16 @@ class MainWindow(QMainWindow):
         self._processing_debug_mode_enabled = bool(load_app_setting("processing_debug_mode", False))
         set_processing_debug_mode_enabled(self._processing_debug_mode_enabled)
         self._startup_freeze_plots = bool(load_app_setting("startup_freeze_plots", False))
+        self._confirm_exit_if_recording = bool(load_app_setting("confirm_exit_if_recording", True))
+        self._default_live_rate_hz = float(load_app_setting("default_live_rate_hz", 4.0))
+        self._always_on_top = bool(load_app_setting("always_on_top", False))
         self._device_comm_service = DeviceCommunicationService.shared()
         hdf5_compression_setting = load_app_setting("measurement_hdf5_compression_enabled", True)
         if isinstance(hdf5_compression_setting, str):
             self._hdf5_compression_enabled = hdf5_compression_setting.strip().lower() in {"1", "true", "yes", "on"}
         else:
             self._hdf5_compression_enabled = bool(hdf5_compression_setting)
+        self._ui_binder = UIPersistenceBinder(on_change=self._schedule_ui_state_persist)
         self._sensorgram_settings_dialog = None
         self._sensorgram_time_axis_mode = "elapsed"
         self._sensorgram_metric_y_axis_mode = "auto"
@@ -879,6 +780,20 @@ class MainWindow(QMainWindow):
         self._sensorgram_line_step_mode = None
         self._sensorgram_line_width_px = 2.2
         self._plot_antialias_enabled = False
+        # "session" shows the full session from the always-on session file.
+        # "measurement" shows only the active recording window.
+        # Auto-switches to "measurement" when a recording starts and back to "session" when it stops.
+        self._sensorgram_display_mode: str = "session"
+        self._ui_binder.bind_custom(
+            "sensorgram_display_mode",
+            get=lambda: str(getattr(self, "_sensorgram_display_mode", "session")),
+            set_=lambda v: setattr(
+                self,
+                "_sensorgram_display_mode",
+                "session" if str(v).strip().lower() not in {"session", "measurement"} else str(v).strip().lower(),
+            ),
+            default="session",
+        )
         self.sensorgram_metric_y_axis_mode_button = QToolButton(self)
         self.sensorgram_metric_y_axis_mode_button.setObjectName("sensorgramYAxisModeButton")
         self.sensorgram_metric_y_axis_mode_button.setAutoRaise(True)
@@ -972,7 +887,7 @@ class MainWindow(QMainWindow):
         self._hardware_init_scheduled = False
         self._spectrum_cursor_text = "cursor: -"
         self._trace_cursor_text = "cursor: -"
-        self._start_maximized = False
+        self._start_maximized = bool(load_app_setting("start_maximized", False))
         self._experiment_control_window: ExperimentControlWindow | None = None
         self._main_content_widget: QWidget | None = None
         self._top_view_mode = "spectra"
@@ -1141,10 +1056,10 @@ class MainWindow(QMainWindow):
         self.acquire_dark_button.clicked.connect(lambda: self._request_manual_acquisition("dark"))
         self.acquire_reference_button.clicked.connect(lambda: self._request_manual_acquisition("reference"))
 
-        self.live_rate_spin = InlineWheelDoubleLabel(4.0, self)
+        self.live_rate_spin = InlineWheelDoubleLabel(self._default_live_rate_hz, self)
         self.live_rate_spin.setObjectName("liveRateLabel")
         self.live_rate_spin.setRange(0.1, 200.0)
-        self.live_rate_spin.setValue(4.0)
+        self.live_rate_spin.setValue(self._default_live_rate_hz)
         self.live_rate_spin.setDecimals(2)
         self.live_rate_spin.setSuffix(" Hz")
         self.live_rate_spin.setSingleStep(0.1)
@@ -1347,7 +1262,6 @@ class MainWindow(QMainWindow):
         make_compact_spinbox(self.fit_window_spin)
         self.fit_window_spin.setRange(0, 5000)
         self.fit_window_spin.setValue(120)
-        self.fit_window_spin.setSuffix(" nm")
         self.fit_window_spin.setToolTip(
             "Fit range width in nm around the detected local peak maximum. Used when the crop method is set to fixed_width."
         )
@@ -1389,7 +1303,7 @@ class MainWindow(QMainWindow):
         )
         self.load_processing_button = self._make_frameless_icon_button(
             tint_tabler_icon(flow_tabler_icon("file_import"), QColor("#4f88ff")),
-            "Load processing settings from a compatible HDF5 file.",
+            "Import processing settings (JSON) or open a measurement file (HDF5) to select which sections to import.",
             size=24,
         )
         self.save_processing_button.clicked.connect(self._save_processing_settings_dialog)
@@ -1958,449 +1872,7 @@ class MainWindow(QMainWindow):
         }
 
     def _apply_modern_style(self) -> None:
-        palette = self._theme_palette()
-        checkmark_icon = (Path(__file__).resolve().parent / "assets" / "checkmark.svg").as_posix()
-        stylesheet = """
-            QMainWindow, QWidget {
-                background: %(bg)s;
-                color: %(fg)s;
-                font-size: 12px;
-            }
-            QToolTip {
-                background-color: %(bg)s;
-                color: %(fg)s;
-                border: 1px solid %(border)s;
-                padding: 4px 6px;
-            }
-            QLabel {
-                color: %(muted)s;
-            }
-            QScrollArea {
-                border: none;
-                background: transparent;
-            }
-            QWidget#titleBar {
-                background: %(bg)s;
-                border-bottom: 1px solid %(border)s;
-            }
-            QLabel#brandIconLabel {
-                background: transparent;
-                border: none;
-            }
-            QLabel#windowModeLabel {
-                color: %(fg)s;
-                font-weight: 700;
-                background: transparent;
-                border: none;
-                padding: 0px;
-                margin: 0px;
-            }
-            QLabel#sensorgramHeaderLabel {
-                color: %(title)s;
-                font-size: 13px;
-                font-weight: 800;
-                letter-spacing: 0.8px;
-                background: transparent;
-                border: none;
-                padding: 0px;
-                margin: 0px;
-            }
-            QToolButton#logViewButton {
-                color: %(fg)s;
-                background: rgba(255, 255, 255, 0.04);
-                border: 1px solid %(border)s;
-                border-radius: 10px;
-                padding: 1px 10px;
-                margin: 0px;
-                font-size: 11px;
-                font-weight: 700;
-            }
-            QToolButton#logViewButton:hover {
-                background: rgba(255, 255, 255, 0.07);
-                border-color: %(accent_hover)s;
-            }
-            QToolButton#logViewButton:checked {
-                background: %(accent)s;
-                color: %(bg)s;
-                border-color: %(accent_hover)s;
-            }
-            QToolButton#logViewButton:checked:hover {
-                background: %(accent_hover)s;
-                color: %(bg)s;
-                border-color: %(accent_hover)s;
-            }
-            QToolButton#sensorgramViewModeButton,
-            QToolButton#sensorgramContentModeButton,
-            QToolButton#sensorgramYAxisModeButton,
-            QToolButton#sensorgramWindowButton {
-                background: transparent;
-                border: none;
-                padding: 0px;
-                margin: 0px;
-                color: #e8d85f;
-                font-weight: 600;
-            }
-            QToolButton#sensorgramViewModeButton:hover,
-            QToolButton#sensorgramContentModeButton:hover,
-            QToolButton#sensorgramYAxisModeButton:hover,
-            QToolButton#sensorgramWindowButton:hover {
-                background: transparent;
-                border: none;
-            }
-            QToolButton#sensorgramViewModeButton:pressed,
-            QToolButton#sensorgramContentModeButton:pressed,
-            QToolButton#sensorgramYAxisModeButton:pressed,
-            QToolButton#sensorgramWindowButton:pressed {
-                background: transparent;
-                border: none;
-            }
-            QLabel#traceClearLabel {
-                color: %(accent)s;
-                background: transparent;
-                border: none;
-                font-size: 11px;
-                font-weight: 700;
-                padding: 0px 2px;
-            }
-            QLabel#traceClearLabel:hover {
-                color: %(accent_hover)s;
-            }
-            QToolButton#windowButton {
-                background: transparent;
-                border: none;
-                border-radius: 0px;
-                padding: 0px;
-                margin: 0px;
-                min-width: 0px;
-                min-height: 0px;
-            }
-            QToolButton#windowButton:hover {
-                background: %(button_hover)s;
-                border: none;
-            }
-            QToolButton#windowButton:pressed {
-                background: %(button_pressed)s;
-                border: none;
-            }
-            QToolButton {
-                background: %(button)s;
-                border: 1px solid %(border)s;
-                border-radius: 8px;
-                padding: 3px 6px;
-            }
-            QToolButton:hover, QPushButton:hover {
-                background: %(button_hover)s;
-                border-color: %(border_hover)s;
-            }
-            QToolButton:checked {
-                background: %(button_pressed)s;
-                border-color: %(accent)s;
-            }
-            QPushButton, QComboBox, QSpinBox, QDoubleSpinBox {
-                background: %(field)s;
-                border: 1px solid %(border)s;
-                border-radius: 8px;
-                padding: 3px 6px;
-                min-width: 0px;
-            }
-            QSpinBox, QDoubleSpinBox {
-                border-radius: 3px;
-                padding: 2px 5px;
-            }
-            QSpinBox::up-button, QSpinBox::down-button,
-            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
-                width: 0px;
-                border: none;
-                background: transparent;
-            }
-            QSpinBox::up-arrow, QSpinBox::down-arrow,
-            QDoubleSpinBox::up-arrow, QDoubleSpinBox::down-arrow {
-                width: 0px;
-                height: 0px;
-            }
-            QPushButton:pressed {
-                background: %(button_pressed)s;
-            }
-            QPushButton#toolbarButton {
-                background: %(button)s;
-            }
-            QPushButton#toolbarButton:hover {
-                background: %(button_hover)s;
-            }
-            QToolButton#primaryIconButton {
-                background: %(accent_button)s;
-                border-color: %(accent_button)s;
-            }
-            QToolButton#primaryIconButton:hover {
-                background: %(accent_hover)s;
-                border-color: %(accent_hover)s;
-            }
-            QToolButton#dangerIconButton {
-                background: %(danger_button)s;
-                border-color: %(danger_button)s;
-            }
-            QToolButton#dangerIconButton:hover {
-                background: %(danger_hover)s;
-                border-color: %(danger_hover)s;
-            }
-            QToolButton#themeToggle {
-                min-width: 26px;
-                min-height: 26px;
-                border-radius: 13px;
-                padding: 0px;
-                background: %(button)s;
-            }
-            QComboBox::drop-down {
-                border: none;
-                width: 16px;
-            }
-            QLineEdit, QTextEdit {
-                background: %(field)s;
-                border: 1px solid %(border)s;
-                border-radius: 10px;
-                padding: 6px;
-            }
-            QWidget#recordingContextPanel {
-                background: transparent;
-                border: none;
-            }
-            QLineEdit#recordingPathEdit, QLineEdit#recordingExperimentEdit {
-                background: transparent;
-                border: none;
-                border-bottom: 1px solid %(border)s;
-                border-radius: 0px;
-                padding: 0px 2px;
-                margin: 0px;
-                min-height: 20px;
-            }
-            QLineEdit#recordingPathEdit:focus, QLineEdit#recordingExperimentEdit:focus {
-                border-bottom-color: %(accent)s;
-            }
-            QToolButton#framelessIconButton {
-                min-width: 24px;
-                min-height: 24px;
-                padding: 0px;
-                margin: 0px;
-            }
-            QMenuBar {
-                background: %(bg)s;
-                color: %(fg)s;
-                border: none;
-            }
-            QMenuBar::item {
-                background: transparent;
-                padding: 4px 10px;
-                margin: 2px 2px;
-                border-radius: 4px;
-            }
-            QMenuBar::item:selected {
-                background: %(button_hover)s;
-            }
-            QMenuBar::item:pressed {
-                background: %(button_pressed)s;
-            }
-            QMenu {
-                background-color: %(field)s;
-                color: %(fg)s;
-                border: 1px solid %(border)s;
-                padding: 4px;
-            }
-            QMenu::item {
-                padding: 4px 20px 4px 20px;
-                border-radius: 4px;
-            }
-            QMenu::item:selected {
-                background-color: %(button_hover)s;
-                color: %(fg)s;
-            }
-            QMenu::separator {
-                height: 1px;
-                background: %(border)s;
-                margin: 4px 8px;
-            }
-            QTextEdit {
-                color: %(muted)s;
-            }
-            QTextEdit#logTerminal {
-                padding: 4px;
-                color: %(fg)s;
-                border-radius: 10px;
-            }
-            QTextEdit#sessionStatisticsText,
-            QTextEdit#sessionSettingsText {
-                padding: 4px;
-                color: %(fg)s;
-                border-radius: 10px;
-                background: %(field)s;
-                border: 1px solid %(border)s;
-            }
-            QCheckBox {
-                spacing: 6px;
-            }
-            QCheckBox::indicator {
-                width: 16px;
-                height: 16px;
-                border-radius: 4px;
-                border: 1px solid %(border)s;
-                background: %(field)s;
-            }
-            QCheckBox::indicator:checked {
-                background: %(checkbox_accent)s;
-                border-color: %(checkbox_accent)s;
-                image: url(__CHECKMARK_ICON__);
-            }
-            QCheckBox#traceMaxCheck {
-                color: %(trace_max)s;
-            }
-            QCheckBox#traceMaxCheck::indicator:checked {
-                background: %(trace_max)s;
-                border-color: %(trace_max)s;
-            }
-            QCheckBox#traceCentroidCheck {
-                color: %(trace_centroid)s;
-            }
-            QCheckBox#traceCentroidCheck::indicator:checked {
-                background: %(trace_centroid)s;
-                border-color: %(trace_centroid)s;
-            }
-            QCheckBox#tracePolyCheck {
-                color: %(trace_poly)s;
-            }
-            QCheckBox#tracePolyCheck::indicator:checked {
-                background: %(trace_poly)s;
-                border-color: %(trace_poly)s;
-            }
-            QCheckBox#traceGaussianCheck {
-                color: %(trace_gaussian)s;
-            }
-            QCheckBox#traceGaussianCheck::indicator:checked {
-                background: %(trace_gaussian)s;
-                border-color: %(trace_gaussian)s;
-            }
-            QTabWidget::pane {
-                border: none;
-                border-radius: 0px;
-                background: transparent;
-                top: 0px;
-            }
-            QTabBar::tab {
-                background: transparent;
-                border: none;
-                padding: 1px 4px;
-                margin-right: 2px;
-                border-top-left-radius: 0px;
-                border-top-right-radius: 0px;
-                color: %(muted)s;
-                text-align: left;
-            }
-            QTabBar::tab:selected {
-                background: transparent;
-                color: %(fg)s;
-                border: none;
-            }
-            QTabBar::tab:!selected:hover {
-                color: %(fg)s;
-            }
-            QGroupBox {
-                background: transparent;
-                border: none;
-                border-radius: 0px;
-                margin-top: 0px;
-                padding-top: 0px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 0px;
-                padding: 0px;
-                color: transparent;
-                height: 0px;
-            }
-            QToolButton#collapseToggle {
-                background: transparent;
-                border: none;
-                border-radius: 0px;
-                padding: 2px 0px 4px 0px;
-                font-weight: 600;
-                color: %(muted)s;
-                text-align: left;
-            }
-            QSlider::groove:horizontal {
-                height: 8px;
-                background: %(grid)s;
-                border: 1px solid %(border)s;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal {
-                width: 16px;
-                margin: -3px 0;
-                border-radius: 2px;
-                border: 1px solid %(border)s;
-                background: %(accent)s;
-            }
-            QScrollBar:vertical {
-                background: transparent;
-                width: 8px;
-                margin: 2px 0 2px 0;
-            }
-            QScrollBar::handle:vertical {
-                background: %(scroll)s;
-                border-radius: 4px;
-                min-height: 28px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: %(scroll_hover)s;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-                background: transparent;
-                border: none;
-            }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-                background: transparent;
-            }
-            QScrollBar:horizontal {
-                background: transparent;
-                height: 8px;
-                margin: 0 2px 0 2px;
-            }
-            QScrollBar::handle:horizontal {
-                background: %(scroll)s;
-                border-radius: 4px;
-                min-width: 28px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background: %(scroll_hover)s;
-            }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-                width: 0px;
-                background: transparent;
-                border: none;
-            }
-            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
-                background: transparent;
-            }
-            QSplitter::handle {
-                background: transparent;
-            }
-            QSplitter::handle:horizontal {
-                width: 8px;
-                margin: 0px;
-            }
-            QSplitter::handle:vertical {
-                height: 8px;
-                margin: 0px;
-            }
-            QSplitter::handle:hover {
-                background: transparent;
-            }
-            """ % {
-                **palette,
-                "trace_max": self.TRACE_METRIC_COLORS["smoothed_max"],
-                "trace_centroid": self.TRACE_METRIC_COLORS["centroid"],
-                "trace_poly": self.TRACE_METRIC_COLORS["poly_max"],
-                "trace_gaussian": self.TRACE_METRIC_COLORS["gaussian_center"],
-            }
-        self.setStyleSheet(stylesheet.replace("__CHECKMARK_ICON__", checkmark_icon))
+        apply_modern_style_for(self)
 
     def set_theme(self, theme_mode: str) -> None:
         if theme_mode not in {"light", "dark"} or theme_mode == self._theme_mode:
@@ -2417,51 +1889,7 @@ class MainWindow(QMainWindow):
             self._experiment_control_window.set_theme(self._theme_mode)
 
     def _style_plot_widgets(self) -> None:
-        palette = self._theme_palette()
-        for plot in (self.spectrum_plot, self.trace_plot):
-            plot.setBackground(palette["plot_bg"])
-            plot.getPlotItem().getViewBox().setBorder(pg.mkPen(palette["plot_border"]))
-            bottom_axis = plot.getPlotItem().getAxis("bottom")
-            left_axis = plot.getPlotItem().getAxis("left")
-            bottom_axis.enableAutoSIPrefix(False)
-            left_axis.enableAutoSIPrefix(False)
-            bottom_axis.setStyle(tickTextOffset=2)
-            left_axis.setStyle(tickTextOffset=2)
-            bottom_axis.setTextPen(pg.mkPen(palette["axis_text"]))
-            left_axis.setTextPen(pg.mkPen(palette["axis_text"]))
-            bottom_axis.setPen(pg.mkPen(palette["axis_pen"]))
-            left_axis.setPen(pg.mkPen(palette["axis_pen"]))
-            plot.getPlotItem().titleLabel.item.setDefaultTextColor(QColor(palette["fg"]))
-            plot.getPlotItem().showGrid(x=True, y=True, alpha=0.16 if self._theme_mode == "dark" else 0.18)
-        if hasattr(self, "residual_axis"):
-            self.residual_axis.setStyle(tickTextOffset=2)
-            self.residual_axis.setTextPen(pg.mkPen(palette["axis_text"]))
-            self.residual_axis.setPen(pg.mkPen(palette["axis_pen"]))
-        crosshair_color = "#7f93a8" if self._theme_mode == "dark" else "#666666"
-        self.spectrum_vline.setPen(pg.mkPen(crosshair_color, width=1))
-        self.spectrum_hline.setPen(pg.mkPen(crosshair_color, width=1))
-        self.trace_vline.setPen(pg.mkPen(crosshair_color, width=1))
-        self.trace_hline.setPen(pg.mkPen(crosshair_color, width=1))
-        if self._theme_mode == "dark":
-            self.processing_region_item.setBrush(pg.mkBrush(111, 179, 255, 26))
-            self.fit_region_item.setBrush(pg.mkBrush(255, 190, 92, 28))
-            self.max_marker.setPen(pg.mkPen("#11161c", width=1.4))
-            self.poly_marker.setPen(pg.mkPen("#11161c", width=1.4))
-            self.gaussian_marker.setPen(pg.mkPen("#11161c", width=1.4))
-            self.centroid_marker.setPen(pg.mkPen("#11161c", width=1.4))
-            self.residual_curve.setPen(pg.mkPen((0, 0, 0, 0), width=0))
-        else:
-            self.processing_region_item.setBrush(pg.mkBrush(90, 160, 255, 30))
-            self.fit_region_item.setBrush(pg.mkBrush(255, 180, 80, 40))
-            self.max_marker.setPen(pg.mkPen("w", width=1.4))
-            self.poly_marker.setPen(pg.mkPen("w", width=1.4))
-            self.gaussian_marker.setPen(pg.mkPen("w", width=1.4))
-            self.centroid_marker.setPen(pg.mkPen("w", width=1.4))
-            self.residual_curve.setPen(pg.mkPen((0, 0, 0, 0), width=0))
-        self._apply_metric_color_styles()
-        self._update_freeze_button_icon()
-        self._update_residual_button_icon()
-        self._update_dark_reference_button_icons()
+        style_plot_widgets_for(self)
 
     def _apply_sensorgram_display_style(self) -> None:
         apply_sensorgram_display_style(self)
@@ -2515,43 +1943,6 @@ class MainWindow(QMainWindow):
 
     def _append_log_record(self, levelno: int, source: str, text: str) -> None:
         append_log_record(self, levelno, source, text)
-
-    def _insert_log_record(self, cursor: QTextCursor, levelno: int, source: str, text: str) -> None:
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        color_map = {
-            logging.DEBUG: "#5fa8ff",
-            logging.INFO: "#c7d2e0",
-            SUCCESS_LOG_LEVEL: "#44d07b",
-            logging.WARNING: "#f4b23d",
-            logging.ERROR: "#ff6b6b",
-            logging.CRITICAL: "#f35f8d",
-        }
-        level_label_map = {
-            logging.DEBUG: "DEBUG",
-            logging.INFO: "INFO",
-            SUCCESS_LOG_LEVEL: "SUCCESS",
-            logging.WARNING: "WARN",
-            logging.ERROR: "ERROR",
-            logging.CRITICAL: "CRIT",
-        }
-        level_color = color_map.get(int(levelno), "#c7d2e0")
-        level_label = level_label_map.get(int(levelno), "INFO")
-        source_label = escape(str(source).split(".")[-1] or "app")
-        escaped = escape(text).replace("\n", "<br>")
-        html = (
-            f"<div style='white-space:pre-wrap; margin:0;'>"
-            f"<span style='color:#738193;'>{timestamp}</span> "
-            f"<span style='color:{level_color}; font-weight:600;'>[{level_label}]</span> "
-            f"<span style='color:#94a3b8;'>{source_label}</span> "
-            f"<span style='color:#e5edf7;'>{escaped}</span>"
-            f"</div>"
-        )
-        cursor.insertHtml(html)
-        cursor.insertHtml("<br>")
-        if self._log_follow_enabled:
-            scrollbar = self.log_terminal.verticalScrollBar()
-            scrollbar.setValue(scrollbar.maximum())
-
     def _append_log_record_now(self, levelno: int, source: str, text: str) -> None:
         append_log_record_now(self, levelno, source, text)
 
@@ -2577,65 +1968,10 @@ class MainWindow(QMainWindow):
         log_throttled(self, key, message, level=level, min_interval=min_interval)
 
     def _fit_window_to_available_screen(self) -> None:
-        screen = None
-        if self.windowHandle() is not None:
-            screen = self.windowHandle().screen()
-        if screen is None:
-            screen = self.screen()
-        if screen is None:
-            screen = QGuiApplication.primaryScreen()
-        if screen is None:
-            return
-
-        available = screen.availableGeometry()
-        margin = 12
-        max_width = max(available.width() - margin * 2, 640)
-        max_height = max(available.height() - margin * 2, 480)
-        target_width = min(self.width(), max_width)
-        target_height = min(self.height(), max_height)
-        self.resize(target_width, target_height)
-
-        if self._ui_state:
-            x_pos = min(
-                max(self.x(), available.x() + margin),
-                available.x() + available.width() - self.width() - margin,
-            )
-            y_pos = min(
-                max(self.y(), available.y() + margin),
-                available.y() + available.height() - self.height() - margin,
-            )
-            self.move(x_pos, y_pos)
-            return
-
-        frame = self.frameGeometry()
-        x_pos = available.x() + max((available.width() - frame.width()) // 2, 0)
-        y_pos = available.y() + max((available.height() - frame.height()) // 2, 0)
-        self.move(x_pos, y_pos)
-
+        fit_window_to_available_screen_for(self)
     def showEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
         super().showEvent(event)
-        if not getattr(self, "_startup_show_event_reported", False):
-            self._startup_show_event_reported = True
-            startup_show_t0 = getattr(self, "_startup_show_requested_t0", None)
-            if startup_show_t0 is not None:
-                self._log_info(
-                    f"Startup +{(perf_counter() - startup_show_t0) * 1000.0:.1f} ms: first showEvent reached"
-                )
-            self._log_startup_widget_snapshot()
-        self._sync_main_view_visibility()
-        if not self._screen_fitted:
-            self._screen_fitted = True
-            if self._start_maximized:
-                self.showMaximized()
-            elif not self._ui_state:
-                self._fit_window_to_available_screen()
-        if not self._hardware_init_scheduled:
-            self._hardware_init_scheduled = True
-            if self._launch_profile_spec.scan_devices:
-                QTimer.singleShot(0, self._start_hardware_initialization)
-            elif self._launch_profile_spec.start_live_acquisition:
-                QTimer.singleShot(0, self._start_live_acquisition)
-        self._sync_view_actions()
+        show_event_body_for(self)
 
     def moveEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
         super().moveEvent(event)
@@ -2650,318 +1986,28 @@ class MainWindow(QMainWindow):
     def paintEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
         started = perf_counter()
         super().paintEvent(event)
-        elapsed_ms = (perf_counter() - started) * 1000.0
-        if not getattr(self, "_startup_paint_event_reported", False):
-            self._startup_paint_event_reported = True
-            startup_show_t0 = getattr(self, "_startup_show_requested_t0", None)
-            if startup_show_t0 is not None:
-                self._log_info(
-                    f"Startup +{(perf_counter() - startup_show_t0) * 1000.0:.1f} ms: first paintEvent reached | "
-                    f"paint={elapsed_ms:.2f} ms"
-                )
-                self._log_startup_plot_state()
+        paint_event_body_for(self, started)
 
     def _log_startup_widget_snapshot(self) -> None:
-        diagnostics = getattr(self, "_diagnostics", None)
-        debug_enabled = bool(getattr(diagnostics, "debug_timing_enabled", False))
-        deep_enabled = bool(getattr(diagnostics, "deep_timing_enabled", False))
-        if not debug_enabled and not deep_enabled:
-            return
-        try:
-            app = QApplication.instance()
-            top_level_widgets: list[QWidget] = []
-            if app is not None:
-                top_level_widgets = list(app.topLevelWidgets())
-            current_widget = None
-            stack_pages: list[str] = []
-            stack_index = -1
-            if hasattr(self, "_top_content_stack") and self._top_content_stack is not None:
-                stack_index = int(self._top_content_stack.currentIndex())
-                try:
-                    for page_index in range(self._top_content_stack.count()):
-                        page = self._top_content_stack.widget(page_index)
-                        if page is None:
-                            continue
-                        page_label = "page"
-                        if page is getattr(self, "_spectra_block", None):
-                            page_label = "spectra_block"
-                        elif page is getattr(self, "_sensorgram_block", None):
-                            page_label = "sensorgram_block"
-                        elif page is getattr(self, "_experiment_control_panel_placeholder", None):
-                            page_label = "flow_placeholder"
-                        page_current = page_index == stack_index
-                        stack_pages.append(
-                            f"{page_index}:{page_label}:{page.__class__.__name__}(objectName={page.objectName()!r}, "
-                            f"visible={page.isVisible()}, current={page_current})"
-                        )
-                except Exception:
-                    stack_pages = []
-                stack_widget = self._top_content_stack.currentWidget()
-                if stack_widget is not None:
-                    current_widget = (
-                        f"{stack_widget.__class__.__name__}(objectName={stack_widget.objectName()!r}, "
-                        f"visible={stack_widget.isVisible()}, window={stack_widget.isWindow()})"
-                    )
-            experiment_control_widget = getattr(self, "_experiment_control_window", None)
-            experiment_control_widget_text = (
-                f"{experiment_control_widget.__class__.__name__}(visible={experiment_control_widget.isVisible()}, window={experiment_control_widget.isWindow()})"
-                if experiment_control_widget is not None
-                else "None"
-            )
-            top_level_summary: list[str] = []
-            for widget in top_level_widgets:
-                try:
-                    top_level_summary.append(
-                        f"{widget.__class__.__name__}(title={widget.windowTitle()!r}, "
-                        f"visible={widget.isVisible()}, window={widget.isWindow()})"
-                    )
-                except Exception:
-                    top_level_summary.append(widget.__class__.__name__)
-            self._log_info(
-                "Startup widget snapshot | "
-                f"main_visible={self.isVisible()} | "
-                f"main_content_visible={bool(self._main_content_widget.isVisible()) if self._main_content_widget is not None else False} | "
-                f"top_view={getattr(self, '_top_view_mode', '-')} | "
-                f"stack_index={stack_index} | "
-                f"stack_current={current_widget or '-'} | "
-                f"experiment_control_widget={experiment_control_widget_text} | "
-                f"experiment_control_bootstrap_pending={bool(getattr(self, '_experiment_control_panel_bootstrap_pending', getattr(self, '_flow_panel_bootstrap_pending', False)))} | "
-                f"ui_startup_ready={bool(getattr(self, '_ui_startup_ready', False))} | "
-                f"stack_pages=[{' ; '.join(stack_pages) if stack_pages else '-'}] | "
-                f"top_levels=[{' ; '.join(top_level_summary) if top_level_summary else '-'}]"
-            )
-            self._log_info(f"Top content diagnostics | {self._top_content_stack_diagnostics()}")
-            if deep_enabled:
-                self._log_startup_widget_trace(top_level_widgets)
-        except Exception as exc:
-            self._log_warning(f"Startup widget snapshot failed: {exc}")
-
-    def _top_content_stack_diagnostics(self) -> dict[str, object]:
-        stack = getattr(self, "_top_content_stack", None)
-        experiment_control_widget = getattr(self, "_experiment_control_window", None)
-        placeholder = getattr(self, "_experiment_control_panel_placeholder", None)
-        spectra_block = getattr(self, "_spectra_block", None)
-        pages: list[dict[str, object]] = []
-        if stack is not None:
-            try:
-                current_index = int(stack.currentIndex())
-                count = int(stack.count())
-            except Exception:
-                current_index = -1
-                count = 0
-            for index in range(count):
-                page = stack.widget(index)
-                if page is None:
-                    continue
-                if page is spectra_block:
-                    label = "spectra"
-                elif page is experiment_control_widget:
-                    label = "experimental_control"
-                elif page is placeholder:
-                    label = "placeholder"
-                else:
-                    label = "unknown"
-                pages.append(
-                    {
-                        "index": index,
-                        "label": label,
-                        "class": page.__class__.__name__,
-                        "visible": bool(page.isVisible()),
-                        "is_current": index == current_index,
-                        "parent": page.parent().__class__.__name__ if page.parent() is not None else None,
-                    }
-                )
-        else:
-            current_index = -1
-            count = 0
-        experiment_control_index = -1
-        placeholder_index = -1
-        spectra_index = -1
-        if stack is not None:
-            try:
-                if experiment_control_widget is not None:
-                    experiment_control_index = int(stack.indexOf(experiment_control_widget))
-                if placeholder is not None:
-                    placeholder_index = int(stack.indexOf(placeholder))
-                if spectra_block is not None:
-                    spectra_index = int(stack.indexOf(spectra_block))
-            except Exception:
-                pass
-        return {
-            "top_content_mode": getattr(self, "_top_view_mode", "-"),
-            "top_content_stack_current_index": current_index,
-            "top_content_stack_current_widget": (
-                f"{stack.currentWidget().__class__.__name__}(objectName={stack.currentWidget().objectName()!r})"
-                if stack is not None and stack.currentWidget() is not None
-                else None
-            ),
-            "top_content_stack_page_count": count,
-            "top_content_stack_pages": pages,
-            "experiment_control_window_exists": experiment_control_widget is not None,
-            "experiment_control_window_index": experiment_control_index,
-            "placeholder_index": placeholder_index,
-            "spectra_block_index": spectra_index,
-        }
-
-    def _log_startup_widget_trace(self, widgets: list[QWidget]) -> None:
-        if not widgets:
-            self._log_info("Startup widget trace | count=0")
-            return
-
-        def _format_flags(widget: QWidget) -> str:
-            try:
-                flags = widget.windowFlags()
-                raw_value = getattr(flags, "value", flags)
-                return f"0x{int(raw_value):x}"
-            except Exception:
-                return "-"
-
-        def _format_geometry(widget: QWidget) -> str:
-            try:
-                geo = widget.geometry()
-                frame = widget.frameGeometry()
-                return (
-                    f"geo=({geo.x()},{geo.y()},{geo.width()},{geo.height()}) "
-                    f"frame=({frame.x()},{frame.y()},{frame.width()},{frame.height()})"
-                )
-            except Exception:
-                return "geo=- frame=-"
-
-        def _format_parent_chain(widget: QWidget) -> str:
-            chain: list[str] = []
-            parent = widget.parentWidget()
-            depth = 0
-            while isinstance(parent, QWidget) and depth < 6:
-                try:
-                    chain.append(
-                        f"{parent.__class__.__name__}(objectName={parent.objectName()!r}, "
-                        f"title={parent.windowTitle()!r}, visible={parent.isVisible()}, window={parent.isWindow()})"
-                    )
-                except Exception:
-                    chain.append(parent.__class__.__name__)
-                parent = parent.parentWidget()
-                depth += 1
-            return " -> ".join(chain) if chain else "-"
-
-        visible_count = 0
-        self._log_info(f"Startup widget trace | count={len(widgets)}")
-        for index, widget in enumerate(widgets, start=1):
-            try:
-                is_visible = bool(widget.isVisible())
-                visible_count += int(is_visible)
-                self._log_info(
-                    "Startup widget trace | "
-                    f"#{index} class={widget.__class__.__name__} "
-                    f"objectName={widget.objectName()!r} "
-                    f"title={widget.windowTitle()!r} "
-                    f"visible={is_visible} "
-                    f"window={widget.isWindow()} "
-                    f"flags={_format_flags(widget)} "
-                    f"{_format_geometry(widget)} "
-                    f"parent_chain={_format_parent_chain(widget)}"
-                )
-            except Exception as exc:
-                self._log_warning(f"Startup widget trace entry {index} failed: {exc}")
-        self._log_info(f"Startup widget trace | visible_count={visible_count}")
+        log_startup_widget_snapshot_for(self)
 
     def _log_startup_plot_state(self) -> None:
-        try:
-            spectrum_paints = int(getattr(self, "_spectrum_plot_paint_count", 0) or 0)
-            trace_paints = int(getattr(self, "_trace_plot_paint_count", 0) or 0)
-            spectrum_visible = bool(getattr(self, "spectrum_plot", None).isVisible()) if hasattr(self, "spectrum_plot") else False
-            trace_visible = bool(getattr(self, "trace_plot", None).isVisible()) if hasattr(self, "trace_plot") else False
-            self._log_info(
-                "Startup plot state | "
-                f"spectrum_paints={spectrum_paints} | "
-                f"trace_paints={trace_paints} | "
-                f"spectrum_visible={spectrum_visible} | "
-                f"trace_visible={trace_visible}"
-            )
-        except Exception as exc:
-            self._log_warning(f"Startup plot state failed: {exc}")
+        log_startup_plot_state_for(self)
 
     def _notify_startup_plot_painted(self, prefix: str) -> None:
-        if prefix not in {"spectrum_plot", "trace_plot"}:
-            return
-        painted = getattr(self, "_startup_plot_painted", None)
-        if not isinstance(painted, set):
-            painted = set()
-            self._startup_plot_painted = painted
-        if prefix in painted:
-            return
-        painted.add(prefix)
-        startup_show_t0 = getattr(self, "_startup_show_requested_t0", None)
-        if startup_show_t0 is not None:
-            self._log_info(f"Startup +{(perf_counter() - startup_show_t0) * 1000.0:.1f} ms: first plot paint on {prefix}")
+        notify_startup_plot_painted_for(self, prefix)
 
     def _notify_startup_data_rendered(self, source: str) -> None:
-        if source not in {"spectrum", "trace"}:
-            return
-        rendered = getattr(self, "_startup_data_rendered", None)
-        if not isinstance(rendered, set):
-            rendered = set()
-            self._startup_data_rendered = rendered
-        if source in rendered:
-            return
-        rendered.add(source)
-        startup_show_t0 = getattr(self, "_startup_show_requested_t0", None)
-        if startup_show_t0 is not None:
-            self._log_info(f"Startup +{(perf_counter() - startup_show_t0) * 1000.0:.1f} ms: first data render on {source}")
-        if source == "spectrum":
-            self._reveal_startup_window()
-            splash = getattr(self, "_startup_splash", None)
-            if splash is not None and not getattr(self, "_startup_splash_close_scheduled", False):
-                self._startup_splash_close_scheduled = True
-                self._log_info("Startup data renders complete; closing splash.")
-                QTimer.singleShot(0, self._close_startup_splash)
+        notify_startup_data_rendered_for(self, source)
 
     def _reveal_startup_window(self) -> None:
-        self._complete_startup_show()
+        complete_startup_show_for(self)
 
     def _complete_startup_show(self) -> None:
-        if not bool(getattr(self, "_startup_show_requested", False)):
-            return
-        if getattr(self, "_startup_window_revealed", False):
-            return
-        startup_show_t0 = getattr(self, "_startup_show_requested_t0", None)
-        if startup_show_t0 is not None:
-            self._log_info(
-                f"Startup +{(perf_counter() - startup_show_t0) * 1000.0:.1f} ms: completing startup show"
-            )
-        self._startup_window_revealed = True
-        if bool(getattr(self, "_start_maximized", False)):
-            self._screen_fitted = True
-            self.showMaximized()
-        else:
-            if not getattr(self, "_screen_fitted", False):
-                self._fit_window_to_available_screen()
-                self._screen_fitted = True
-            self.show()
-        splash = getattr(self, "_startup_splash", None)
-        if splash is not None and not getattr(self, "_startup_splash_close_scheduled", False):
-            self._startup_splash_close_scheduled = True
-            QTimer.singleShot(200, self._close_startup_splash)
+        complete_startup_show_for(self)
 
     def _close_startup_splash(self) -> None:
-        splash = getattr(self, "_startup_splash", None)
-        if splash is None:
-            return
-        self._startup_splash = None
-        app = QApplication.instance()
-        tracer = getattr(app, "_startup_widget_tracer", None) if app is not None else None
-        if app is not None and tracer is not None:
-            try:
-                app.removeEventFilter(tracer)
-            except Exception:
-                pass
-            try:
-                app._startup_widget_tracer = None
-            except Exception:
-                pass
-        try:
-            splash.close()
-        except Exception:
-            pass
+        close_startup_splash_for(self)
 
     def _restore_ui_state(self) -> None:
         restore_ui_state_for(self)
@@ -3008,6 +2054,50 @@ class MainWindow(QMainWindow):
     def _set_startup_freeze_plots_enabled(self, enabled: bool) -> None:
         self._startup_freeze_plots = bool(enabled)
         save_app_setting("startup_freeze_plots", self._startup_freeze_plots)
+
+    def _set_start_maximized(self, enabled: bool) -> None:
+        self._start_maximized = bool(enabled)
+        save_app_setting("start_maximized", self._start_maximized)
+
+    def _set_confirm_exit_if_recording(self, enabled: bool) -> None:
+        self._confirm_exit_if_recording = bool(enabled)
+        save_app_setting("confirm_exit_if_recording", self._confirm_exit_if_recording)
+
+    def _set_default_live_rate_hz(self, hz: float) -> None:
+        self._default_live_rate_hz = float(hz)
+        save_app_setting("default_live_rate_hz", self._default_live_rate_hz)
+        if hasattr(self, "live_rate_spin"):
+            self.live_rate_spin.setValue(self._default_live_rate_hz)
+
+    def _set_gui_log_level(self, level: int) -> None:
+        self._gui_log_min_level = int(level)
+        save_app_setting("gui_log_min_level", self._gui_log_min_level)
+        logger = getattr(self, "_ui_logger", None)
+        if logger is not None:
+            logger.setLevel(self._gui_log_min_level)
+        emit_levels = {logging.WARNING, logging.ERROR, logging.CRITICAL}
+        if self._gui_log_min_level <= logging.INFO:
+            emit_levels.update({logging.INFO, SUCCESS_LOG_LEVEL})
+        if self._gui_log_min_level <= logging.DEBUG:
+            emit_levels.add(logging.DEBUG)
+        self._log_emit_levels = emit_levels
+
+    def _set_always_on_top(self, enabled: bool) -> None:
+        self._always_on_top = bool(enabled)
+        flags = self.windowFlags()
+        if enabled:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        self.show()
+        save_app_setting("always_on_top", self._always_on_top)
+
+    def _open_app_config_folder(self) -> None:
+        from platformdirs import user_config_dir as _ucd
+        folder = Path(_ucd("lspr-suite", appauthor=False))
+        folder.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder.resolve())))
 
     def _apply_acquisition_state_to_widgets(self, state: dict[str, object]) -> None:
         apply_acquisition_state_to_widgets(self, state)
@@ -3167,80 +2257,7 @@ class MainWindow(QMainWindow):
         self._handle_experimental_control_state_recorded(payload)
 
     def _apply_control_sizing(self) -> None:
-        tall_widgets = [
-            self.integration_spin,
-            self.averages_spin,
-            self.auto_integration_button,
-            self.correct_dark_check,
-            self.correct_nonlinearity_check,
-            self.live_rate_spin,
-            self.trace_noise_window_spin,
-            self.range_min_spin,
-            self.range_max_spin,
-            self.baseline_method_combo,
-            self.smoothing_method_combo,
-            self.smoothing_window_spin,
-            self.temporal_smoothing_spin,
-            self.crop_method_combo,
-            self.fit_method_combo,
-            self.poly_order_spin,
-            self.fit_window_spin,
-            self.analysis_resolution_spin,
-            self.metric_mode_combo,
-            self.plot_selector,
-            self.save_processing_button,
-            self.load_processing_button,
-            self.clear_trace_button,
-            self.trace_record_button,
-            self.show_residual_button,
-            self.freeze_plots_button,
-            self.autoscale_spectrum_button,
-            self.autoscale_trace_button,
-            self.sim_resolution_spin,
-        ]
-        for widget in tall_widgets:
-            widget.setMinimumHeight(26)
-
-        compact_combos = [
-            self.baseline_method_combo,
-            self.smoothing_method_combo,
-            self.crop_method_combo,
-            self.fit_method_combo,
-            self.analysis_resolution_spin,
-            self.metric_mode_combo,
-            self.plot_selector,
-        ]
-        for combo in compact_combos:
-            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-            combo.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-            combo.setMinimumContentsLength(1)
-            combo.view().setTextElideMode(Qt.TextElideMode.ElideRight)
-
-        configure_spectra_processing_group_controls(self)
-
-        for button in (
-            self.measurement_toggle_button,
-            self.stop_measurement_button,
-            self.next_measurement_button,
-            self.acquire_dark_button,
-            self.acquire_reference_button,
-        ):
-            button.setMinimumSize(QSize(34, 34))
-
-        for slider in (
-            self.sim_peak_center_slider,
-            self.sim_peak_width_slider,
-            self.sim_peak_height_slider,
-            self.sim_secondary_peak_offset_slider,
-            self.sim_secondary_peak_height_slider,
-            self.sim_secondary_peak_width_slider,
-            self.sim_baseline_slider,
-            self.sim_slope_slider,
-            self.sim_noise_slider,
-        ):
-            slider.setMinimumHeight(18)
-
-        self.source_tabs.setMinimumHeight(220)
+        apply_control_sizing_for(self)
 
     def _connect_simulation_widgets(self) -> None:
         for slider in (
@@ -3286,38 +2303,7 @@ class MainWindow(QMainWindow):
         self._configure_source_tabs()
 
     def _apply_source_mode(self, new_mode: str, restart_live: bool) -> None:
-        if self._measurement_active and new_mode != self._source_mode:
-            self._log_warning("Source switching is disabled while measurement is running.")
-            self.status_label.setText("Source switching is disabled while measurement is running.")
-            return
-        self._source_mode = new_mode
-        self._source_epoch += 1
-        self._session = self._hardware_session if new_mode == "spectrometer" else self._simulation_session
-        self._raw_last_finish_ts = None
-        self._raw_last_sample_index = None
-        self._last_elapsed_ms = None
-        self._last_spacing_ms = None
-        self._last_overhead_ms = None
-        self._effective_raw_rate_hz = None
-        self._last_display_average_count = None
-        self._last_display_period_ms = None
-        if hasattr(self, "_plot_view_cache"):
-            self._plot_view_cache.clear()
-        self._metric_reference_processed = None
-        self._live_trace_started_at = None
-        self._reset_live_accumulator()
-        if new_mode == "simulation" and self._session.state.sample is None:
-            self._session.set_sample(self._build_simulation_spectrum("sample"))
-        self._log_success(
-            f"Active source set to {'spectrometer' if new_mode == 'spectrometer' else 'simulation'}."
-        )
-        self._configure_source_tabs()
-        self._refresh_plot()
-        self._request_deferred_ui_refresh(telemetry=True, live_estimate=True)
-        self._update_simulation_controls_enabled()
-        self._schedule_acquisition_state_persist()
-        if restart_live:
-            QTimer.singleShot(0, self._start_live_acquisition)
+        apply_source_mode_for(self, new_mode, restart_live)
 
     def _default_simulation_resolution_nm(self) -> float:
         return float(self._simulation_backend.simulation_parameters().wavelength_resolution_nm)
@@ -3335,29 +2321,7 @@ class MainWindow(QMainWindow):
         return self._simulation_backend.acquire_kind_spectrum(kind, self._current_settings())
 
     def _sync_simulation_backend_from_controls(self) -> None:
-        self._simulation_backend.set_simulation_parameters(
-            SimulationParameters(
-                wavelength_min_nm=400.0,
-                wavelength_max_nm=900.0,
-                wavelength_resolution_nm=max(self.sim_resolution_spin.value(), 0.001),
-                peak_center_nm=float(self.sim_peak_center_slider.value()),
-                peak_width_nm=float(max(self.sim_peak_width_slider.value(), 1)),
-                peak_height=float(self.sim_peak_height_slider.value()),
-                secondary_peak_offset_nm=float(self.sim_secondary_peak_offset_slider.value()),
-                secondary_peak_height_percent=float(self.sim_secondary_peak_height_slider.value()),
-                secondary_peak_width_percent=float(max(self.sim_secondary_peak_width_slider.value(), 1)),
-                baseline=float(self.sim_baseline_slider.value()),
-                slope=float(self.sim_slope_slider.value()) / 100.0,
-                noise=float(self.sim_noise_slider.value()),
-            )
-        )
-        if (
-            self._live_active
-            and self._source_mode == "simulation"
-            and self._live_worker is not None
-            and self._live_worker.is_alive()
-        ):
-            self._live_worker.update_simulation_parameters(self._simulation_backend.simulation_parameters())
+        sync_simulation_backend_from_controls_for(self)
 
     def _connect_processing_widgets(self) -> None:
         self.range_min_spin.valueChanged.connect(self._handle_processing_setting_change)
@@ -3398,34 +2362,7 @@ class MainWindow(QMainWindow):
         apply_sensorgram_metric_selection(self, visible_modes, primary_mode, save=save)
 
     def _apply_metric_color_styles(self) -> None:
-        colors = getattr(self, "TRACE_METRIC_COLORS", {})
-        if not isinstance(colors, dict):
-            return
-        line_width = max(float(getattr(self, "_sensorgram_line_width_px", 2.2)), 0.5)
-        if hasattr(self, "spectrum_curve"):
-            self.spectrum_curve.setPen(pg.mkPen("#1f77b4", width=line_width))
-        if hasattr(self, "fit_curve"):
-            self.fit_curve.setPen(pg.mkPen("#d95f02", width=line_width, style=Qt.PenStyle.DashLine))
-        for metric_name, curve in getattr(self, "trace_curves", {}).items():
-            if hasattr(curve, "setPen"):
-                curve.setPen(pg.mkPen(colors.get(metric_name, "#444444"), width=line_width))
-        for metric_name, marker in (
-            ("smoothed_max", getattr(self, "max_marker", None)),
-            ("centroid", getattr(self, "centroid_marker", None)),
-            ("poly_max", getattr(self, "poly_marker", None)),
-            ("gaussian_center", getattr(self, "gaussian_marker", None)),
-        ):
-            if marker is not None and hasattr(marker, "setBrush"):
-                marker.setBrush(pg.mkBrush(colors.get(metric_name, "#444444")))
-        for metric_name, band in getattr(self, "trace_metric_envelope_bands", {}).items():
-            if band is None or not hasattr(band, "setBrush"):
-                continue
-            base_color = QColor(colors.get(metric_name, "#1F77B4"))
-            if not base_color.isValid():
-                base_color = QColor("#1F77B4")
-            band_alpha = int(round(max(min(float(getattr(self, "_sensorgram_metric_envelope_overlay_alpha", 16)), 100.0), 0.0) * 2.55))
-            base_color.setAlpha(band_alpha)
-            band.setBrush(pg.mkBrush(base_color))
+        apply_metric_color_styles_for(self)
 
     def _set_sensorgram_metric_color(self, metric_name: str, color: str, *, save: bool = False) -> None:
         metric_name = normalize_sensorgram_metric_name(metric_name)
@@ -3453,6 +2390,10 @@ class MainWindow(QMainWindow):
     def _load_processing_settings_dialog(self) -> None:
         load_processing_settings_dialog(self)
 
+    def _show_import_from_measurement_dialog(self) -> None:
+        from lspr_app.gui.main_window_import_dialog import show_import_from_measurement_for
+        show_import_from_measurement_for(self)
+
     def _settings_key(self, settings: AcquisitionSettings) -> tuple[object, ...]:
         if self._source_mode == "simulation":
             axis_size = len(self._simulation_wavelength_axis())
@@ -3468,39 +2409,7 @@ class MainWindow(QMainWindow):
         )
 
     def _auto_set_integration_time(self) -> None:
-        if self._source_mode == "simulation":
-            self.status_label.setText("Auto integration is only available for the spectrometer source.")
-            self._log_warning("Auto integration requested while simulation source is active.")
-            return
-
-        if self._busy:
-            self._pending_auto_integration = True
-            if self._live_active:
-                self._resume_live_after_auto_integration = True
-                self._live_active = False
-            self.status_label.setText("Auto integration queued. Waiting for current acquisition to finish...")
-            return
-
-        if self._live_active:
-            self._resume_live_after_auto_integration = True
-            self._live_active = False
-            self._reset_live_accumulator()
-            self.status_label.setText("Pausing live acquisition for auto integration...")
-            QTimer.singleShot(0, self._auto_set_integration_time)
-            return
-
-        try:
-            tuned_ms = self._spectrometer.auto_integration_time_ms(self._current_settings())
-        except Exception as exc:
-            self._show_error(str(exc))
-            return
-
-        self.integration_spin.setValue(round(tuned_ms, 3))
-        self.status_label.setText(f"Integration time set to {tuned_ms:.3f} ms.")
-        self._log_success(f"Integration time tuned to {tuned_ms:.3f} ms.")
-        if self._resume_live_after_auto_integration:
-            self._resume_live_after_auto_integration = False
-            QTimer.singleShot(0, self._start_live_acquisition)
+        auto_set_integration_time_for(self)
 
     def _start_acquisition(self, kind: str) -> None:
         start_acquisition(self, kind)
@@ -3688,45 +2597,7 @@ class MainWindow(QMainWindow):
         timer.setInterval(max(int(round(1000.0 / max(rate_hz, 1e-9))), 1))
 
     def _set_session_stats_recording_active(self, active: bool) -> None:
-        active = bool(active)
-        if active == bool(self._session_stats_recording_active):
-            self._render_session_stats_recording_blink_indicator()
-            return
-        if active:
-            self._session_stats_log.clear()
-            self._session_stats_log_last_text = ""
-            self._session_stats_log_last_capture_ts = 0.0
-            self._session_stats_recording_started_at = datetime.now(timezone.utc)
-            self._session_stats_recording_duration_s = None
-            self._session_stats_recording_active = True
-            self._session_stats_recording_blink_visible = True
-            self._update_session_stats_recording_timer_interval()
-            self._session_stats_recording_blink_timer.start()
-            self._session_stats_recording_requested_at = perf_counter()
-            self._capture_session_stats_recording_snapshot()
-            self._log_info("Session log recording started.")
-        else:
-            self._session_stats_recording_active = False
-            self._session_stats_recording_blink_timer.stop()
-            self._session_stats_recording_timer.stop()
-            self._session_stats_recording_requested_at = None
-            started_at = self._session_stats_recording_started_at
-            if started_at is not None:
-                self._session_stats_recording_duration_s = max(
-                    (datetime.now(timezone.utc) - started_at).total_seconds(),
-                    0.0,
-                )
-            destination = save_session_stats_log_for(self)
-            self._session_stats_recording_started_at = None
-            self._session_stats_recording_blink_visible = True
-            self._render_session_stats_recording_blink_indicator()
-            if destination is not None:
-                self.status_label.setText(f"Session log saved to {destination.name}")
-                self._log_success(f"Session log saved: {destination.name}")
-            else:
-                self._log_warning("Session log recording stopped without data.")
-            self._refresh_session_summary(force=True)
-            self._refresh_session_statistics(force=True)
+        set_session_stats_recording_active_for(self, active)
 
     def _capture_session_stats_recording_snapshot(self) -> None:
         if not self._session_stats_recording_active:
@@ -3770,418 +2641,7 @@ class MainWindow(QMainWindow):
             button.setChecked(False)
 
     def _hardware_init_steps(self) -> list[HardwareInitStep]:
-        steps: list[HardwareInitStep] = [
-            HardwareInitStep("spectrometer", "Spectrometer", self._spectrometer_init_step),
-        ]
-        service = self._device_comm_service
-        configured_types: set[str] = set()
-        for profile in sorted(service.list_profiles(), key=lambda p: p.label):
-            if not profile.enabled or not profile.endpoint:
-                continue
-            configured_types.add(profile.type)
-            display = profile.display_name or profile.label
-            steps.append(HardwareInitStep(
-                profile.label,
-                display,
-                lambda p=profile: self._profile_device_init_step(p),
-            ))
-        if "pump" not in configured_types:
-            steps.append(HardwareInitStep("pump_scan", "Pump scan", self._pump_scan_step))
-        if "valve" not in configured_types:
-            steps.append(HardwareInitStep("valve_scan", "Valve scan", self._valve_scan_step))
-        if "selector" not in configured_types:
-            steps.append(HardwareInitStep("selector_scan", "Selector scan", self._selector_scan_step))
-        return steps
-
-    def _spectrometer_init_step(self) -> HardwareInitStepResult:
-        name = self._spectrometer.device_name()
-        if isinstance(self._spectrometer, SimulatedSpectrometer):
-            return HardwareInitStepResult(
-                key="spectrometer",
-                label="Spectrometer",
-                state="simulation",
-                message="Simulation backend ready.",
-                connected=False,
-                payload=name,
-            )
-        return HardwareInitStepResult(
-            key="spectrometer",
-            label="Spectrometer",
-            state="ready",
-            message=f"Spectrometer backend active: {name}.",
-            connected=True,
-            payload=name,
-        )
-
-    def _record_port_probe_event(
-        self,
-        *,
-        role: str,
-        port: str,
-        assignment: str,
-        action: str,
-        result: str,
-        message: str,
-        owner: str,
-        command: str | None = None,
-        duration_ms: float | None = None,
-    ) -> None:
-        record_port_probe_event(
-            phase="startup",
-            port=port,
-            owner=owner,
-            role=role,
-            assignment=assignment,
-            action=action,
-            command=command,
-            result=result,
-            duration_ms=duration_ms,
-            message=message,
-        )
-
-    def _profile_device_init_step(self, profile: DeviceProfile) -> HardwareInitStepResult:
-        display = profile.display_name or profile.label
-        try:
-            status = self._device_comm_service.connect(profile.label)
-        except Exception as exc:
-            return HardwareInitStepResult(
-                key=profile.label,
-                label=display,
-                state="error",
-                message=f"{display}: {exc}",
-                connected=False,
-                error=str(exc),
-            )
-        probe: object | None = None
-        if profile.type == "pump":
-            try:
-                probe = PumpProbe(
-                    port=status.endpoint or "",
-                    protocol_version=status.identity.get("protocol_version", ""),
-                    serial_number=status.identity.get("serial_number", ""),
-                    channel_count=int(status.identity.get("channel_count", "0") or "0"),
-                    model=status.identity.get("model", ""),
-                )
-            except Exception:
-                probe = None
-        elif profile.type == "valve":
-            try:
-                probe = ControllerProbe(
-                    port=status.endpoint or "",
-                    controller_type=status.driver,
-                    model=status.identity.get("model", ""),
-                    serial_number=status.identity.get("serial_number") or None,
-                    protocol_version=status.identity.get("protocol_version") or None,
-                )
-            except Exception:
-                probe = None
-        return HardwareInitStepResult(
-            key=profile.label,
-            label=display,
-            state="connected",
-            message=f"{display} connected on {status.endpoint}.",
-            connected=True,
-            probe=probe,
-            payload=status,
-        )
-
-    def _pump_scan_step(self) -> HardwareInitStepResult:
-        all_ports = RegloICCClient.list_ports()
-        preferred_ports = [
-            port
-            for port in all_ports
-            if get_port_assignment(port.device) == "pump" and should_probe_port_for_role(port.device, "pump")
-        ]
-        probable_ports = [
-            port
-            for port in all_ports
-            if get_port_assignment(port.device) == "auto"
-            and is_probable_reglo_port(port)
-            and should_probe_port_for_role(port.device, "pump")
-        ]
-        ports = preferred_ports + [port for port in probable_ports if port not in preferred_ports]
-        if not ports:
-            return HardwareInitStepResult(
-                key="pump_scan",
-                label="Pump scan",
-                state="missing",
-                message="No pump controller discovered.",
-                connected=False,
-                payload=[],
-            )
-        found_probes: list[PumpProbe] = []
-        found_profiles: list[DeviceProfile] = []
-        last_error: str | None = None
-        assigned_error: str | None = None
-        for port in ports:
-            assignment = get_port_assignment(port.device)
-            if not should_probe_port_for_role(port.device, "pump"):
-                self._record_port_probe_event(
-                    role="pump",
-                    port=port.device,
-                    assignment=assignment,
-                    action="skip",
-                    result="skipped",
-                    message=f"Port {port.device} is assigned to {assignment} and is excluded from pump probing.",
-                    owner="startup:pump",
-                )
-                continue
-            started = perf_counter()
-            try:
-                probe = RegloICCClient.probe_port(port.device)
-            except Exception as exc:
-                last_error = str(exc)
-                if assignment == "pump" and assigned_error is None:
-                    assigned_error = f"Assigned pump port {port.device} did not respond as Reglo ICC: {exc}"
-                self._record_port_probe_event(
-                    role="pump",
-                    port=port.device,
-                    assignment=assignment,
-                    action="probe",
-                    result="fail",
-                    message=str(exc),
-                    owner="startup:pump",
-                    command="0x!",
-                    duration_ms=(perf_counter() - started) * 1000.0,
-                )
-                continue
-            self._record_port_probe_event(
-                role="pump",
-                port=port.device,
-                assignment=assignment,
-                action="probe",
-                result="success",
-                message=probe.model or "Pump controller",
-                owner="startup:pump",
-                command="0x!",
-                duration_ms=(perf_counter() - started) * 1000.0,
-            )
-            sn = str(probe.serial_number or "").strip()
-            fingerprint = f"reglo-icc:{sn}" if sn and sn.upper() not in {"#", "*", ""} else extract_usb_fingerprint(port.hwid)
-            profile = self._device_comm_service.find_or_create_profile(
-                device_type="pump",
-                fingerprint=fingerprint,
-                endpoint=port.device,
-                identity={
-                    "model": probe.model,
-                    "serial_number": probe.serial_number,
-                    "protocol_version": probe.protocol_version,
-                    "channel_count": str(probe.channel_count),
-                },
-                driver="reglo_icc",
-            )
-            try:
-                self._device_comm_service.connect(profile.label)
-            except Exception:
-                pass
-            found_probes.append(probe)
-            found_profiles.append(profile)
-        if not found_probes:
-            if assigned_error is not None:
-                last_error = assigned_error if last_error is None else f"{assigned_error}; {last_error}"
-            return HardwareInitStepResult(
-                key="pump_scan",
-                label="Pump scan",
-                state="error",
-                message=last_error or "Pump scan completed with no usable device.",
-                connected=False,
-                error=last_error,
-                payload=[],
-            )
-        primary_probe = found_probes[0]
-        primary_profile = found_profiles[0]
-        names = ", ".join(p.label for p in found_profiles)
-        count = len(found_probes)
-        return HardwareInitStepResult(
-            key=primary_profile.label,
-            label="Pump scan",
-            state="connected",
-            message=f"{count} pump controller{'s' if count > 1 else ''} found: {names}.",
-            connected=True,
-            probe=primary_probe,
-            payload=found_probes,
-        )
-
-    def _selector_scan_step(self) -> HardwareInitStepResult:
-        try:
-            devices = detect_amf_selector_devices()
-        except Exception as exc:
-            return HardwareInitStepResult(
-                key="selector_scan",
-                label="Selector scan",
-                state="error",
-                message=f"Selector scan failed: {exc}",
-                connected=False,
-                error=str(exc),
-                payload=[],
-            )
-        if not devices:
-            return HardwareInitStepResult(
-                key="selector_scan",
-                label="Selector scan",
-                state="missing",
-                message="Selector not discovered at startup.",
-                connected=False,
-                payload=[],
-            )
-        found_profiles: list[DeviceProfile] = []
-        for device in devices:
-            port_name = getattr(device, "port", "")
-            sn = getattr(device, "serial_number", None) or ""
-            fingerprint = f"amf-selector:{sn}" if sn else extract_usb_fingerprint(getattr(device, "hwid", ""))
-            identity = {
-                "model": getattr(device, "model", ""),
-                "serial_number": sn,
-                "protocol_version": getattr(device, "protocol_version", "") or "",
-                "controller_type": getattr(device, "controller_type", "amf-mswitch"),
-            }
-            profile = self._device_comm_service.find_or_create_profile(
-                device_type="selector",
-                fingerprint=fingerprint,
-                endpoint=port_name,
-                identity=identity,
-                driver="amf-mswitch",
-            )
-            found_profiles.append(profile)
-        first = devices[0]
-        port_name = getattr(first, "port", "unknown")
-        primary_profile = found_profiles[0] if found_profiles else None
-        return HardwareInitStepResult(
-            key=primary_profile.label if primary_profile else "selector_scan",
-            label="Selector scan",
-            state="discovered",
-            message=f"Selector discovered on {port_name}.",
-            connected=False,
-            probe=first,
-            payload=devices,
-        )
-
-    def _valve_scan_step(self) -> HardwareInitStepResult:
-        all_ports = SerialController.list_ports()
-        preferred_ports = [
-            port
-            for port in all_ports
-            if get_port_assignment(port.device) == "valve" and should_probe_port_for_role(port.device, "valve")
-        ]
-        likely_ports = [
-            port
-            for port in all_ports
-            if get_port_assignment(port.device) == "auto"
-            and controller_port_priority(port) > 0
-            and should_probe_port_for_role(port.device, "valve")
-        ]
-        ports = preferred_ports + [port for port in likely_ports if port not in preferred_ports]
-        if not ports:
-            return HardwareInitStepResult(
-                key="valve_scan",
-                label="Valve scan",
-                state="missing",
-                message="No valve controller discovered.",
-                connected=False,
-                payload=None,
-            )
-        ports = sorted(ports, key=controller_port_priority, reverse=True)
-        last_error: str | None = None
-        assigned_error: str | None = None
-        for port in ports:
-            assignment = get_port_assignment(port.device)
-            if not should_probe_port_for_role(port.device, "valve"):
-                self._record_port_probe_event(
-                    role="valve",
-                    port=port.device,
-                    assignment=assignment,
-                    action="skip",
-                    result="skipped",
-                    message=f"Port {port.device} is assigned to {assignment} and is excluded from valve probing.",
-                    owner="startup:valve",
-                )
-                continue
-            started = perf_counter()
-            try:
-                probe_result = self._device_comm_service.probe_endpoint(port.device, "valve")
-            except Exception as exc:
-                last_error = str(exc)
-                if assignment == "valve" and assigned_error is None:
-                    assigned_error = f"Assigned valve port {port.device} did not respond as a valve controller: {exc}"
-                self._record_port_probe_event(
-                    role="valve",
-                    port=port.device,
-                    assignment=assignment,
-                    action="probe",
-                    result="fail",
-                    message=str(exc),
-                    owner="startup:valve",
-                    duration_ms=(perf_counter() - started) * 1000.0,
-                )
-                continue
-            if not probe_result.success:
-                last_error = probe_result.error or "Valve probe failed."
-                if assignment == "valve" and assigned_error is None:
-                    assigned_error = f"Assigned valve port {port.device} did not respond as a valve controller: {probe_result.error or 'unknown error'}"
-                self._record_port_probe_event(
-                    role="valve",
-                    port=port.device,
-                    assignment=assignment,
-                    action="probe",
-                    result="fail",
-                    message=probe_result.error or "Valve probe failed.",
-                    owner="startup:valve",
-                    duration_ms=(perf_counter() - started) * 1000.0,
-                )
-                continue
-            probe = ControllerProbe(
-                port=port.device,
-                controller_type=probe_result.detected_type or "valve",
-                model=probe_result.identity.get("model", ""),
-                serial_number=probe_result.identity.get("serial_number") or None,
-                protocol_version=probe_result.identity.get("protocol_version") or None,
-            )
-            self._record_port_probe_event(
-                role="valve",
-                port=port.device,
-                assignment=assignment,
-                action="probe",
-                result="success",
-                message=probe.model or "Valve controller",
-                owner="startup:valve",
-                duration_ms=(perf_counter() - started) * 1000.0,
-            )
-            fingerprint = extract_usb_fingerprint(port.hwid)
-            profile = self._device_comm_service.find_or_create_profile(
-                device_type="valve",
-                fingerprint=fingerprint,
-                endpoint=port.device,
-                identity={
-                    "model": probe.model,
-                    "serial_number": probe.serial_number or "",
-                    "protocol_version": probe.protocol_version or "",
-                    "controller_type": probe.controller_type,
-                },
-                driver=probe.controller_type,
-            )
-            try:
-                self._device_comm_service.connect(profile.label)
-            except Exception:
-                pass
-            return HardwareInitStepResult(
-                key=profile.label,
-                label="Valve scan",
-                state="connected",
-                message=f"Valve controller connected on {port.device}.",
-                connected=True,
-                probe=probe,
-                payload=probe,
-            )
-        return HardwareInitStepResult(
-            key="valve_scan",
-            label="Valve scan",
-            state="error",
-            message=assigned_error or last_error or "Valve scan completed with no usable device.",
-            connected=False,
-            error=assigned_error or last_error,
-            payload=None,
-        )
-
+        return hardware_init_steps_for(self)
     def _emit_hardware_init_progress(self, percent: int, text: str) -> None:
         self.hardware_init_progress.emit(max(0, min(int(percent), 100)), str(text))
 
@@ -4245,40 +2705,7 @@ class MainWindow(QMainWindow):
         self._run_gui_callback_timed("startup_loading", _callback)
 
     def _render_startup_loading_indicator(self) -> None:
-        label = getattr(self, "_startup_loading_label", None)
-        if label is None:
-            return
-        size = 22
-        pixmap = QPixmap(size, size)
-        pixmap.fill(QColor(0, 0, 0, 0))
-
-        painter = QPainter(pixmap)
-        try:
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-
-            center = size / 2.0
-            ring_radius = 8.8
-            dot_radius = 2.0
-            base_color = QColor("#39c7ba")
-            trail_alphas = [255, 234, 206, 176, 146, 120, 96, 76, 58, 44, 32, 22]
-
-            painter.setPen(Qt.PenStyle.NoPen)
-
-            frame_index = int(getattr(self, "_startup_loading_frame_index", 0)) % 12
-            for index in range(12):
-                distance = (index - frame_index) % 12
-                alpha = trail_alphas[distance]
-                color = QColor(base_color)
-                color.setAlpha(alpha)
-                angle = (index / 12.0) * 6.283185307179586 - 1.5707963267948966
-                x_pos = center + ring_radius * math.cos(angle)
-                y_pos = center + ring_radius * math.sin(angle)
-                painter.setBrush(color)
-                painter.drawEllipse(int(round(x_pos - dot_radius)), int(round(y_pos - dot_radius)), 4, 4)
-        finally:
-            painter.end()
-        label.setPixmap(pixmap)
+        render_startup_loading_indicator_for(self)
 
     def _finish_hardware_initialization(self, text: str = "Hardware initialization scan finished.") -> None:
         finish_hardware_initialization_for(self, text)
@@ -4313,80 +2740,9 @@ class MainWindow(QMainWindow):
         update_window_mode_label(self)
 
     def eventFilter(self, obj, event) -> bool:  # pragma: no cover - GUI runtime path
-        if obj is getattr(self, "project_destination_edit", None):
-            event_type = event.type()
-            if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                self._choose_recording_project_destination()
-                return True
-        if obj is getattr(self, "trace_stats_label", None):
-            event_type = event.type()
-            if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                self._cycle_trace_stats_metric()
-                return True
-        if obj is getattr(self, "_processed_spectra_header_label", None):
-            event_type = event.type()
-            if event_type == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
-                self._activate_experimental_control_view()
-                return True
-        experiment_header = getattr(getattr(self, "_experiment_control_window", None), "_experiment_control_header_label", None)
-        if obj is experiment_header:
-            event_type = event.type()
-            if event_type == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
-                self._activate_spectra_view()
-                return True
-        if event.type() == QEvent.Type.Paint:
-            startup_painted = False
-            startup_widget_label = None
-            if obj is getattr(self, "_main_content_widget", None):
-                startup_widget_label = "main_content"
-                startup_painted = True
-            elif obj is getattr(self, "_spectra_block", None):
-                startup_widget_label = "spectra_block"
-                startup_painted = True
-            elif obj is getattr(self, "_sensorgram_block", None):
-                startup_widget_label = "sensorgram_block"
-                startup_painted = True
-            else:
-                spectrum_viewport = getattr(getattr(self, "spectrum_plot", None), "viewport", None)
-                if spectrum_viewport is not None and obj is spectrum_viewport():
-                    startup_widget_label = "spectrum_viewport"
-                    startup_painted = True
-                else:
-                    trace_viewport = getattr(getattr(self, "trace_plot", None), "viewport", None)
-                    if trace_viewport is not None and obj is trace_viewport():
-                        startup_widget_label = "trace_viewport"
-                        startup_painted = True
-            if startup_painted:
-                startup_show_t0 = getattr(self, "_startup_show_requested_t0", None)
-                if startup_show_t0 is not None:
-                    startup_elapsed_ms = (perf_counter() - startup_show_t0) * 1000.0
-                    if not getattr(self, "_startup_widget_paint_reported", False):
-                        self._startup_widget_paint_reported = set()
-                    painted = getattr(self, "_startup_widget_paint_reported", set())
-                    if startup_widget_label not in painted:
-                        painted.add(startup_widget_label)
-                        self._startup_widget_paint_reported = painted
-                        self._log_info(
-                            f"Startup +{startup_elapsed_ms:.1f} ms: first paint on {startup_widget_label}"
-                        )
-        spectrum_viewport = getattr(getattr(self, "spectrum_plot", None), "viewport", None)
-        if spectrum_viewport is not None and obj is spectrum_viewport():
-            event_type = event.type()
-        if obj is self._title_bar_widget:
-            event_type = event.type()
-            if event_type == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
-                self._toggle_window_max_restore()
-                return True
-            if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                self._title_bar_drag_active = True
-                self._title_bar_drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-                return True
-            if event_type == QEvent.Type.MouseMove and self._title_bar_drag_active:
-                if not self.isMaximized() and event.buttons() & Qt.MouseButton.LeftButton:
-                    self.move(event.globalPosition().toPoint() - self._title_bar_drag_offset)
-                return True
-            if event_type in {QEvent.Type.MouseButtonRelease, QEvent.Type.Leave}:
-                self._title_bar_drag_active = False
+        result = event_filter_for(self, obj, event)
+        if result is True:
+            return True
         return super().eventFilter(obj, event)
 
     def changeEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
@@ -4567,37 +2923,7 @@ class MainWindow(QMainWindow):
         )
 
     def _apply_temporal_smoothing(self, processed: Spectrum | None) -> Spectrum | None:
-        if processed is None:
-            self._temporal_processed_history.clear()
-            self._temporal_history_key = None
-            return None
-
-        settings = self._current_processing_settings()
-        window = max(int(getattr(settings, "temporal_smoothing", 1)), 1)
-        key = self._temporal_history_token(processed)
-        if key != self._temporal_history_key:
-            self._temporal_processed_history.clear()
-            self._temporal_history_key = key
-
-        self._temporal_processed_history.append(processed)
-        if len(self._temporal_processed_history) > window:
-            self._temporal_processed_history = self._temporal_processed_history[-window:]
-        if window <= 1 or len(self._temporal_processed_history) == 1:
-            return processed
-
-        stack = np.vstack([item.values for item in self._temporal_processed_history])
-        averaged_values = np.nanmean(stack, axis=0)
-        return Spectrum(
-            wavelengths_nm=processed.wavelengths_nm.copy(),
-            values=averaged_values,
-            y_label=processed.y_label,
-            acquired_at=processed.acquired_at,
-            metadata={
-                **processed.metadata,
-                "temporal_smoothing": window,
-                "temporal_average_count": len(self._temporal_processed_history),
-            },
-        )
+        return apply_temporal_smoothing_for(self, processed)
 
     def _enqueue_plot_processing(self) -> None:
         enqueue_plot_processing_for(self)
@@ -4701,6 +3027,8 @@ class MainWindow(QMainWindow):
         self._sensorgram_metric_archive_reload_loading = False
         self._sensorgram_metric_archive_reload_task = None
         self._sensorgram_metric_archive_reload_pending_token = None
+        if self._closing:
+            return
         self.status_label.setText(f"Sensorgram reload failed: {message}")
         self._log_error(f"Sensorgram measurement-file reload failed: {message}")
 
@@ -4774,190 +3102,8 @@ class MainWindow(QMainWindow):
     def _handle_trace_mouse_moved(self, event) -> None:
         handle_metric_mouse_moved_for(self, event)
 
-    def _refresh_spectrum_plot(self, processed: Spectrum | None, fit: Spectrum | None) -> None:
-        if self._plots_frozen:
-            return
-        view_x_min = view_x_max = view_width_px = None
-        try:
-            view_box = self.spectrum_plot.getPlotItem().vb
-            view_range = view_box.viewRange()
-            x_range = view_range[0]
-            view_x_min = float(x_range[0])
-            view_x_max = float(x_range[1])
-            scene_rect = view_box.sceneBoundingRect()
-            if scene_rect is not None:
-                view_width_px = float(scene_rect.width())
-                if not np.isfinite(view_width_px):
-                    view_width_px = None
-        except Exception:
-            view_x_min = view_x_max = view_width_px = None
-
-        residual_visible = bool(fit is not None and self.show_residual_button.isChecked())
-        show_gaussian = self._needs_gaussian_metric()
-        render_key = spectrum_render_cache_key(
-            processed,
-            fit,
-            view_x_min=view_x_min,
-            view_x_max=view_x_max,
-            view_width_px=view_width_px,
-            residual_visible=residual_visible,
-            show_gaussian=show_gaussian,
-            spectrum_tracking_mode=self._current_processing_settings().spectrum_tracking_mode,
-        )
-        if render_key == self._spectrum_render_cache_key:
-            return
-        self._spectrum_render_cache_key = render_key
-        self._visible_processed_plot = processed
-        self._visible_fit_plot = fit
-        if processed is None:
-            self.spectrum_curve.setData([], [])
-            self.fit_curve.setData([], [])
-            self._clear_residual_display()
-            self.fit_region_item.hide()
-            self.max_marker.setData([], [])
-            self.poly_marker.setData([], [])
-            self.gaussian_marker.setData([], [])
-            self.centroid_marker.setData([], [])
-            self.spectrum_plot.setLabel("left", "Signal")
-            self._update_residual_axis_visibility(False)
-            self._spectrum_processing_region_bounds = None
-            self._spectrum_fit_region_bounds = None
-            self._last_spectrum_curve_update_ms = None
-            self._last_spectrum_fit_update_ms = None
-            self._last_spectrum_marker_update_ms = None
-            self._last_spectrum_residual_update_ms = None
-            return
-
-        low = float(np.min(processed.wavelengths_nm))
-        high = float(np.max(processed.wavelengths_nm))
-        processing_bounds = (low, high)
-        if processing_bounds != self._spectrum_processing_region_bounds:
-            self.processing_region_item.setRegion(processing_bounds)
-            self._spectrum_processing_region_bounds = processing_bounds
-
-        display_x, display_y = downsample_spectrum_series_for_view(
-            np.asarray(processed.wavelengths_nm, dtype=np.float64),
-            np.asarray(processed.values, dtype=np.float64),
-            view_x_min=view_x_min,
-            view_x_max=view_x_max,
-            view_width_px=view_width_px,
-        )
-        line_step_mode = getattr(self, "_sensorgram_line_step_mode", None)
-        curve_started = perf_counter()
-        if line_step_mode == "spline":
-            spline_x, spline_y = _spline_render_series(display_x, display_y)
-            self.spectrum_curve.setData(spline_x, spline_y, skipFiniteCheck=True, stepMode=False)
-        elif line_step_mode is None:
-            self.spectrum_curve.setData(display_x, display_y, skipFiniteCheck=True, stepMode=False)
-        else:
-            self.spectrum_curve.setData(display_x, display_y, skipFiniteCheck=True, stepMode=line_step_mode)
-        self._last_spectrum_curve_update_ms = (perf_counter() - curve_started) * 1000.0
-        if fit is not None:
-            fit_values = np.asarray(fit.values, dtype=np.float64)
-            fit_low = float(fit.metadata.get("fit_window_min_nm", np.min(fit.wavelengths_nm)))
-            fit_high = float(fit.metadata.get("fit_window_max_nm", np.max(fit.wavelengths_nm)))
-            display_fit_x, _ = clip_series_to_window(
-                display_x,
-                display_y,
-                window_min=fit_low,
-                window_max=fit_high,
-            )
-            if len(display_fit_x) > 0 and len(fit.wavelengths_nm) > 0:
-                display_fit_y = np.interp(
-                    display_fit_x,
-                    np.asarray(fit.wavelengths_nm, dtype=np.float64),
-                    fit_values,
-                )
-            else:
-                display_fit_x = np.empty(0, dtype=np.float64)
-                display_fit_y = fit_values[:0]
-            fit_started = perf_counter()
-            if line_step_mode == "spline":
-                fit_curve_x, fit_curve_y = _spline_render_series(display_fit_x, display_fit_y)
-                self.fit_curve.setData(fit_curve_x, fit_curve_y, skipFiniteCheck=True, stepMode=False)
-            elif line_step_mode is None:
-                self.fit_curve.setData(display_fit_x, display_fit_y, skipFiniteCheck=True, stepMode=False)
-            else:
-                self.fit_curve.setData(display_fit_x, display_fit_y, skipFiniteCheck=True, stepMode=line_step_mode)
-            self._last_spectrum_fit_update_ms = (perf_counter() - fit_started) * 1000.0
-            self.fit_region_item.show()
-            residual_started = perf_counter()
-            if residual_visible:
-                residual_base = np.interp(
-                    display_fit_x,
-                    np.asarray(processed.wavelengths_nm, dtype=np.float64),
-                    np.asarray(processed.values, dtype=np.float64),
-                )
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    residual_values = np.where(
-                        np.abs(display_fit_y) > 1e-12,
-                        ((residual_base - display_fit_y) / display_fit_y) * 100.0,
-                        np.nan,
-                    )
-                self._render_residual_display(display_fit_x, residual_values)
-                if not getattr(self, "_residual_axis_autoscaled", False):
-                    self._autoscale_residual_axis()
-            else:
-                self._clear_residual_display()
-            self._last_spectrum_residual_update_ms = (perf_counter() - residual_started) * 1000.0
-            fit_bounds = (fit_low, fit_high)
-            if fit_bounds != self._spectrum_fit_region_bounds:
-                self.fit_region_item.setRegion(fit_bounds)
-                self._spectrum_fit_region_bounds = fit_bounds
-        else:
-            fit_started = perf_counter()
-            self.fit_curve.setData([], [])
-            self._last_spectrum_fit_update_ms = (perf_counter() - fit_started) * 1000.0
-            self.fit_region_item.hide()
-            residual_started = perf_counter()
-            self._clear_residual_display()
-            self._last_spectrum_residual_update_ms = (perf_counter() - residual_started) * 1000.0
-            fit_bounds = (low, low)
-            if fit_bounds != self._spectrum_fit_region_bounds:
-                self.fit_region_item.setRegion(fit_bounds)
-                self._spectrum_fit_region_bounds = fit_bounds
-        self._update_residual_axis_visibility(residual_visible)
-        self.spectrum_plot.setLabel("left", processed.y_label)
-        marker_started = perf_counter()
-        finite_indices = np.flatnonzero(np.isfinite(processed.values))
-        if len(finite_indices) == 0:
-            self.max_marker.setData([], [])
-            self.poly_marker.setData([], [])
-            self.centroid_marker.setData([], [])
-            self.gaussian_marker.setData([], [])
-            self._last_spectrum_marker_update_ms = (perf_counter() - marker_started) * 1000.0
-            return
-        max_index = int(finite_indices[int(np.argmax(np.asarray(processed.values, dtype=np.float64)[finite_indices]))])
-        max_x = float(processed.wavelengths_nm[max_index])
-        max_y = float(processed.values[max_index])
-        poly_x = self._compute_metric_nm("poly_max", processed, fit)
-        if fit is not None and len(fit.wavelengths_nm) > 0:
-            poly_y = float(np.interp(poly_x, fit.wavelengths_nm, fit.values))
-        else:
-            poly_y = float(np.interp(poly_x, processed.wavelengths_nm, processed.values))
-        show_gaussian = self._needs_gaussian_metric()
-        if show_gaussian:
-            gaussian_x = self._compute_metric_nm("gaussian_center", processed, fit)
-            if fit is not None and fit.metadata.get("fit_method") == "gaussian" and len(fit.wavelengths_nm) > 0:
-                gaussian_y = float(np.interp(gaussian_x, fit.wavelengths_nm, fit.values))
-            else:
-                gaussian_y = float(np.interp(gaussian_x, processed.wavelengths_nm, processed.values))
-            if np.isfinite(gaussian_x) and np.isfinite(gaussian_y):
-                self.gaussian_marker.setData([{"pos": (float(gaussian_x), float(gaussian_y)), "data": "gaussian"}])
-                self.gaussian_marker.show()
-            else:
-                self.gaussian_marker.setData([], [])
-                self.gaussian_marker.hide()
-        else:
-            self.gaussian_marker.setData([], [])
-            self.gaussian_marker.hide()
-        centroid_x = self._compute_centroid_nm(processed, fit)
-        centroid_y = float(np.interp(centroid_x, processed.wavelengths_nm, processed.values))
-        self._set_scatter_marker(self.max_marker, max_x, max_y, "max")
-        self._set_scatter_marker(self.poly_marker, poly_x, poly_y, "poly")
-        self._set_scatter_marker(self.centroid_marker, centroid_x, centroid_y, "centroid")
-        self._last_spectrum_marker_update_ms = (perf_counter() - marker_started) * 1000.0
-        self._notify_startup_data_rendered("spectrum")
+    def _refresh_spectrum_plot(self, processed, fit) -> None:
+        refresh_spectrum_plot_for(self, processed, fit)
     def _set_scatter_marker(self, marker: pg.ScatterPlotItem, x: float, y: float, label: str) -> None:
         if not (np.isfinite(x) and np.isfinite(y)):
             marker.setData([], [])
@@ -5066,32 +3212,7 @@ class MainWindow(QMainWindow):
         cycle_sensorgram_metric_y_axis_mode(self)
 
     def _active_trace_series(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-        cache = getattr(self, "_plot_view_cache", None)
-
-        def _build_active_series() -> dict[str, tuple[np.ndarray, np.ndarray]]:
-            selected_metrics = set(self._selected_trace_metrics())
-            if cache is not None:
-                active = cache.live_absolute_metric_series(selected_metrics)
-                if active:
-                    return active
-            archive_path = getattr(self, "_metric_archive_path", None)
-            if archive_path is not None:
-                try:
-                    archive_series = load_processed_metric_history(
-                        Path(archive_path),
-                        sensorgram_metric_archive_names(selected_metrics),
-                        time_range_s=None,
-                    )
-                except Exception:
-                    archive_series = {}
-                if archive_series:
-                    return archive_series
-            return {}
-
-        if cache is None:
-            return _build_active_series()
-        token = build_active_trace_series_token(self)
-        return cache.cached_active_trace_series(token, _build_active_series)
+        return active_trace_series_for(self)
 
     def _update_spectrum_stats(self, processed: Spectrum | None, fit: Spectrum | None) -> None:
         update_spectrum_stats_for(self, processed, fit)
@@ -5199,48 +3320,11 @@ class MainWindow(QMainWindow):
         )
         return button
 
-    def _apply_text_widget_font_size(
-        self,
-        widget: QTextEdit | None,
-        size_points: float,
-        *,
-        minimum: float = 7.0,
-        maximum: float = 16.0,
-    ) -> None:
-        if widget is None:
-            return
-        font = QFont(widget.font())
-        new_size = max(minimum, min(float(size_points), maximum))
-        font.setPointSizeF(new_size)
-        widget.setFont(font)
-        try:
-            widget.document().setDefaultFont(font)
-        except Exception:
-            pass
-        try:
-            setattr(widget, "_panel_font_size_pt", new_size)
-        except Exception:
-            pass
+    def _apply_text_widget_font_size(self, widget, size_points: float, *, minimum: float = 7.0, maximum: float = 16.0) -> None:
+        apply_text_widget_font_size_for(self, widget, size_points, minimum=minimum, maximum=maximum)
 
-    def _adjust_text_widget_font_size(
-        self,
-        widget: QTextEdit | None,
-        delta_points: float,
-        *,
-        minimum: float = 7.0,
-        maximum: float = 16.0,
-    ) -> None:
-        if widget is None:
-            return
-        current_size = getattr(widget, "_panel_font_size_pt", None)
-        if not isinstance(current_size, (int, float)):
-            current_font = QFont(widget.font())
-            current_size = float(current_font.pointSizeF())
-            if current_size <= 0:
-                current_size = float(current_font.pointSize()) if current_font.pointSize() > 0 else 9.0
-            if current_size <= 0:
-                current_size = 9.0
-        self._apply_text_widget_font_size(widget, float(current_size) + float(delta_points), minimum=minimum, maximum=maximum)
+    def _adjust_text_widget_font_size(self, widget, delta_points: float, *, minimum: float = 7.0, maximum: float = 16.0) -> None:
+        adjust_text_widget_font_size_for(self, widget, delta_points, minimum=minimum, maximum=maximum)
 
     def _increase_log_terminal_font_size(self) -> None:
         self._adjust_text_widget_font_size(getattr(self, "log_terminal", None), 1.0)
@@ -5290,120 +3374,14 @@ class MainWindow(QMainWindow):
             self.acquire_reference_button.setIcon(reference_icon(self._session.state.reference is not None))
 
     def _export_current_plot(self) -> None:
-        plot_mode = self.PLOT_MODES[self.plot_selector.currentText()]
-        spectrum = self._last_processed_plot
-        if spectrum is None:
-            self.status_label.setText("There is no plotted data to export.")
-            return
-
-        default_name = f"{plot_mode}_{spectrum.acquired_at.strftime('%Y%m%d_%H%M%S')}.png"
-        default_path = Path.cwd() / "data" / default_name
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export graph",
-            str(default_path),
-            "PNG image (*.png);;SVG vector (*.svg);;CSV data (*.csv)",
-        )
-        if not file_path:
-            self.status_label.setText("Export cancelled.")
-            return
-
-        destination = Path(file_path)
-        suffix = destination.suffix.lower()
-        if suffix == ".csv":
-            export_spectrum_to_csv(destination, spectrum)
-            self.status_label.setText(f"Exported {plot_mode} data to {file_path}")
-            return
-
-        if suffix not in {".png", ".svg"}:
-            destination = destination.with_suffix(".png")
-            suffix = ".png"
-
-        if suffix == ".png":
-            exporter = pg_exporters.ImageExporter(self.spectrum_plot.plotItem)
-            exporter.parameters()["width"] = 1600
-            exporter.export(str(destination))
-        else:
-            exporter = pg_exporters.SVGExporter(self.spectrum_plot.plotItem)
-            exporter.export(str(destination))
-        self.status_label.setText(f"Exported {plot_mode} graph to {destination}")
+        export_current_plot_for(self)
 
     def _show_error(self, message: str) -> None:
         self.status_label.setText(message)
         self._log_error(message)
 
     def closeEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
-        self._closing = True
-        self._log_info("Closing application.")
-        settings_dialog = getattr(self, "_sensorgram_settings_dialog", None)
-        if settings_dialog is not None:
-            try:
-                settings_dialog.close()
-            except Exception:
-                pass
-            self._sensorgram_settings_dialog = None
-        self._acquisition_state_timer.stop()
-        self._ui_state_timer.stop()
-        self._persist_acquisition_state()
-        self._save_ui_state()
-        if self._experiment_control_window is not None:
-            try:
-                self._experiment_control_window.shutdown_devices()
-            except Exception as exc:
-                self._log_warning(f"Experimental control device shutdown failed: {exc}")
-            self._experiment_control_window.save_ui_state()
-            self._experiment_control_window.close()
-        self._pending_manual_kind = None
-        self._pending_source_mode = None
-        self._pending_auto_integration = False
-        self._resume_live_after_manual = False
-        self._resume_live_after_source_switch = False
-        self._resume_live_after_auto_integration = False
-        self._live_active = False
-        self._simulation_refresh_timer.stop()
-        self._ui_task_scheduler.clear()
-        self._ui_heartbeat_timer.stop()
-        self._live_stop_event.set()
-        if self._live_worker is not None and self._live_worker.is_alive():
-            try:
-                self._live_worker.stop()
-                self._live_worker.join(timeout=2.0)
-                if self._live_worker.is_alive():
-                    self._log_warning("Live acquisition worker did not exit cleanly; terminating it.")
-                    self._live_worker.terminate()
-                    self._live_worker.join(timeout=1.0)
-            except Exception as exc:
-                self._log_warning(f"Live acquisition worker shutdown failed: {exc}")
-        self._live_worker = None
-        if self._live_processing_worker is not None:
-            try:
-                self._live_processing_worker.stop()
-                self._live_processing_worker.join(timeout=2.0)
-                if self._live_processing_worker.is_alive():
-                    self._log_warning("Live processing worker did not exit cleanly; terminating it.")
-                    self._live_processing_worker.terminate()
-                    self._live_processing_worker.join(timeout=1.0)
-            except Exception as exc:
-                self._log_warning(f"Live processing worker shutdown failed: {exc}")
-        self._live_processing_worker = None
-        self._reset_live_accumulator()
-        if self._measurement_active:
-            self._stop_measurement_run()
-        elif self._measurement_writer is not None:
-            self._flush_measurement_frames(force=True)
-            self._measurement_writer.close()
-            self._measurement_writer = None
-        self._busy = False
-        try:
-            self._thread_pool.waitForDone(3000)
-        except TypeError:
-            self._thread_pool.waitForDone()
-        try:
-            log_handler = getattr(self, "_log_handler", None)
-            if log_handler is not None:
-                self._ui_logger.removeHandler(log_handler)
-        except Exception:
-            pass
+        close_event_for(self, event)
         super().closeEvent(event)
         app = QApplication.instance()
         if app is not None:

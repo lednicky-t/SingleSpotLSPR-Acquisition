@@ -34,12 +34,24 @@ def _write_payload(payload: dict, path: Path) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+# Renamed fields from older config/HDF5 schemas: old_name → new_name.
+# When both names are present the new name wins (no-op rename).
+_PROCESSING_SETTINGS_FIELD_RENAMES: dict[str, str] = {
+    "peak_tracking_mode": "spectrum_tracking_mode",
+}
+
+
 def _coerce_processing_settings(raw: object) -> ProcessingSettings:
     defaults = asdict(ProcessingSettings())
     if isinstance(raw, dict):
-        if "peak_tracking_mode" in raw and "spectrum_tracking_mode" not in raw:
-            raw = dict(raw)
-            raw["spectrum_tracking_mode"] = raw["peak_tracking_mode"]
+        raw = dict(raw)
+        for old_key, new_key in _PROCESSING_SETTINGS_FIELD_RENAMES.items():
+            if old_key in raw and new_key not in raw:
+                raw[new_key] = raw[old_key]
+        # Older format stored fit_enabled=True with fit_method absent or "none".
+        if raw.get("fit_enabled") is True:
+            if raw.get("fit_method") in (None, "none"):
+                raw["fit_method"] = "poly"
         defaults.update({key: value for key, value in raw.items() if key in defaults})
     if defaults.get("baseline_method") == "asls":
         defaults["baseline_method"] = "linear"
@@ -117,9 +129,6 @@ def load_processing_settings(path: Path = DEFAULT_CONFIG_PATH) -> ProcessingSett
 
     payload = _load_payload(path)
     processing = payload.get("processing", {})
-    if isinstance(processing, dict) and processing.get("fit_enabled") is True and processing.get("fit_method") == "none":
-        processing = dict(processing)
-        processing["fit_method"] = "poly"
     return _coerce_processing_settings(processing)
 
 

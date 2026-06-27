@@ -4,6 +4,7 @@ from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QTabBar, QWidget, QToolButton
 from lspr_app.gui.icon_helpers import math_function_tab_icon, prism_tab_icon, tabler_icon, tint_tabler_icon
+from lspr_app.gui.main_window_state import apply_source_mode_for
 
 
 def install_source_link_buttons(window) -> None:
@@ -168,7 +169,7 @@ def request_source_mode_switch(window, new_mode: str, select_tab_index: int | No
     if window._live_active:
         window._stop_live_acquisition("Switching source...")
     window._log_info(f"Switching source to {new_mode}.")
-    window._apply_source_mode(new_mode, restart_live=was_live)
+    apply_source_mode_for(window, new_mode, restart_live=was_live)
     if select_tab_index is not None:
         window.source_tabs.blockSignals(True)
         window.source_tabs.setCurrentIndex(select_tab_index)

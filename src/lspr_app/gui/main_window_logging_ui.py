@@ -7,6 +7,53 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import QTextEdit, QToolButton
 
+
+def apply_text_widget_font_size_for(
+    window,
+    widget: QTextEdit | None,
+    size_points: float,
+    *,
+    minimum: float = 7.0,
+    maximum: float = 16.0,
+) -> None:
+    """Set the font size on *widget*, clamped to [minimum, maximum] pt."""
+    if widget is None:
+        return
+    font = QFont(widget.font())
+    new_size = max(minimum, min(float(size_points), maximum))
+    font.setPointSizeF(new_size)
+    widget.setFont(font)
+    try:
+        widget.document().setDefaultFont(font)
+    except Exception:
+        pass
+    try:
+        setattr(widget, "_panel_font_size_pt", new_size)
+    except Exception:
+        pass
+
+
+def adjust_text_widget_font_size_for(
+    window,
+    widget: QTextEdit | None,
+    delta_points: float,
+    *,
+    minimum: float = 7.0,
+    maximum: float = 16.0,
+) -> None:
+    """Shift the font size on *widget* by *delta_points*, clamped to [minimum, maximum] pt."""
+    if widget is None:
+        return
+    current_size = getattr(widget, "_panel_font_size_pt", None)
+    if not isinstance(current_size, (int, float)):
+        current_font = QFont(widget.font())
+        current_size = float(current_font.pointSizeF())
+        if current_size <= 0:
+            current_size = float(current_font.pointSize()) if current_font.pointSize() > 0 else 9.0
+        if current_size <= 0:
+            current_size = 9.0
+    apply_text_widget_font_size_for(window, widget, float(current_size) + float(delta_points), minimum=minimum, maximum=maximum)
+
 from lspr_app.diagnostics import DiagnosticsConfig
 from lspr_app.gui.logging_utils import GuiLogBridge, GuiLogHandler, SUCCESS_LOG_LEVEL
 from lspr_ui import flow_tabler_icon, tint_tabler_icon
@@ -62,7 +109,15 @@ def initialize_logging_ui_for(window) -> None:
     window._deep_timing_enabled = diagnostics.deep_timing_enabled
     window._diagnostics_panel_enabled = diagnostics.diagnostics_panel_enabled
     window._gui_log_enabled = diagnostics.gui_log_enabled
-    window._gui_log_min_level = int(diagnostics.gui_log_min_level)
+    _saved_log_level = None
+    try:
+        from lspr_app.storage.app_config import load_app_setting as _las
+        _saved_log_level = _las("gui_log_min_level", None)
+    except Exception:
+        pass
+    window._gui_log_min_level = (
+        int(_saved_log_level) if _saved_log_level is not None else int(diagnostics.gui_log_min_level)
+    )
     window._file_log_min_level = int(diagnostics.file_log_min_level)
     window.log_terminal = LogTerminalTextEdit(window)
     window.log_terminal.setObjectName("logTerminal")
@@ -72,7 +127,7 @@ def initialize_logging_ui_for(window) -> None:
     window.log_terminal.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
     window.log_terminal.setMaximumHeight(190)
     window.log_terminal.setMinimumHeight(150)
-    window._apply_text_widget_font_size(window.log_terminal, 8.0, minimum=7.0, maximum=16.0)
+    apply_text_widget_font_size_for(window, window.log_terminal, 8.0, minimum=7.0, maximum=16.0)
     window.log_terminal.document().setMaximumBlockCount(300)
     window.log_terminal.setToolTip("Live event log for acquisition, processing, and controller activity.")
     window.log_terminal.setVisible(window._diagnostics_panel_enabled)

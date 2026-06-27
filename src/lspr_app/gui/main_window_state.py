@@ -1,7 +1,11 @@
 ﻿from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QRect
+from PyQt6.QtCore import Qt, QRect, QTimer
+from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import QApplication
+
+from lspr_app.gui.main_window_logging_ui import apply_text_widget_font_size_for
+from lspr_app.gui.main_window_plotting import apply_metric_color_styles_for
 from time import perf_counter
 from copy import deepcopy
 
@@ -795,7 +799,7 @@ def restore_ui_state(window) -> None:
                     if isinstance(sensorgram_colors, dict):
                         sensorgram_colors[mode] = color
         if hasattr(window, "_apply_metric_color_styles"):
-            window._apply_metric_color_styles()
+            apply_metric_color_styles_for(window)
     if not have_new_metric_state and isinstance(trace_stats_metric_name, str) and trace_stats_metric_name:
         current_stats = normalize_sensorgram_metric_name(trace_stats_metric_name)
         if current_stats in sensorgram_metric_order(window):
@@ -901,13 +905,13 @@ def restore_ui_state(window) -> None:
         elif hasattr(window, "log_terminal"):
             window.log_terminal.setVisible(visible)
         if hasattr(window, "_apply_metric_color_styles"):
-            window._apply_metric_color_styles()
+            apply_metric_color_styles_for(window)
     if isinstance(sensorgram_line_mode, str):
         window._sensorgram_line_step_mode = window._normalize_sensorgram_line_mode(sensorgram_line_mode)
     if isinstance(sensorgram_line_width_px, (int, float)) and float(sensorgram_line_width_px) > 0:
         window._sensorgram_line_width_px = max(float(sensorgram_line_width_px), 0.5)
         if hasattr(window, "_apply_metric_color_styles"):
-            window._apply_metric_color_styles()
+            apply_metric_color_styles_for(window)
     if isinstance(plot_antialias_enabled, (bool, str)):
         if isinstance(plot_antialias_enabled, bool):
             window._plot_antialias_enabled = bool(plot_antialias_enabled)
@@ -957,6 +961,13 @@ def restore_ui_state(window) -> None:
             window._sync_view_actions()
     window._sync_view_actions()
 
+    binder = getattr(window, "_ui_binder", None)
+    if binder is not None:
+        try:
+            binder.apply(ui_state)
+        except Exception:
+            pass
+
 
 def save_ui_state(window) -> None:
     if window.isMaximized():
@@ -985,6 +996,14 @@ def save_ui_state(window) -> None:
         saved_range = window._residual_y_range
         if len(saved_range) == 2 and all(isinstance(item, (int, float)) for item in saved_range):
             residual_y_range = [float(saved_range[0]), float(saved_range[1])]
+
+    binder_state = {}
+    binder = getattr(window, "_ui_binder", None)
+    if binder is not None:
+        try:
+            binder_state = binder.collect()
+        except Exception:
+            binder_state = {}
 
     save_window_ui_state(
         "main_window",
@@ -1063,6 +1082,7 @@ def save_ui_state(window) -> None:
             },
             "layout_preset_selected": normalize_layout_preset_key(getattr(window, "_layout_preset_selected", "spectra")),
             "collapsible_sections": collapsible_section_state(window),
+            **binder_state,
         },
     )
 
@@ -1485,7 +1505,7 @@ def apply_acquisition_state_to_widgets(window, state: dict[str, object]) -> None
             window.source_tabs.blockSignals(True)
             window.source_tabs.setCurrentIndex(0)
             window.source_tabs.blockSignals(False)
-        window._apply_source_mode(source_mode if source_mode in {"spectrometer", "simulation"} else "spectrometer", restart_live=False)
+        apply_source_mode_for(window, source_mode if source_mode in {"spectrometer", "simulation"} else "spectrometer", restart_live=False)
 
         residual_visible = bool(state.get("show_residual", False))
         window.show_residual_button.blockSignals(True)
@@ -1505,16 +1525,90 @@ def apply_acquisition_state_to_widgets(window, state: dict[str, object]) -> None
 
         session_font_size = state.get("session_summary_font_size_pt")
         if isinstance(session_font_size, (int, float)):
-            apply_font_size = getattr(window, "_apply_text_widget_font_size", None)
-            if callable(apply_font_size):
-                apply_font_size(window.session_summary, float(session_font_size), minimum=7.0, maximum=16.0)
+            apply_text_widget_font_size_for(window, window.session_summary, float(session_font_size), minimum=7.0, maximum=16.0)
 
         log_font_size = state.get("log_terminal_font_size_pt")
         if isinstance(log_font_size, (int, float)):
-            apply_font_size = getattr(window, "_apply_text_widget_font_size", None)
-            if callable(apply_font_size):
-                apply_font_size(window.log_terminal, float(log_font_size), minimum=7.0, maximum=16.0)
+            apply_text_widget_font_size_for(window, window.log_terminal, float(log_font_size), minimum=7.0, maximum=16.0)
     finally:
         window._suspend_acquisition_autosave = False
     schedule_acquisition_state_persist(window)
 
+
+def apply_source_mode_for(window, new_mode: str, restart_live: bool) -> None:
+    """Switch the active acquisition source (spectrometer vs simulation).
+
+    External callers (``acquisition_controller``, ``main_window_headers``)
+    call this directly; the ``MainWindow._apply_source_mode`` wrapper is kept
+    for any remaining internal ``self.*`` call-sites.
+    """
+    if window._measurement_active and new_mode != window._source_mode:
+        window._log_warning("Source switching is disabled while measurement is running.")
+        window.status_label.setText("Source switching is disabled while measurement is running.")
+        return
+    window._source_mode = new_mode
+    window._source_epoch += 1
+    window._session = window._hardware_session if new_mode == "spectrometer" else window._simulation_session
+    window._raw_last_finish_ts = None
+    window._raw_last_sample_index = None
+    window._last_elapsed_ms = None
+    window._last_spacing_ms = None
+    window._last_overhead_ms = None
+    window._effective_raw_rate_hz = None
+    window._last_display_average_count = None
+    window._last_display_period_ms = None
+    if hasattr(window, "_plot_view_cache"):
+        window._plot_view_cache.clear()
+    window._metric_reference_processed = None
+    window._live_trace_started_at = None
+    window._reset_live_accumulator()
+    if new_mode == "simulation" and window._session.state.sample is None:
+        window._session.set_sample(window._build_simulation_spectrum("sample"))
+    window._log_success(
+        f"Active source set to {'spectrometer' if new_mode == 'spectrometer' else 'simulation'}."
+    )
+    window._configure_source_tabs()
+    window._refresh_plot()
+    window._request_deferred_ui_refresh(telemetry=True, live_estimate=True)
+    window._update_simulation_controls_enabled()
+    window._schedule_acquisition_state_persist()
+    if restart_live:
+        QTimer.singleShot(0, window._start_live_acquisition)
+
+
+def fit_window_to_available_screen_for(window) -> None:
+    """Resize and reposition the window to fit within the available screen geometry."""
+    screen = None
+    if window.windowHandle() is not None:
+        screen = window.windowHandle().screen()
+    if screen is None:
+        screen = window.screen()
+    if screen is None:
+        screen = QGuiApplication.primaryScreen()
+    if screen is None:
+        return
+
+    available = screen.availableGeometry()
+    margin = 12
+    max_width = max(available.width() - margin * 2, 640)
+    max_height = max(available.height() - margin * 2, 480)
+    target_width = min(window.width(), max_width)
+    target_height = min(window.height(), max_height)
+    window.resize(target_width, target_height)
+
+    if window._ui_state:
+        x_pos = min(
+            max(window.x(), available.x() + margin),
+            available.x() + available.width() - window.width() - margin,
+        )
+        y_pos = min(
+            max(window.y(), available.y() + margin),
+            available.y() + available.height() - window.height() - margin,
+        )
+        window.move(x_pos, y_pos)
+        return
+
+    frame = window.frameGeometry()
+    x_pos = available.x() + max((available.width() - frame.width()) // 2, 0)
+    y_pos = available.y() + max((available.height() - frame.height()) // 2, 0)
+    window.move(x_pos, y_pos)

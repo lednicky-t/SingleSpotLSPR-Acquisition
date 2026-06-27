@@ -339,12 +339,16 @@ def fit_processed_spectrum(processed: Spectrum | None, settings: ProcessingSetti
     return None
 
 
+_MA_KERNEL_CACHE: dict[int, np.ndarray] = {}
+
+
 def _moving_average(values: np.ndarray, window: int) -> np.ndarray:
     window = max(int(window), 1)
     if window <= 1:
-        return values.copy()
-
-    kernel = np.ones(window, dtype=np.float64)
+        return values
+    if window not in _MA_KERNEL_CACHE:
+        _MA_KERNEL_CACHE[window] = np.ones(window, dtype=np.float64)
+    kernel = _MA_KERNEL_CACHE[window]
     summed = np.convolve(values, kernel, mode="same")
     counts = np.convolve(np.ones_like(values, dtype=np.float64), kernel, mode="same")
     return summed / counts
@@ -647,14 +651,13 @@ def _compute_fwhm_nm(wavelengths: np.ndarray, values: np.ndarray) -> float | Non
         return None
     half_level = baseline + 0.5 * amplitude
 
-    left = peak_index
-    while left > 0 and y[left] >= half_level:
-        left -= 1
-    right = peak_index
-    while right < len(y) - 1 and y[right] >= half_level:
-        right += 1
-    if left == peak_index or right == peak_index:
+    above = y >= half_level
+    left_below = np.where(~above[:peak_index])[0]
+    right_below = np.where(~above[peak_index + 1 :])[0]
+    if len(left_below) == 0 or len(right_below) == 0:
         return None
+    left = int(left_below[-1])
+    right = peak_index + 1 + int(right_below[0])
 
     left_x = _interp_crossing(x[left], y[left], x[left + 1], y[left + 1], half_level)
     right_x = _interp_crossing(x[right - 1], y[right - 1], x[right], y[right], half_level)

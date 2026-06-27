@@ -299,6 +299,14 @@ def sync_processing_crop_parameter_widget(window) -> None:
     if hasattr(window, "_processing_fit_method_title_widget"):
         window._processing_fit_method_title_widget.setVisible(True)
 
+    smoothing_method = _combo_value(getattr(window, "smoothing_method_combo", None)) or "none"
+    smoothing_window_visible = smoothing_method != "none"
+    smoothing_window_spin = getattr(window, "smoothing_window_spin", None)
+    if smoothing_window_spin is not None:
+        smoothing_window_spin.setVisible(smoothing_window_visible)
+    if hasattr(window, "_processing_smoothing_window_title_widget"):
+        window._processing_smoothing_window_title_widget.setVisible(smoothing_window_visible)
+
 
 
 
@@ -340,9 +348,12 @@ def load_processing_settings_dialog(window) -> None:
         return
     path = Path(path_str)
     if path.suffix.lower() in {".h5", ".hdf5"}:
-        settings = load_processing_settings_from_hdf5(path)
-    else:
-        settings = load_processing_settings(path)
+        # HDF5 files may contain more than just processing settings — use the
+        # unified import dialog so the user can also pick up the experiment plan.
+        from lspr_app.gui.main_window_import_dialog import show_import_from_measurement_for
+        show_import_from_measurement_for(window, path)
+        return
+    settings = load_processing_settings(path)
     window._processing_settings = settings
     apply_processing_settings_to_widgets(window, settings)
     save_processing_settings(settings)

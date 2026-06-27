@@ -554,6 +554,21 @@ def _append_metric_compression_block(
     return _append_metric_compression_block(levels, parent, combine_factor=combine_factor, level=level + 1)
 
 
+def _trim_live_cache_l0_if_needed(cache: MetricDisplayCache, max_l0_blocks: int) -> None:
+    """Cap level-0 block count to prevent unbounded memory growth on long sessions.
+
+    Only level 0 (finest granularity) is trimmed.  Higher levels are kept intact
+    so full-session history remains accessible at coarser zoom levels.
+    """
+    if max_l0_blocks <= 0 or not cache.levels or not cache.levels[0]:
+        return
+    l0 = cache.levels[0]
+    if len(l0) <= max_l0_blocks:
+        return
+    keep = max(max_l0_blocks // 2, 1)
+    cache.levels[0] = l0[-keep:]
+
+
 def _select_metric_compression_blocks(
     levels: list[list[MetricCompressionBlock]],
     target_points: int,
@@ -598,6 +613,7 @@ def _display_signature(x: np.ndarray, y: np.ndarray) -> tuple[object, ...]:
 
 def build_active_trace_series_token(window) -> tuple[object, ...]:
     selected_metrics = frozenset(getattr(window, "_selected_trace_metrics", lambda: [])())
+    display_mode = str(getattr(window, "_sensorgram_display_mode", "session"))
     archive_path = getattr(window, "_metric_archive_path", None)
     archive_path = Path(archive_path).expanduser() if archive_path else None
     plot_view_cache = getattr(window, "_plot_view_cache", None)
@@ -611,14 +627,14 @@ def build_active_trace_series_token(window) -> tuple[object, ...]:
         except Exception:
             live_states = ()
         if live_states:
-            return ("live_absolute", live_states, tuple(sorted(selected_metrics)))
+            return ("live_absolute", display_mode, live_states, tuple(sorted(selected_metrics)))
     if archive_path is not None and archive_path.exists():
         try:
             mtime_ns = archive_path.stat().st_mtime_ns
         except OSError:
             mtime_ns = 0
-        return ("archive", str(archive_path), int(mtime_ns), tuple(sorted(selected_metrics)))
-    return ("empty", ())
+        return ("archive", display_mode, str(archive_path), int(mtime_ns), tuple(sorted(selected_metrics)))
+    return ("empty", display_mode)
 
 
 def build_metric_series_token(window, metric_name: str) -> tuple[object, ...]:
@@ -829,8 +845,9 @@ def downsample_metric_series_for_view(
 
 
 class PlotViewCache:
-    def __init__(self, *, max_view_entries: int = 16) -> None:
+    def __init__(self, *, max_view_entries: int = 16, max_live_cache_l0_blocks: int = 36_000) -> None:
         self._max_view_entries = max(int(max_view_entries), 1)
+        self._max_live_cache_l0_blocks = max(int(max_live_cache_l0_blocks), 0)
         self._active_trace_series_token: tuple[object, ...] | None = None
         self._active_trace_series_result: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._metric_view_cache: OrderedDict[tuple[object, ...], tuple[np.ndarray, np.ndarray]] = OrderedDict()
@@ -859,6 +876,32 @@ class PlotViewCache:
 
     def clear_live_absolute_metric_cache(self) -> None:
         self._live_absolute_metric_cache.clear()
+
+    def live_tail_snapshot(
+        self,
+        metric_names: set[str] | frozenset[str],
+        *,
+        after_t: float,
+    ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        """Return raw tail points newer than `after_t` for the given metrics.
+
+        Used by the reload handler to avoid discarding in-flight live data when
+        seeding the cache from an archive file that may not yet include the most
+        recent un-flushed points.
+        """
+        result: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for metric_name in metric_names:
+            cache = self._live_absolute_metric_cache.get(str(metric_name))
+            if not isinstance(cache, MetricDisplayCache):
+                continue
+            rx = np.asarray(getattr(cache, "recent_tail_x", []), dtype=np.float64)
+            ry = np.asarray(getattr(cache, "recent_tail_y", []), dtype=np.float64)
+            if len(rx) == 0:
+                continue
+            mask = rx > after_t
+            if np.any(mask):
+                result[str(metric_name)] = (rx[mask].copy(), ry[mask].copy())
+        return result
 
     def clear_active_trace_series_cache(self) -> None:
         self._active_trace_series_token = None
@@ -956,6 +999,7 @@ class PlotViewCache:
             raw_block_size=cache.raw_block_size,
             combine_factor=cache.combine_factor,
         )
+        _trim_live_cache_l0_if_needed(cache, self._max_live_cache_l0_blocks)
         cache.source_len = int(min(len(x), len(y)))
         cache.pending_x.clear()
         cache.pending_y.clear()
@@ -1023,6 +1067,7 @@ class PlotViewCache:
                 raw_block_size=cache.raw_block_size,
                 combine_factor=cache.combine_factor,
             )
+            _trim_live_cache_l0_if_needed(cache, self._max_live_cache_l0_blocks)
             appended_blocks = int(np.ceil(float(len(pending_x)) / float(block_size)))
         display_x, display_y, display_level, old_blocks, overlap_blocks = _build_absolute_metric_display_arrays(
             cache,

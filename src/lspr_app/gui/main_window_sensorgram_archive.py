@@ -30,17 +30,38 @@ def apply_sensorgram_display_style(window) -> None:
         band.setBrush(pg.mkBrush(band_color))
 
 
+def _sensorgram_active_archive_path(window) -> Path | None:
+    """Return the archive file to read for the current display mode.
+
+    In measurement mode, prefer the live recording file so the plot shows only
+    the current recording window. Fall back to the session file if the measurement
+    file is not yet available. In session mode always use the session file.
+    """
+    mode = str(getattr(window, "_sensorgram_display_mode", "session")).strip().lower()
+    if mode == "measurement":
+        meas_path = getattr(window, "_measurement_path", None)
+        if meas_path is not None:
+            try:
+                return Path(meas_path).expanduser()
+            except Exception:
+                pass
+    session_path = getattr(window, "_metric_archive_path", None)
+    if session_path is not None:
+        try:
+            return Path(session_path).expanduser()
+        except Exception:
+            pass
+    return None
+
+
 def sensorgram_metric_archive_reload_request_signature(window) -> tuple[object, ...] | None:
-    archive_path = getattr(window, "_metric_archive_path", None)
+    archive_path = _sensorgram_active_archive_path(window)
     if archive_path is None:
         return None
-    try:
-        archive_path = str(Path(archive_path).expanduser())
-    except Exception:
-        archive_path = str(archive_path)
     selected_metrics = tuple(sorted(str(name) for name in window._selected_trace_metrics()))
     return (
-        archive_path,
+        str(archive_path),
+        str(getattr(window, "_sensorgram_display_mode", "session")),
         int(getattr(window, "_source_epoch", 0)),
         selected_metrics,
         int(getattr(window, "_plot_display_points", 0)),
@@ -48,10 +69,9 @@ def sensorgram_metric_archive_reload_request_signature(window) -> tuple[object, 
 
 
 def start_sensorgram_metric_archive_reload_task(window, request_token: tuple[object, ...]) -> None:
-    archive_path = getattr(window, "_metric_archive_path", None)
+    archive_path = _sensorgram_active_archive_path(window)
     if archive_path is None:
         return
-    archive_path = Path(archive_path).expanduser()
     window._sensorgram_metric_archive_reload_request_token = request_token
     window._sensorgram_metric_archive_reload_loading = True
     window._sensorgram_metric_archive_reload_pending_token = None
@@ -100,6 +120,28 @@ def handle_absolute_sensorgram_metric_archive_reload_result(window, result: Metr
         return
     plot_view_cache = getattr(window, "_plot_view_cache", None)
     display_points = max(int(getattr(window, "_plot_display_points", 512)), 1)
+
+    # Snapshot any live tail points that are newer than the file data BEFORE clearing
+    # the cache. This prevents the trace from visually rewinding by up to one flush
+    # interval worth of data when the file hasn't yet been flushed with the most recent
+    # in-memory points.
+    live_tail: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    if plot_view_cache is not None and hasattr(plot_view_cache, "live_tail_snapshot"):
+        file_end_by_metric = {
+            metric_name: float(times[-1]) if len(times) > 0 else -np.inf
+            for metric_name, (times, _) in result.series.items()
+        }
+        # Use the earliest file-end time as the snapshot cutoff so we capture ALL
+        # live points that could be absent from any metric's file data.
+        cutoff_t = min(file_end_by_metric.values(), default=-np.inf)
+        try:
+            live_tail = plot_view_cache.live_tail_snapshot(
+                frozenset(result.series.keys()),
+                after_t=cutoff_t,
+            )
+        except Exception:
+            live_tail = {}
+
     if plot_view_cache is not None and hasattr(plot_view_cache, "clear_live_absolute_metric_cache"):
         try:
             plot_view_cache.clear_live_absolute_metric_cache()
@@ -114,6 +156,13 @@ def handle_absolute_sensorgram_metric_archive_reload_result(window, result: Metr
     for metric_name, (times, values) in result.series.items():
         x_values = np.asarray(times, dtype=np.float64)
         y_values = np.asarray(values, dtype=np.float64)
+        # Merge any live tail points newer than the file data back in so there is no gap.
+        tail = live_tail.get(metric_name)
+        if tail is not None:
+            tail_x, tail_y = tail
+            if len(tail_x) > 0:
+                x_values = np.concatenate([x_values, tail_x])
+                y_values = np.concatenate([y_values, tail_y])
         if len(x_values) == 0 or len(y_values) == 0:
             continue
         total_points += int(min(len(x_values), len(y_values)))

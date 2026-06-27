@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
 
+from lspr_app.gui.main_window_plotting import apply_metric_color_styles_for
+
 import pyqtgraph as pg
 
 from PyQt6.QtCore import Qt, QSize, QSignalBlocker, QByteArray, pyqtSignal
@@ -165,6 +167,11 @@ _AUTOSCALE_THROTTLE_OPTIONS: tuple[tuple[str, float | None], ...] = (
     ("Light", 0.5),
     ("Medium", 1.0),
     ("Heavy", 2.0),
+)
+
+_DISPLAY_MODE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("Session", "session"),
+    ("Measurement", "measurement"),
 )
 
 
@@ -382,9 +389,11 @@ class MetricModeSelector(QWidget):
             if isinstance(time_plot_colors, dict):
                 time_plot_colors[normalize_sensorgram_metric_name(mode)] = str(color)
             if hasattr(window, "_apply_metric_color_styles"):
-                window._apply_metric_color_styles()
+                apply_metric_color_styles_for(window)
             if hasattr(window, "_request_deferred_ui_refresh"):
                 window._request_deferred_ui_refresh(trace_plot=True, summary=True)
+        if hasattr(window, "_schedule_ui_state_persist"):
+            window._schedule_ui_state_persist()
         self._sync_widgets()
 
 
@@ -559,6 +568,12 @@ class SensorgramPlotSettingsDialog(QDialog):
         if hasattr(self, "envelope_overlay_alpha_spin"):
             current_alpha = int(getattr(self._window, "_sensorgram_metric_envelope_overlay_alpha", 16))
             self.envelope_overlay_alpha_spin.setValue(max(0, min(current_alpha, 100)))
+        if hasattr(self, "display_mode_combo"):
+            current_mode = str(getattr(self._window, "_sensorgram_display_mode", "session")).strip().lower()
+            for index in range(self.display_mode_combo.count()):
+                if self.display_mode_combo.itemData(index) == current_mode:
+                    self.display_mode_combo.setCurrentIndex(index)
+                    break
         _log_dialog_timing(
             self._window,
             "sensorgram_settings.refresh",
@@ -843,6 +858,22 @@ class SensorgramPlotSettingsDialog(QDialog):
         self.envelope_overlay_alpha_spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.envelope_overlay_alpha_spin.setFixedWidth(74)
 
+        self.display_mode_combo = QComboBox(self)
+        for label, mode in _DISPLAY_MODE_OPTIONS:
+            self.display_mode_combo.addItem(label, mode)
+        current_mode = str(getattr(self._window, "_sensorgram_display_mode", "session")).strip().lower()
+        current_index = 0
+        for index, (_label, mode) in enumerate(_DISPLAY_MODE_OPTIONS):
+            if mode == current_mode:
+                current_index = index
+                break
+        self.display_mode_combo.setCurrentIndex(current_index)
+        self.display_mode_combo.setToolTip(
+            "Session: show all data recorded since the app started.\n"
+            "Measurement: show only data from the current or most recent recording.\n\n"
+            "Switches automatically — to Measurement when recording starts and back to Session when it stops."
+        )
+
         plot_grid = QGridLayout()
         plot_grid.setContentsMargins(0, 0, 0, 0)
         plot_grid.setHorizontalSpacing(8)
@@ -852,18 +883,20 @@ class SensorgramPlotSettingsDialog(QDialog):
         plot_grid.setColumnMinimumWidth(2, 88)
         plot_grid.setColumnMinimumWidth(3, 84)
         plot_grid.setColumnStretch(4, 1)
-        plot_grid.addWidget(_make_row_title_label("Display points"), 0, 0, Qt.AlignmentFlag.AlignVCenter)
-        plot_grid.addWidget(self.metric_display_points_spin, 0, 1, Qt.AlignmentFlag.AlignVCenter)
-        plot_grid.addWidget(_make_row_title_label("Live tail"), 0, 2, Qt.AlignmentFlag.AlignVCenter)
-        plot_grid.addWidget(self.recent_tail_points_spin, 0, 3, Qt.AlignmentFlag.AlignVCenter)
-        plot_grid.addWidget(_make_row_title_label("Line"), 1, 0, Qt.AlignmentFlag.AlignVCenter)
-        plot_grid.addWidget(self.line_mode_combo, 1, 1, Qt.AlignmentFlag.AlignVCenter)
-        plot_grid.addWidget(self.line_width_spin, 1, 2, Qt.AlignmentFlag.AlignVCenter)
-        plot_grid.addWidget(_make_row_title_label("Envelope"), 2, 0, Qt.AlignmentFlag.AlignVCenter)
-        plot_grid.addWidget(self.envelope_overlay_check, 2, 1, Qt.AlignmentFlag.AlignVCenter)
-        plot_grid.addWidget(self.envelope_overlay_alpha_spin, 2, 2, Qt.AlignmentFlag.AlignVCenter)
-        plot_grid.addWidget(_make_row_title_label("Right buffer"), 3, 0, Qt.AlignmentFlag.AlignVCenter)
-        plot_grid.addWidget(self.follow_latest_buffer_combo, 3, 1, 1, 3, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(_make_row_title_label("Display mode"), 0, 0, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(self.display_mode_combo, 0, 1, 1, 3, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(_make_row_title_label("Display points"), 1, 0, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(self.metric_display_points_spin, 1, 1, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(_make_row_title_label("Live tail"), 1, 2, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(self.recent_tail_points_spin, 1, 3, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(_make_row_title_label("Line"), 2, 0, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(self.line_mode_combo, 2, 1, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(self.line_width_spin, 2, 2, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(_make_row_title_label("Envelope"), 3, 0, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(self.envelope_overlay_check, 3, 1, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(self.envelope_overlay_alpha_spin, 3, 2, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(_make_row_title_label("Right buffer"), 4, 0, Qt.AlignmentFlag.AlignVCenter)
+        plot_grid.addWidget(self.follow_latest_buffer_combo, 4, 1, 1, 3, Qt.AlignmentFlag.AlignVCenter)
 
         timeline_grid = QGridLayout()
         timeline_grid.setContentsMargins(0, 0, 0, 0)
@@ -956,9 +989,24 @@ class SensorgramPlotSettingsDialog(QDialog):
         window._sensorgram_compression_recent_tail_points = max(int(self.recent_tail_points_spin.value()), 0)
         window._sensorgram_metric_envelope_overlay_enabled = bool(self.envelope_overlay_check.isChecked())
         window._sensorgram_metric_envelope_overlay_alpha = max(int(self.envelope_overlay_alpha_spin.value()), 0)
+        new_display_mode = str(self.display_mode_combo.currentData() or "session")
+        old_display_mode = str(getattr(window, "_sensorgram_display_mode", "session"))
+        window._sensorgram_display_mode = new_display_mode
+        if new_display_mode != old_display_mode:
+            window._last_metric_autoscale_range = None
+            if hasattr(window, "_plot_view_cache"):
+                window._plot_view_cache.clear()
+            if new_display_mode == "session":
+                window._sensorgram_axis_started_at = None
+            try:
+                from lspr_app.gui.main_window_sensorgram_archive import request_absolute_sensorgram_metric_archive_reload
+                request_absolute_sensorgram_metric_archive_reload(window)
+            except Exception:
+                pass
         window._sensorgram_control_step_overlay_enabled = bool(self.control_overlay_check.isChecked())
         window._sensorgram_control_step_overlay_style = str(self.control_overlay_style_combo.currentData() or "bar")
         window._sensorgram_control_step_overlay_position = self._control_overlay_position()
+        window._last_metric_autoscale_range = None
         window._sensorgram_control_step_overlay_opacity = float(self.control_overlay_opacity_spin.value())
         window._sensorgram_control_step_overlay_bar_height_px = int(self.control_overlay_thickness_spin.value())
         window._spectrum_render_cache_key = None
@@ -1004,6 +1052,8 @@ class SensorgramPlotSettingsDialog(QDialog):
                 window._apply_sensorgram_time_axis_mode(redraw=False)
             except Exception:
                 pass
+        if hasattr(window, "_persist_processing_settings"):
+            window._persist_processing_settings()
         if hasattr(window, "_save_ui_state"):
             window._save_ui_state()
         elif hasattr(window, "_schedule_ui_state_persist"):
@@ -1018,6 +1068,8 @@ class SensorgramPlotSettingsDialog(QDialog):
         else:
             window._sensorgram_metric_visible_modes = set(visible_modes)
             window._sensorgram_metric_primary_mode = primary_mode
+        if hasattr(window, "_schedule_ui_state_persist"):
+            window._schedule_ui_state_persist()
 
     def accept(self) -> None:
         self.apply_settings()

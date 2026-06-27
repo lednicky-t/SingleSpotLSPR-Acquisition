@@ -1,8 +1,18 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from time import perf_counter
 from datetime import datetime
+
+import pyqtgraph as pg
+from pyqtgraph import exporters as _pg_exporters
+
+from lspr_app.gui.main_window_startup_diagnostics import notify_startup_data_rendered_for as _notify_startup_data_rendered
+
+from PyQt6.QtWidgets import QFileDialog
+
+from lspr_app.storage.csv_export import export_spectrum_to_csv as _export_spectrum_to_csv
 
 import numpy as np
 
@@ -24,7 +34,10 @@ from lspr_app.gui.plot_controller import (
 from lspr_app.gui.spectrum_plot_controller import (
     autoscale_residual_axis as _autoscale_residual_axis,
     autoscale_spectrum_plot as _autoscale_spectrum_plot,
+    clip_series_to_window as _clip_series_to_window,
+    downsample_spectrum_series_for_view as _downsample_spectrum_series_for_view,
     handle_spectrum_mouse_moved as _handle_spectrum_mouse_moved,
+    spectrum_render_cache_key as _spectrum_render_cache_key,
     update_residual_axis_visibility as _update_residual_axis_visibility,
     update_residual_view_geometry as _update_residual_view_geometry,
     update_spectrum_stats as _update_spectrum_stats,
@@ -52,6 +65,7 @@ from lspr_app.gui.processing_helpers import (
     processing_cache_token as _processing_cache_token,
 )
 from lspr_app.gui.main_window_logging import build_pipeline_timing_breakdown_for, _timing_plain_text
+from lspr_app.gui.main_window_plot_widgets import _spline_render_series
 from lspr_app.gui.workers import ProcessingRequest, ProcessingResult, ProcessingTask
 
 def get_analysis_processed_spectrum_for(window, signal: Spectrum | None) -> tuple[Spectrum | None, Spectrum | None]:
@@ -243,7 +257,7 @@ def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
     window._analysis_metrics_cache_key = None
     window._analysis_metrics_cache_result = {}
     try:
-        window._refresh_spectrum_plot(processed, fit)
+        refresh_spectrum_plot_for(window, processed, fit)
         window._autoscale_spectrum_plot()
     except Exception as exc:
         window._log_error(f"Spectrum refresh failed: {exc}")
@@ -253,6 +267,197 @@ def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
         pending = window._pending_plot_request
         window._pending_plot_request = None
         start_plot_processing_task_for(window, pending)
+
+
+def refresh_spectrum_plot_for(window, processed, fit) -> None:
+    """Update the spectrum plot curves, markers, and residual display.
+
+    Skips the update entirely if the plot is frozen or if the combined render
+    key (data + view range) has not changed since the last call.
+    """
+    if window._plots_frozen:
+        return
+    view_x_min = view_x_max = view_width_px = None
+    try:
+        view_box = window.spectrum_plot.getPlotItem().vb
+        view_range = view_box.viewRange()
+        x_range = view_range[0]
+        view_x_min = float(x_range[0])
+        view_x_max = float(x_range[1])
+        scene_rect = view_box.sceneBoundingRect()
+        if scene_rect is not None:
+            view_width_px = float(scene_rect.width())
+            if not np.isfinite(view_width_px):
+                view_width_px = None
+    except Exception:
+        view_x_min = view_x_max = view_width_px = None
+
+    residual_visible = bool(fit is not None and window.show_residual_button.isChecked())
+    show_gaussian = window._needs_gaussian_metric()
+    render_key = _spectrum_render_cache_key(
+        processed,
+        fit,
+        view_x_min=view_x_min,
+        view_x_max=view_x_max,
+        view_width_px=view_width_px,
+        residual_visible=residual_visible,
+        show_gaussian=show_gaussian,
+        spectrum_tracking_mode=window._current_processing_settings().spectrum_tracking_mode,
+    )
+    if render_key == window._spectrum_render_cache_key:
+        return
+    window._spectrum_render_cache_key = render_key
+    window._visible_processed_plot = processed
+    window._visible_fit_plot = fit
+    if processed is None:
+        window.spectrum_curve.setData([], [])
+        window.fit_curve.setData([], [])
+        window._clear_residual_display()
+        window.fit_region_item.hide()
+        window.max_marker.setData([], [])
+        window.poly_marker.setData([], [])
+        window.gaussian_marker.setData([], [])
+        window.centroid_marker.setData([], [])
+        window.spectrum_plot.setLabel("left", "Signal")
+        window._update_residual_axis_visibility(False)
+        window._spectrum_processing_region_bounds = None
+        window._spectrum_fit_region_bounds = None
+        window._last_spectrum_curve_update_ms = None
+        window._last_spectrum_fit_update_ms = None
+        window._last_spectrum_marker_update_ms = None
+        window._last_spectrum_residual_update_ms = None
+        return
+
+    low = float(np.min(processed.wavelengths_nm))
+    high = float(np.max(processed.wavelengths_nm))
+    processing_bounds = (low, high)
+    if processing_bounds != window._spectrum_processing_region_bounds:
+        window.processing_region_item.setRegion(processing_bounds)
+        window._spectrum_processing_region_bounds = processing_bounds
+
+    display_x, display_y = _downsample_spectrum_series_for_view(
+        np.asarray(processed.wavelengths_nm, dtype=np.float64),
+        np.asarray(processed.values, dtype=np.float64),
+        view_x_min=view_x_min,
+        view_x_max=view_x_max,
+        view_width_px=view_width_px,
+    )
+    line_step_mode = getattr(window, "_sensorgram_line_step_mode", None)
+    curve_started = perf_counter()
+    if line_step_mode == "spline":
+        spline_x, spline_y = _spline_render_series(display_x, display_y)
+        window.spectrum_curve.setData(spline_x, spline_y, skipFiniteCheck=True, stepMode=False)
+    elif line_step_mode is None:
+        window.spectrum_curve.setData(display_x, display_y, skipFiniteCheck=True, stepMode=False)
+    else:
+        window.spectrum_curve.setData(display_x, display_y, skipFiniteCheck=True, stepMode=line_step_mode)
+    window._last_spectrum_curve_update_ms = (perf_counter() - curve_started) * 1000.0
+    if fit is not None:
+        fit_values = np.asarray(fit.values, dtype=np.float64)
+        fit_low = float(fit.metadata.get("fit_window_min_nm", np.min(fit.wavelengths_nm)))
+        fit_high = float(fit.metadata.get("fit_window_max_nm", np.max(fit.wavelengths_nm)))
+        display_fit_x, _ = _clip_series_to_window(
+            display_x,
+            display_y,
+            window_min=fit_low,
+            window_max=fit_high,
+        )
+        if len(display_fit_x) > 0 and len(fit.wavelengths_nm) > 0:
+            display_fit_y = np.interp(
+                display_fit_x,
+                np.asarray(fit.wavelengths_nm, dtype=np.float64),
+                fit_values,
+            )
+        else:
+            display_fit_x = np.empty(0, dtype=np.float64)
+            display_fit_y = fit_values[:0]
+        fit_started = perf_counter()
+        if line_step_mode == "spline":
+            fit_curve_x, fit_curve_y = _spline_render_series(display_fit_x, display_fit_y)
+            window.fit_curve.setData(fit_curve_x, fit_curve_y, skipFiniteCheck=True, stepMode=False)
+        elif line_step_mode is None:
+            window.fit_curve.setData(display_fit_x, display_fit_y, skipFiniteCheck=True, stepMode=False)
+        else:
+            window.fit_curve.setData(display_fit_x, display_fit_y, skipFiniteCheck=True, stepMode=line_step_mode)
+        window._last_spectrum_fit_update_ms = (perf_counter() - fit_started) * 1000.0
+        window.fit_region_item.show()
+        residual_started = perf_counter()
+        if residual_visible:
+            residual_base = np.interp(
+                display_fit_x,
+                np.asarray(processed.wavelengths_nm, dtype=np.float64),
+                np.asarray(processed.values, dtype=np.float64),
+            )
+            with np.errstate(divide="ignore", invalid="ignore"):
+                residual_values = np.where(
+                    np.abs(display_fit_y) > 1e-12,
+                    ((residual_base - display_fit_y) / display_fit_y) * 100.0,
+                    np.nan,
+                )
+            window._render_residual_display(display_fit_x, residual_values)
+            if not getattr(window, "_residual_axis_autoscaled", False):
+                window._autoscale_residual_axis()
+        else:
+            window._clear_residual_display()
+        window._last_spectrum_residual_update_ms = (perf_counter() - residual_started) * 1000.0
+        fit_bounds = (fit_low, fit_high)
+        if fit_bounds != window._spectrum_fit_region_bounds:
+            window.fit_region_item.setRegion(fit_bounds)
+            window._spectrum_fit_region_bounds = fit_bounds
+    else:
+        fit_started = perf_counter()
+        window.fit_curve.setData([], [])
+        window._last_spectrum_fit_update_ms = (perf_counter() - fit_started) * 1000.0
+        window.fit_region_item.hide()
+        residual_started = perf_counter()
+        window._clear_residual_display()
+        window._last_spectrum_residual_update_ms = (perf_counter() - residual_started) * 1000.0
+        fit_bounds = (low, low)
+        if fit_bounds != window._spectrum_fit_region_bounds:
+            window.fit_region_item.setRegion(fit_bounds)
+            window._spectrum_fit_region_bounds = fit_bounds
+    window._update_residual_axis_visibility(residual_visible)
+    window.spectrum_plot.setLabel("left", processed.y_label)
+    marker_started = perf_counter()
+    finite_indices = np.flatnonzero(np.isfinite(processed.values))
+    if len(finite_indices) == 0:
+        window.max_marker.setData([], [])
+        window.poly_marker.setData([], [])
+        window.centroid_marker.setData([], [])
+        window.gaussian_marker.setData([], [])
+        window._last_spectrum_marker_update_ms = (perf_counter() - marker_started) * 1000.0
+        return
+    max_index = int(finite_indices[int(np.argmax(np.asarray(processed.values, dtype=np.float64)[finite_indices]))])
+    max_x = float(processed.wavelengths_nm[max_index])
+    max_y = float(processed.values[max_index])
+    poly_x = window._compute_metric_nm("poly_max", processed, fit)
+    if fit is not None and len(fit.wavelengths_nm) > 0:
+        poly_y = float(np.interp(poly_x, fit.wavelengths_nm, fit.values))
+    else:
+        poly_y = float(np.interp(poly_x, processed.wavelengths_nm, processed.values))
+    show_gaussian = window._needs_gaussian_metric()
+    if show_gaussian:
+        gaussian_x = window._compute_metric_nm("gaussian_center", processed, fit)
+        if fit is not None and fit.metadata.get("fit_method") == "gaussian" and len(fit.wavelengths_nm) > 0:
+            gaussian_y = float(np.interp(gaussian_x, fit.wavelengths_nm, fit.values))
+        else:
+            gaussian_y = float(np.interp(gaussian_x, processed.wavelengths_nm, processed.values))
+        if np.isfinite(gaussian_x) and np.isfinite(gaussian_y):
+            window.gaussian_marker.setData([{"pos": (float(gaussian_x), float(gaussian_y)), "data": "gaussian"}])
+            window.gaussian_marker.show()
+        else:
+            window.gaussian_marker.setData([], [])
+            window.gaussian_marker.hide()
+    else:
+        window.gaussian_marker.setData([], [])
+        window.gaussian_marker.hide()
+    centroid_x = window._compute_centroid_nm(processed, fit)
+    centroid_y = float(np.interp(centroid_x, processed.wavelengths_nm, processed.values))
+    window._set_scatter_marker(window.max_marker, max_x, max_y, "max")
+    window._set_scatter_marker(window.poly_marker, poly_x, poly_y, "poly")
+    window._set_scatter_marker(window.centroid_marker, centroid_x, centroid_y, "centroid")
+    window._last_spectrum_marker_update_ms = (perf_counter() - marker_started) * 1000.0
+    _notify_startup_data_rendered(window, "spectrum")
 
 
 def flush_deferred_ui_refreshes_for(window) -> None:
@@ -506,9 +711,9 @@ def clear_trace_history_for(window) -> None:
         window._metric_render_display_cache.clear()
     if hasattr(window, "_metric_render_state_cache"):
         window._metric_render_state_cache.clear()
-    plot_view_cache = getattr(window, "_plot_view_cache", None)
     if hasattr(window, "_plot_view_cache"):
         window._plot_view_cache.clear()
+    # Null the reload tokens so any in-flight reload task is discarded when its result arrives.
     if hasattr(window, "_sensorgram_metric_archive_reload_request_token"):
         window._sensorgram_metric_archive_reload_request_token = None
     if hasattr(window, "_sensorgram_metric_archive_reload_pending_token"):
@@ -517,6 +722,9 @@ def clear_trace_history_for(window) -> None:
         window._sensorgram_metric_archive_reload_loading = False
     if hasattr(window, "_sensorgram_metric_archive_reload_task"):
         window._sensorgram_metric_archive_reload_task = None
+    # Reset the autoscale range so the axis re-fits from scratch when the first new
+    # point arrives after the clear, rather than keeping the stale zoom from before.
+    window._last_metric_autoscale_range = None
     if hasattr(window, "_sensorgram_control_step_events"):
         window._sensorgram_control_step_events.clear()
     if hasattr(window, "_sensorgram_control_step_overlay_items"):
@@ -533,8 +741,13 @@ def clear_trace_history_for(window) -> None:
         )
     else:
         window._metric_reference_processed = None
-    window._refresh_trace_plot("Metric position (nm)")
-    window._update_trace_stats()
+    # Schedule a deferred refresh rather than doing it synchronously: any pending
+    # deferred timer that was queued before the clear will be coalesced into this one,
+    # avoiding a double-render and an axis-reset before new data arrives.
+    if hasattr(window, "_request_deferred_ui_refresh"):
+        window._request_deferred_ui_refresh(trace_plot=True, trace_label="Metric position (nm)")
+    if hasattr(window, "_update_trace_stats"):
+        window._update_trace_stats()
     freeze_state = "On" if bool(getattr(window, "_sensorgram_frozen", False)) else "Off"
     window.status_label.setText(f"Metric history cleared. Sensorgram freeze {freeze_state}.")
 
@@ -814,3 +1027,76 @@ refresh_metric_plot_for = _refresh_metric_plot
 refresh_trace_plot_for = _refresh_metric_plot
 render_metric_series_for = _render_metric_series
 render_trace_series_for = _render_metric_series
+
+
+def export_current_plot_for(window) -> None:
+    """Export the currently displayed spectrum plot to PNG, SVG, or CSV."""
+    plot_mode = window.PLOT_MODES[window.plot_selector.currentText()]
+    spectrum = window._last_processed_plot
+    if spectrum is None:
+        window.status_label.setText("There is no plotted data to export.")
+        return
+
+    default_name = f"{plot_mode}_{spectrum.acquired_at.strftime('%Y%m%d_%H%M%S')}.png"
+    default_path = Path.cwd() / "data" / default_name
+    file_path, _ = QFileDialog.getSaveFileName(
+        window,
+        "Export graph",
+        str(default_path),
+        "PNG image (*.png);;SVG vector (*.svg);;CSV data (*.csv)",
+    )
+    if not file_path:
+        window.status_label.setText("Export cancelled.")
+        return
+
+    destination = Path(file_path)
+    suffix = destination.suffix.lower()
+    if suffix == ".csv":
+        _export_spectrum_to_csv(destination, spectrum)
+        window.status_label.setText(f"Exported {plot_mode} data to {file_path}")
+        return
+
+    if suffix not in {".png", ".svg"}:
+        destination = destination.with_suffix(".png")
+        suffix = ".png"
+
+    if suffix == ".png":
+        exporter = _pg_exporters.ImageExporter(window.spectrum_plot.plotItem)
+        exporter.parameters()["width"] = 1600
+        exporter.export(str(destination))
+    else:
+        exporter = _pg_exporters.SVGExporter(window.spectrum_plot.plotItem)
+        exporter.export(str(destination))
+    window.status_label.setText(f"Exported {plot_mode} graph to {destination}")
+
+
+def apply_metric_color_styles_for(window) -> None:
+    """Apply per-metric pen/brush colors to spectrum curves, markers, and envelope bands."""
+    colors = getattr(window, "TRACE_METRIC_COLORS", {})
+    if not isinstance(colors, dict):
+        return
+    line_width = max(float(getattr(window, "_sensorgram_line_width_px", 2.2)), 0.5)
+    if hasattr(window, "spectrum_curve"):
+        window.spectrum_curve.setPen(pg.mkPen("#1f77b4", width=line_width))
+    if hasattr(window, "fit_curve"):
+        window.fit_curve.setPen(pg.mkPen("#d95f02", width=line_width, style=Qt.PenStyle.DashLine))
+    for metric_name, curve in getattr(window, "trace_curves", {}).items():
+        if hasattr(curve, "setPen"):
+            curve.setPen(pg.mkPen(colors.get(metric_name, "#444444"), width=line_width))
+    for metric_name, marker in (
+        ("smoothed_max", getattr(window, "max_marker", None)),
+        ("centroid", getattr(window, "centroid_marker", None)),
+        ("poly_max", getattr(window, "poly_marker", None)),
+        ("gaussian_center", getattr(window, "gaussian_marker", None)),
+    ):
+        if marker is not None and hasattr(marker, "setBrush"):
+            marker.setBrush(pg.mkBrush(colors.get(metric_name, "#444444")))
+    for metric_name, band in getattr(window, "trace_metric_envelope_bands", {}).items():
+        if band is None or not hasattr(band, "setBrush"):
+            continue
+        base_color = QColor(colors.get(metric_name, "#1F77B4"))
+        if not base_color.isValid():
+            base_color = QColor("#1F77B4")
+        band_alpha = int(round(max(min(float(getattr(window, "_sensorgram_metric_envelope_overlay_alpha", 16)), 100.0), 0.0) * 2.55))
+        base_color.setAlpha(band_alpha)
+        band.setBrush(pg.mkBrush(base_color))

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from PyQt6.QtWidgets import (
-    QLayout,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -15,10 +14,9 @@ from PyQt6.QtCore import Qt
 
 from lspr_ui import make_info_button
 
-SPECTRA_PROCESSING_SECTION_LABEL_COL_WIDTH = 78
-SPECTRA_PROCESSING_SECTION_H_SPACING = 5
-SPECTRA_PROCESSING_SECTION_V_SPACING = 3
-PROCESSING_CONTROL_COL_WIDTH = SPECTRA_PROCESSING_SECTION_LABEL_COL_WIDTH
+SPECTRA_PROCESSING_SECTION_H_SPACING = 6
+SPECTRA_PROCESSING_SECTION_V_SPACING = 1
+PROCESSING_SECTION_LABEL_COL_WIDTH = 64  # wide enough for "Smoothing"
 
 
 def build_spectrometer_page(window) -> QWidget:
@@ -188,192 +186,160 @@ def build_simulation_page(window) -> QWidget:
 def build_spectra_processing_group(window) -> QGroupBox:
     spectra_processing_group = QGroupBox(window)
     spectra_processing_layout = QVBoxLayout()
-    spectra_processing_layout.setContentsMargins(0, 0, 0, 0)
-    spectra_processing_layout.setSpacing(8)
+    spectra_processing_layout.setContentsMargins(4, 2, 4, 4)
+    spectra_processing_layout.setSpacing(4)
 
-    spectra_processing_layout.addWidget(_build_processing_range_widget(window))
-    spectra_processing_layout.addWidget(
-        _build_processing_single_row_widget(
-            window,
-            "Base removal",
-            window.baseline_method_combo,
-            "Baseline subtraction method.",
-        )
-    )
-    spectra_processing_layout.addWidget(_build_processing_smoothing_widget(window))
-    spectra_processing_layout.addWidget(_build_processing_fitting_widget(window))
+    spectra_processing_layout.addWidget(_build_processing_stacked_row(
+        window,
+        "Range",
+        "Wavelength range in nm used for processing and fits.",
+        [
+            ("Min", "Minimum wavelength for processing and fit range (nm).", window.range_min_spin),
+            ("Max", "Maximum wavelength for processing and fit range (nm).", window.range_max_spin),
+            ("Res", "Wavelength resolution for peak and centroid analysis (nm).", window.analysis_resolution_spin),
+        ],
+    ))
+    spectra_processing_layout.addWidget(_build_processing_stacked_row(
+        window,
+        "Baseline",
+        "Baseline subtraction method.",
+        [
+            ("Method", "Baseline subtraction method.", window.baseline_method_combo),
+        ],
+    ))
+    spectra_processing_layout.addWidget(_build_processing_stacked_row(
+        window,
+        "Smoothing",
+        "Smoothing settings for displayed and fitted spectra.",
+        [
+            ("Temporal", "Temporal smoothing of displayed processed spectra.", window.temporal_smoothing_spin),
+            ("Spectral", "Spectral smoothing method.", window.smoothing_method_combo),
+            ("Window", "Spectral smoothing window size in data points.", window.smoothing_window_spin),
+        ],
+        store_labels={"Window": "_processing_smoothing_window_title_widget"},
+    ))
+    spectra_processing_layout.addWidget(_build_processing_fitting_stacked(window))
     spectra_processing_group.setLayout(spectra_processing_layout)
     return spectra_processing_group
 
 
 def configure_spectra_processing_group_controls(window) -> None:
     range_width = max(window.range_min_spin.sizeHint().width(), window.range_max_spin.sizeHint().width())
-    expanded_range_width = max(int(round(range_width * 0.92)), 36)
-    resolution_width = max(int(round(expanded_range_width * 0.78)), 58)
-    window.range_min_spin.setFixedWidth(expanded_range_width)
-    window.range_max_spin.setFixedWidth(expanded_range_width)
-    window.analysis_resolution_spin.setFixedWidth(resolution_width)
+    range_width = max(int(round(range_width * 0.88)), 52)
+    window.range_min_spin.setFixedWidth(range_width)
+    window.range_max_spin.setFixedWidth(range_width)
 
-    crop_width = max(window.fit_window_spin.sizeHint().width(), window.crop_fraction_spin.sizeHint().width())
-    crop_width = max(int(round(crop_width * 0.85)), 72)
-    window.fit_window_spin.setFixedWidth(crop_width)
-    window.crop_fraction_spin.setFixedWidth(crop_width)
-    window.crop_parameter_stack.setFixedWidth(crop_width)
+    res_width = max(int(round(range_width * 0.80)), 46)
+    window.analysis_resolution_spin.setFixedWidth(res_width)
 
-    uniform_controls = (
+    # fit window: practical max 3 digits
+    fit_w = 44
+    window.fit_window_spin.setFixedWidth(fit_w)
+    # crop fraction: double spin (e.g. "0.95"), size from hint
+    frac_w = max(int(round(window.crop_fraction_spin.sizeHint().width() * 0.80)), 44)
+    window.crop_fraction_spin.setFixedWidth(frac_w)
+    window.crop_parameter_stack.setFixedWidth(max(fit_w, frac_w))
+
+    # temporal: range 1–64 (2 digits) — size from hint
+    temp_width = max(int(round(window.temporal_smoothing_spin.sizeHint().width() * 0.80)), 38)
+    window.temporal_smoothing_spin.setFixedWidth(temp_width)
+    # smoothing window: practical max 3 digits
+    window.smoothing_window_spin.setFixedWidth(44)
+    # poly order: practical max 2 digits
+    window.poly_order_spin.setFixedWidth(40)
+
+    combo_controls = (
         window.baseline_method_combo,
         window.smoothing_method_combo,
-        window.smoothing_window_spin,
-        window.temporal_smoothing_spin,
         window.crop_method_combo,
         window.fit_method_combo,
-        window.poly_order_spin,
-        window.metric_mode_combo,
     )
-    uniform_width = max(control.sizeHint().width() for control in uniform_controls)
-    uniform_width = max(int(round(uniform_width * 0.8)), 84)
-    for control in uniform_controls:
-        control.setFixedWidth(uniform_width)
-def _build_processing_single_row_widget(window, title: str, control, tooltip: str) -> QWidget:
-    widget = QWidget(window)
-    layout = QGridLayout()
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setHorizontalSpacing(SPECTRA_PROCESSING_SECTION_H_SPACING)
-    layout.setVerticalSpacing(SPECTRA_PROCESSING_SECTION_V_SPACING)
-    layout.setColumnMinimumWidth(0, SPECTRA_PROCESSING_SECTION_LABEL_COL_WIDTH)
-    layout.setColumnStretch(1, 1)
-
-    title_widget = QLabel(title)
-    title_widget.setToolTip(tooltip)
-    layout.addWidget(title_widget, 0, 0, alignment=Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-    if isinstance(control, QLayout):
-        control_widget = QWidget(window)
-        control_layout = QHBoxLayout()
-        control_layout.setContentsMargins(0, 0, 0, 0)
-        control_layout.setSpacing(6)
-        control_layout.addLayout(control)
-        control_layout.addStretch(1)
-        control_widget.setLayout(control_layout)
-        layout.addWidget(control_widget, 0, 1, alignment=Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-    else:
-        layout.addWidget(control, 0, 1, alignment=Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-    widget.setLayout(layout)
-    widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
-    return widget
+    combo_width = max(c.sizeHint().width() for c in combo_controls)
+    combo_width = max(int(round(combo_width * 0.80)), 72)
+    for c in combo_controls:
+        c.setFixedWidth(combo_width)
 
 
-def _build_processing_range_widget(window) -> QWidget:
-    range_widget = _build_processing_two_row_grid(
-        window,
-        "Range",
-        [
-            ("Min", "Minimum wavelength used for processing and fit range.", window.range_min_spin),
-            ("Max", "Maximum wavelength used for processing and fit range.", window.range_max_spin),
-            ("Resolution", "Resolution used for peak and centroid analysis.", window.analysis_resolution_spin),
-        ],
-        section_tooltip="Wavelength range in nm used for processing and fits.",
-        section_label_tooltip="Wavelength range in nm used for processing and fits.",
-    )
-    range_widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
-    return range_widget
-
-
-def _build_processing_smoothing_widget(window) -> QWidget:
-    smoothing_widget = _build_processing_two_row_grid(
-        window,
-        "Smoothing",
-        [
-            ("Temporal", "Temporal smoothing of displayed processed spectra.", window.temporal_smoothing_spin),
-            ("Spectral", "Spectral smoothing method.", window.smoothing_method_combo),
-            ("Window", "Spectral smoothing window size.", window.smoothing_window_spin),
-        ],
-        section_tooltip="Smoothing settings for displayed and fitted spectra.",
-        section_label_tooltip="Smoothing settings for displayed and fitted spectra.",
-    )
-    smoothing_widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
-    return smoothing_widget
-def _build_processing_fitting_widget(window) -> QWidget:
-    fitting_widget = QWidget(window)
-    fitting_layout = QGridLayout()
-    fitting_layout.setContentsMargins(0, 0, 0, 0)
-    fitting_layout.setHorizontalSpacing(SPECTRA_PROCESSING_SECTION_H_SPACING)
-    fitting_layout.setVerticalSpacing(SPECTRA_PROCESSING_SECTION_V_SPACING)
-    fitting_layout.setColumnMinimumWidth(0, SPECTRA_PROCESSING_SECTION_LABEL_COL_WIDTH)
-    fitting_layout.setColumnMinimumWidth(1, PROCESSING_CONTROL_COL_WIDTH)
-    fitting_layout.setColumnMinimumWidth(2, PROCESSING_CONTROL_COL_WIDTH)
-    fitting_layout.setColumnMinimumWidth(3, PROCESSING_CONTROL_COL_WIDTH)
-    fitting_layout.setColumnMinimumWidth(4, PROCESSING_CONTROL_COL_WIDTH)
-    fitting_layout.setColumnStretch(5, 1)
-
-    section_label = QLabel("Fitting")
-    section_label.setToolTip("Peak fitting configuration.")
-    fitting_layout.addWidget(section_label, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-
-    method_title = QLabel("Method")
-    method_title.setToolTip("Peak fitting model used to estimate the peak position.")
-    fitting_layout.addWidget(method_title, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
-    fitting_layout.addWidget(window.fit_method_combo, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-
-    order_title = QLabel("Order")
-    order_title.setToolTip("Polynomial order used when polynomial fitting is selected.")
-    fitting_layout.addWidget(order_title, 0, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
-    order_row = QWidget(window)
-    order_layout = QHBoxLayout()
-    order_layout.setContentsMargins(0, 0, 0, 0)
-    order_layout.setSpacing(6)
-    order_layout.addWidget(window.poly_order_spin)
-    order_layout.addStretch(1)
-    order_row.setLayout(order_layout)
-    fitting_layout.addWidget(order_row, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-
-    crop_title = QLabel("Crop")
-    crop_title.setToolTip("Choose how the fit range is cropped around the detected peak.")
-    fitting_layout.addWidget(crop_title, 0, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
-    fitting_layout.addWidget(window.crop_method_combo, 1, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-
-    parameter_title = QLabel("Parameter")
-    parameter_title.setToolTip(window.crop_parameter_label.toolTip())
-    fitting_layout.addWidget(parameter_title, 0, 4, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
-    fitting_layout.addWidget(window.crop_parameter_stack, 1, 4, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-
-    window._processing_fit_method_title_widget = method_title
-    window._processing_fit_order_title_widget = order_title
-    window._processing_fit_crop_title_widget = crop_title
-    window._processing_fit_parameter_title_widget = parameter_title
-
-    fitting_widget.setLayout(fitting_layout)
-    fitting_widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
-    return fitting_widget
-
-
-def _build_processing_two_row_grid(
+def _build_processing_stacked_row(
     window,
     section_label: str,
-    specs: list[tuple[str | QLabel, str, QWidget]],
+    section_tooltip: str,
+    specs: list[tuple[str, str, QWidget]],
     *,
-    section_tooltip: str = "",
-    section_label_tooltip: str = "",
+    store_labels: dict[str, str] | None = None,
 ) -> QWidget:
+    """Section label left in control row; sub-labels above each control.
+
+    store_labels: optional mapping of sub-label text → window attribute name to
+    store the QLabel on window (used for later show/hide).
+    """
     widget = QWidget(window)
     grid = QGridLayout()
     grid.setContentsMargins(0, 0, 0, 0)
     grid.setHorizontalSpacing(SPECTRA_PROCESSING_SECTION_H_SPACING)
     grid.setVerticalSpacing(SPECTRA_PROCESSING_SECTION_V_SPACING)
-    grid.setColumnMinimumWidth(0, SPECTRA_PROCESSING_SECTION_LABEL_COL_WIDTH)
-    for column in range(1, len(specs) + 1):
-        grid.setColumnMinimumWidth(column, PROCESSING_CONTROL_COL_WIDTH)
+    grid.setColumnMinimumWidth(0, PROCESSING_SECTION_LABEL_COL_WIDTH)
     grid.setColumnStretch(len(specs) + 1, 1)
 
     section_widget = QLabel(section_label)
-    section_widget.setToolTip(section_label_tooltip or section_tooltip)
+    section_widget.setToolTip(section_tooltip)
     grid.addWidget(section_widget, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-    for index, (label, tooltip, control) in enumerate(specs, start=1):
-        label_widget = label if isinstance(label, QLabel) else QLabel(str(label))
-        label_widget.setToolTip(tooltip)
+    for col, (label_text, tooltip, control) in enumerate(specs, start=1):
+        lbl = QLabel(label_text)
+        lbl.setToolTip(tooltip)
         control.setToolTip(tooltip)
-        grid.addWidget(label_widget, 0, index, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
-        grid.addWidget(control, 1, index, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        if store_labels and label_text in store_labels:
+            setattr(window, store_labels[label_text], lbl)
+        grid.addWidget(lbl, 0, col, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+        grid.addWidget(control, 1, col, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    widget.setLayout(grid)
+    widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)
+    return widget
+
+
+def _build_processing_fitting_stacked(window) -> QWidget:
+    """Fitting row: labels on top, controls on bottom; stores dynamic title refs."""
+    widget = QWidget(window)
+    grid = QGridLayout()
+    grid.setContentsMargins(0, 0, 0, 0)
+    grid.setHorizontalSpacing(SPECTRA_PROCESSING_SECTION_H_SPACING)
+    grid.setVerticalSpacing(SPECTRA_PROCESSING_SECTION_V_SPACING)
+    grid.setColumnMinimumWidth(0, PROCESSING_SECTION_LABEL_COL_WIDTH)
+    grid.setColumnStretch(5, 1)
+
+    section_lbl = QLabel("Fitting")
+    section_lbl.setToolTip("Peak fitting configuration.")
+    grid.addWidget(section_lbl, 1, 0, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    method_title = QLabel("Method")
+    method_title.setToolTip("Peak fitting model used to estimate the peak position.")
+    window.fit_method_combo.setToolTip("Peak fitting model used to estimate the peak position.")
+    grid.addWidget(method_title, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.fit_method_combo, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    order_title = QLabel("Order")
+    order_title.setToolTip("Polynomial order used when polynomial fitting is selected.")
+    window.poly_order_spin.setToolTip("Polynomial order used when polynomial fitting is selected.")
+    grid.addWidget(order_title, 0, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.poly_order_spin, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    crop_title = QLabel("Crop")
+    crop_title.setToolTip("Choose how the fit range is cropped around the detected peak.")
+    window.crop_method_combo.setToolTip("Choose how the fit range is cropped around the detected peak.")
+    grid.addWidget(crop_title, 0, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.crop_method_combo, 1, 3, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    parameter_title = QLabel("Param")
+    parameter_title.setToolTip(window.crop_parameter_label.toolTip())
+    grid.addWidget(parameter_title, 0, 4, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
+    grid.addWidget(window.crop_parameter_stack, 1, 4, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    window._processing_fit_method_title_widget = method_title
+    window._processing_fit_order_title_widget = order_title
+    window._processing_fit_crop_title_widget = crop_title
+    window._processing_fit_parameter_title_widget = parameter_title
 
     widget.setLayout(grid)
     widget.setSizePolicy(QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Fixed)

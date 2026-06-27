@@ -14,6 +14,7 @@ from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import QApplication
 
 from lspr_app.diagnostics import DiagnosticsConfig
+from lspr_app.gui.main_window_logging_ui import apply_text_widget_font_size_for
 from lspr_app.gui.runtime_diagnostics import SessionDiagnosticsSnapshot, build_session_statistics_lines
 from lspr_app.gui.logging_utils import SUCCESS_LOG_LEVEL
 from lspr_app.storage.output_paths import (
@@ -740,9 +741,7 @@ def refresh_session_summary_for(window, force: bool = False) -> None:
     text = build_session_panel_html_for(window)
     if force or text != window._last_summary_text:
         target.setHtml(text)
-        apply_font_size = getattr(window, "_apply_text_widget_font_size", None)
-        if callable(apply_font_size):
-            apply_font_size(target, float(getattr(target, "_panel_font_size_pt", 8.0)), minimum=7.0, maximum=16.0)
+        apply_text_widget_font_size_for(window, target, float(getattr(target, "_panel_font_size_pt", 8.0)), minimum=7.0, maximum=16.0)
         window._last_summary_text = text
         scrollbar = target.verticalScrollBar()
         if stay_at_bottom:
@@ -769,9 +768,7 @@ def refresh_session_statistics_for(window, force: bool = False) -> None:
     text = build_session_panel_html_for(window)
     if force or text != window._last_session_stats_text:
         target.setHtml(text)
-        apply_font_size = getattr(window, "_apply_text_widget_font_size", None)
-        if callable(apply_font_size):
-            apply_font_size(target, float(getattr(target, "_panel_font_size_pt", 8.0)), minimum=7.0, maximum=16.0)
+        apply_text_widget_font_size_for(window, target, float(getattr(target, "_panel_font_size_pt", 8.0)), minimum=7.0, maximum=16.0)
         window._last_session_stats_text = text
         scrollbar = target.verticalScrollBar()
         if stay_at_bottom:
@@ -864,3 +861,46 @@ def describe_spectrum_for(window, spectrum) -> str:
         f"nonlinear corr {correct_nonlinearity}"
         f"{display_text}"
     )
+
+
+def set_session_stats_recording_active_for(window, active: bool) -> None:
+    """Start or stop the session-stats recording mode."""
+    active = bool(active)
+    if active == bool(window._session_stats_recording_active):
+        window._render_session_stats_recording_blink_indicator()
+        return
+    if active:
+        window._session_stats_log.clear()
+        window._session_stats_log_last_text = ""
+        window._session_stats_log_last_capture_ts = 0.0
+        window._session_stats_recording_started_at = datetime.now(timezone.utc)
+        window._session_stats_recording_duration_s = None
+        window._session_stats_recording_active = True
+        window._session_stats_recording_blink_visible = True
+        window._update_session_stats_recording_timer_interval()
+        window._session_stats_recording_blink_timer.start()
+        window._session_stats_recording_requested_at = perf_counter()
+        window._capture_session_stats_recording_snapshot()
+        window._log_info("Session log recording started.")
+    else:
+        window._session_stats_recording_active = False
+        window._session_stats_recording_blink_timer.stop()
+        window._session_stats_recording_timer.stop()
+        window._session_stats_recording_requested_at = None
+        started_at = window._session_stats_recording_started_at
+        if started_at is not None:
+            window._session_stats_recording_duration_s = max(
+                (datetime.now(timezone.utc) - started_at).total_seconds(),
+                0.0,
+            )
+        destination = save_session_stats_log_for(window)
+        window._session_stats_recording_started_at = None
+        window._session_stats_recording_blink_visible = True
+        window._render_session_stats_recording_blink_indicator()
+        if destination is not None:
+            window.status_label.setText(f"Session log saved to {destination.name}")
+            window._log_success(f"Session log saved: {destination.name}")
+        else:
+            window._log_warning("Session log recording stopped without data.")
+        window._refresh_session_summary(force=True)
+        window._refresh_session_statistics(force=True)
