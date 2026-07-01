@@ -128,7 +128,7 @@ def _matching_controller_classes(port: ControllerPort) -> list[type[SerialContro
 
 def _probe_controller_device(port: ControllerPort) -> ConnectedSerialDevice:
     assignment = get_port_assignment(port.device)
-    if not should_probe_port_for_role(port.device, "valve"):
+    if not should_probe_port_for_role(port.device, "switch"):
         return _passive_record(port)
     candidate_classes = _matching_controller_classes(port)
     if not candidate_classes:
@@ -152,7 +152,7 @@ def _probe_controller_device(port: ControllerPort) -> ConnectedSerialDevice:
                 phase="inventory",
                 port=port.device,
                 owner=f"inventory:{controller_cls.controller_type}",
-                role="valve",
+                role="switch",
                 assignment=assignment,
                 action="probe",
                 command=None,
@@ -183,7 +183,7 @@ def _probe_controller_device(port: ControllerPort) -> ConnectedSerialDevice:
                 phase="inventory",
                 port=port.device,
                 owner=f"inventory:{controller_cls.controller_type}",
-                role="valve",
+                role="switch",
                 assignment=assignment,
                 action="probe",
                 command=None,

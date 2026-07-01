@@ -94,7 +94,8 @@ class HardwareInitTask(QRunnable):
             elif key.startswith("pump"):
                 if pump_probe is None:
                     pump_probe = result.probe
-                pump_error = result.error
+                if pump_error is None:
+                    pump_error = result.error
             elif key.startswith("selector") or key == "mswitch":
                 selector_devices = list(result.payload or [])
                 selector_error = result.error

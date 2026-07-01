@@ -181,7 +181,6 @@ class LegacyValveController(SerialController):
             release_port(port, self.controller_type)
             raise
         self.port = port
-        claim_port(port, self.controller_type)
         sleep(0.5)
         self.query("vi", max_wait_s=1.0)
 

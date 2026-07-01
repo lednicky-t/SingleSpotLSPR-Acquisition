@@ -489,24 +489,21 @@ class StartupLoader(QObject):
 
             self.progress.emit(10, "Loading core modules...")
             from lspr_app.domain.session import MeasurementSession
+            from lspr_app.device.simulated import SimulatedSpectrometer
 
-            self.progress.emit(30, "Preparing spectrometer backend...")
-            spectrometer = create_spectrometer(force_simulator=profile.force_simulator)
+            # Always start with the simulation backend so the window appears immediately.
+            # Real spectrometer and device discovery run on the background hardware-init
+            # worker after the window is shown (see _spectrometer_init_step).
+            self.progress.emit(30, "Preparing simulation backend...")
+            spectrometer = SimulatedSpectrometer()
             session = MeasurementSession()
-
-            if profile.scan_devices:
-                self.progress.emit(45, "Checking connected devices...")
-                pump_probe = discover_pump()
-            else:
-                self.progress.emit(45, "Skipping connected device lookup for this launch mode.")
-                pump_probe = None
 
             self.progress.emit(60, "Loading user interface...")
             from lspr_app.gui.experiment_control_window import ExperimentControlWindow  # noqa: F401
             from lspr_app.gui.main_window import MainWindow
 
             self.progress.emit(88, "Building main window...")
-            self.finished.emit((lock, spectrometer, session, pump_probe, MainWindow, self._launch_profile_key))
+            self.finished.emit((lock, spectrometer, session, None, MainWindow, self._launch_profile_key))
         except Exception as exc:  # pragma: no cover - startup failure path
             self.failed.emit(str(exc))
 

@@ -505,6 +505,7 @@ class SessionDiagnosticsSnapshot:
     pipeline_gap_lines: list[str]
     spectrum_redraw_lines: list[str]
     device_acquisition_lines: list[str]
+    device_timing_lines: list[str]
     runtime_drift_lines: list[str]
 
     @classmethod
@@ -781,6 +782,15 @@ class SessionDiagnosticsSnapshot:
             f"  Effective source rate: {_format_rate(getattr(window, '_effective_raw_rate_hz', None))}",
             f"  Dropped frames: {('-' if getattr(window, '_live_display_dropped_frames', None) is None else str(max(int(getattr(window, '_live_display_dropped_frames')), 0)))}",
         ]
+        device_timing_lines: list[str] = []
+        _device_service = getattr(window, "_device_comm_service", None)
+        if _device_service is not None:
+            _timing = _device_service.timing_summary()
+            if _timing:
+                for _op, _stats in sorted(_timing.items()):
+                    device_timing_lines.append(
+                        f"  {_op}: n={_stats['count']} avg={_stats['avg_ms']:.1f} ms max={_stats['max_ms']:.1f} ms"
+                    )
         return cls(
             diagnostics=diagnostics,
             display_rate_text=display_rate_text,
@@ -913,6 +923,7 @@ class SessionDiagnosticsSnapshot:
             pipeline_gap_lines=pipeline_gap_lines,
             spectrum_redraw_lines=spectrum_redraw_lines,
             device_acquisition_lines=device_acquisition_lines,
+            device_timing_lines=device_timing_lines,
             runtime_drift_lines=build_runtime_drift_lines_for(window),
         )
 
@@ -1055,6 +1066,7 @@ def build_session_statistics_lines(snapshot: SessionDiagnosticsSnapshot) -> list
         "",
         "Runtime drift probe",
         *snapshot.runtime_drift_lines,
+        *(["", "Device command timing", *snapshot.device_timing_lines] if snapshot.device_timing_lines else []),
     ]
     lines.extend(f"  {line}" for line in snapshot.diagnostics.summary_lines())
     return lines

@@ -4,13 +4,13 @@ from typing import Literal
 
 from lspr_app.storage.app_config import load_app_setting, save_app_setting
 
-DeviceAssignment = Literal["auto", "pump", "valve"]
+DeviceAssignment = Literal["auto", "pump", "switch"]
 
 _APP_SETTING_KEY = "manual_port_assignments"
 _ASSIGNMENT_LABELS: dict[str, str] = {
     "auto": "Auto",
     "pump": "Pump controller",
-    "valve": "Valve controller",
+    "switch": "Switch controller",
 }
 
 _assignment_cache: dict[str, DeviceAssignment] | None = None
@@ -23,8 +23,8 @@ def normalize_device_assignment(value: object) -> DeviceAssignment:
     assignment = assignment.replace("_", " ")
     if assignment in {"pump", "pump ctrl", "pump control"}:
         return "pump"
-    if assignment in {"valve", "valve ctrl", "valve control"}:
-        return "valve"
+    if assignment in {"switch", "switch ctrl", "switch control", "valve", "valve ctrl", "valve control"}:
+        return "switch"
     return "auto"
 
 
@@ -67,10 +67,13 @@ def get_port_assignment(port: str) -> DeviceAssignment:
 def should_probe_port_for_role(port: str, role: str) -> bool:
     assignment = get_port_assignment(port)
     role_name = str(role or "").strip().casefold()
-    if role_name not in {"pump", "valve"}:
+    if role_name not in {"pump", "switch"}:
         return True
     if assignment == "auto":
         return True
+    # Accept both "switch" and legacy "valve" assignment for the switch role
+    if role_name == "switch":
+        return assignment in {"switch", "valve"}
     return assignment == role_name
 
 

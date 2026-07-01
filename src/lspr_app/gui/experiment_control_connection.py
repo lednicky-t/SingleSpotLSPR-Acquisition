@@ -8,10 +8,10 @@ Classes
 -------
 ``PumpConnectTask``
     Probes a serial port for a Reglo ICC pump.
-``ValveConnectTask``
-    Connects a valve controller on a serial port.
-``MSwitchConnectTask``
-    Connects an M-Switch selector on a serial port.
+``DeviceConnectTask``
+    Connects any device (switch, selector, …) via the device service on a
+    thread-pool thread.  Previously split into ``ValveConnectTask`` and
+    ``SelectorConnectTask``; merged because the logic was identical.
 ``PortRefreshTask``
     Scans all available ports and returns a refresh payload.
 """
@@ -54,61 +54,37 @@ class PumpConnectTask(QRunnable):
         self.signals.finished.emit(self._generation, probe)
 
 
-# ── Valve ─────────────────────────────────────────────────────────────────────
+# ── Generic device connect (switch, selector, or any label-based device) ───────
 
-class ValveConnectSignals(QObject):
-    """Qt signals for :class:`ValveConnectTask`."""
+class DeviceConnectSignals(QObject):
+    """Qt signals for :class:`DeviceConnectTask`."""
 
     finished = pyqtSignal(object)
 
 
-class ValveConnectTask(QRunnable):
-    """Connect a valve controller on *port* on a thread-pool thread.
+class DeviceConnectTask(QRunnable):
+    """Connect any device via the device service on a thread-pool thread.
 
-    Emits ``finished`` with a ``(port, client, probe, error)`` tuple;
+    The profile for *label* must have its endpoint set to *port* before this
+    task is started.  Emits ``finished`` with a ``(port, status, error)`` tuple;
     *error* is ``None`` on success, a string message on failure.
+    *status* is the :class:`~lspr_app.device.communication_models.DeviceStatus`
+    returned by the service on success, ``None`` on failure.
     """
 
-    def __init__(self, port: str) -> None:
+    def __init__(self, label: str, port: str) -> None:
         super().__init__()
+        self._label = label
         self._port = port
-        self.signals = ValveConnectSignals()
+        self.signals = DeviceConnectSignals()
 
     def run(self) -> None:  # pragma: no cover - thread-pool path
         try:
-            client, probe = DeviceCommunicationService.shared().connect_valve_port(self._port)
+            status = DeviceCommunicationService.shared().connect(self._label)
         except Exception as exc:
-            self.signals.finished.emit((self._port, None, None, str(exc)))
+            self.signals.finished.emit((self._port, None, str(exc)))
             return
-        self.signals.finished.emit((self._port, client, probe, None))
-
-
-# ── M-Switch ──────────────────────────────────────────────────────────────────
-
-class MSwitchConnectSignals(QObject):
-    """Qt signals for :class:`MSwitchConnectTask`."""
-
-    finished = pyqtSignal(object)
-
-
-class MSwitchConnectTask(QRunnable):
-    """Connect an M-Switch selector on *port* on a thread-pool thread.
-
-    Emits ``finished`` with a ``(port, client, probe, error)`` tuple.
-    """
-
-    def __init__(self, port: str) -> None:
-        super().__init__()
-        self._port = port
-        self.signals = MSwitchConnectSignals()
-
-    def run(self) -> None:  # pragma: no cover - thread-pool path
-        try:
-            client, probe = DeviceCommunicationService.shared().connect_mswitch_port(self._port)
-        except Exception as exc:
-            self.signals.finished.emit((self._port, None, None, str(exc)))
-            return
-        self.signals.finished.emit((self._port, client, probe, None))
+        self.signals.finished.emit((self._port, status, None))
 
 
 # ── Port refresh ──────────────────────────────────────────────────────────────

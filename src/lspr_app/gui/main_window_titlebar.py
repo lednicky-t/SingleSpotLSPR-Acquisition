@@ -4,7 +4,6 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QMenuBar, QWidget
 
 from lspr_core import DEFAULT_LAUNCH_PROFILE, launch_profile_spec
-from lspr_app.device.connection_registry import snapshot_port_ownership
 from lspr_app.gui.icon_helpers import device_status_icon
 
 
@@ -157,22 +156,39 @@ def refresh_hw_device_status_strip(window) -> None:
             pass
     overrides = getattr(window, "_hardware_status_overrides", {})
     init_active = bool(getattr(window, "_hardware_init_task", None)) or not bool(getattr(window, "_hardware_init_ready_emitted", False))
-    pump_client = getattr(experiment_control_window, "_client", None) if experiment_control_window is not None else None
-    valve_client = getattr(experiment_control_window, "_valve_client", None) if experiment_control_window is not None else None
-    mswitch_client = getattr(experiment_control_window, "_mswitch_client", None) if experiment_control_window is not None else None
     pump_probe = getattr(experiment_control_window, "_probe", None) if experiment_control_window is not None else None
     valve_probe = getattr(experiment_control_window, "_valve_probe", None) if experiment_control_window is not None else None
     mswitch_probe = getattr(experiment_control_window, "_mswitch_probe", None) if experiment_control_window is not None else None
-    owner_snapshot = snapshot_port_ownership()
+    device_service = getattr(window, "_device_comm_service", None)
 
-    def _is_connected(client, owner_label: str) -> bool:
-        if client is None or not getattr(client, "is_connected", lambda: False)():
+    def _device_label(device_key: str) -> str:
+        if experiment_control_window is not None and hasattr(experiment_control_window, "_device_label_for"):
+            try:
+                return str(experiment_control_window._device_label_for(device_key))
+            except Exception:
+                pass
+        return {
+            "pump": "pump_1",
+            "valve": "valve_1",
+            "mswitch": "selector_1",
+        }.get(device_key, device_key)
+
+    def _service_connection(device_key: str):
+        if device_service is None:
+            return None
+        try:
+            return device_service.connection(_device_label(device_key))
+        except Exception:
+            return None
+
+    def _is_service_connected(device_key: str) -> bool:
+        if device_service is None:
             return False
-        port = getattr(client, "port", None)
-        port_name = getattr(port, "device", port)
-        if not port_name:
-            return False
-        return owner_label in owner_snapshot.get(str(port_name), "")
+        try:
+            return bool(device_service.is_connected(_device_label(device_key)))
+        except Exception:
+            connection = _service_connection(device_key)
+            return bool(connection is not None and getattr(connection, "is_connected", lambda: False)())
 
     def _port_name(probe: object | None) -> str:
         if probe is None:
@@ -180,11 +196,17 @@ def refresh_hw_device_status_strip(window) -> None:
         port = getattr(probe, "port", None)
         return str(getattr(port, "device", port) or "").strip()
 
-    def _is_discovered(client, probe: object | None, owner_label: str) -> bool:
+    def _connection_port_name(device_key: str) -> str:
+        connection = _service_connection(device_key)
+        if connection is None:
+            return ""
+        return str(getattr(connection, "port", None) or "").strip()
+
+    def _is_discovered(device_key: str, probe: object | None) -> bool:
         port_name = _port_name(probe)
         if not port_name:
             return False
-        if _is_connected(client, owner_label):
+        if _is_service_connected(device_key):
             return False
         return True
 
@@ -192,33 +214,27 @@ def refresh_hw_device_status_strip(window) -> None:
         "spectrometer": ("connected" if bool(window._hardware_available) else "disconnected", "", ""),
         "pump": (
             device_status_state(
-                _is_connected(pump_client, "Experiment Control / Pump"),
-                _is_discovered(pump_client, pump_probe, "Experiment Control / Pump"),
+                _is_service_connected("pump"),
+                _is_discovered("pump", pump_probe),
             ),
             "",
-            _port_name(pump_probe) if not _is_connected(pump_client, "Experiment Control / Pump") else str(
-                getattr(getattr(pump_client, "port", None), "device", getattr(pump_client, "port", "")) or ""
-            ).strip(),
+            _connection_port_name("pump") if _is_service_connected("pump") else _port_name(pump_probe),
         ),
         "valve": (
             device_status_state(
-                _is_connected(valve_client, "Experiment Control / Valve"),
-                _is_discovered(valve_client, valve_probe, "Experiment Control / Valve"),
+                _is_service_connected("valve"),
+                _is_discovered("valve", valve_probe),
             ),
             "",
-            _port_name(valve_probe) if not _is_connected(valve_client, "Experiment Control / Valve") else str(
-                getattr(getattr(valve_client, "port", None), "device", getattr(valve_client, "port", "")) or ""
-            ).strip(),
+            _connection_port_name("valve") if _is_service_connected("valve") else _port_name(valve_probe),
         ),
         "mswitch": (
             device_status_state(
-                _is_connected(mswitch_client, "Experiment Control / M-Switch"),
-                _is_discovered(mswitch_client, mswitch_probe, "Experiment Control / M-Switch"),
+                _is_service_connected("mswitch"),
+                _is_discovered("mswitch", mswitch_probe),
             ),
             "",
-            _port_name(mswitch_probe) if not _is_connected(mswitch_client, "Experiment Control / M-Switch") else str(
-                getattr(getattr(mswitch_client, "port", None), "device", getattr(mswitch_client, "port", "")) or ""
-            ).strip(),
+            _connection_port_name("mswitch") if _is_service_connected("mswitch") else _port_name(mswitch_probe),
         ),
     }
     for key, icon_label, text_label in items:

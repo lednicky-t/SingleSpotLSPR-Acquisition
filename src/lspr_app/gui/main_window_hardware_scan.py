@@ -36,8 +36,16 @@ from lspr_app.device.reglo_icc import PumpProbe, RegloICCClient, is_probable_reg
 from lspr_app.device.port_assignments import get_port_assignment, should_probe_port_for_role
 from lspr_app.device.probe_diagnostics import record_port_probe_event
 from lspr_app.device.serial_controllers import ControllerProbe, SerialController, controller_port_priority
-from lspr_app.device.simulated import SimulatedSpectrometer
 from lspr_app.gui.hardware_initializer import HardwareInitStep, HardwareInitStepResult
+
+
+def _valid_port_name(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.casefold() in {"none", "null", "n/a", "-"}:
+        return None
+    return text
 
 
 # ── Internal helper ────────────────────────────────────────────────────────────
@@ -71,26 +79,33 @@ def _record_startup_port_probe_event(
 
 # ── Spectrometer ───────────────────────────────────────────────────────────────
 
-def _spectrometer_init_step(spectrometer) -> HardwareInitStepResult:
-    """Return a step result describing the active spectrometer backend."""
-    name = spectrometer.device_name()
-    if isinstance(spectrometer, SimulatedSpectrometer):
+def _spectrometer_init_step() -> HardwareInitStepResult:
+    """Try to open the real spectrometer on this worker thread.
+
+    Returns the live ``OceanSpectrometer`` instance as ``payload`` on success so
+    the GUI thread can swap ``window._spectrometer`` without any additional init.
+    """
+    try:
+        from lspr_app.device.base import SpectrometerError
+        from lspr_app.device.ocean import OceanSpectrometer
+        spec = OceanSpectrometer()
+        return HardwareInitStepResult(
+            key="spectrometer",
+            label="Spectrometer",
+            state="ready",
+            message=f"Spectrometer backend active: {spec.device_name()}.",
+            connected=True,
+            payload=spec,
+        )
+    except (ImportError, Exception):
         return HardwareInitStepResult(
             key="spectrometer",
             label="Spectrometer",
             state="simulation",
-            message="Simulation backend ready.",
+            message="No spectrometer detected. Using simulation backend.",
             connected=False,
-            payload=name,
+            payload=None,
         )
-    return HardwareInitStepResult(
-        key="spectrometer",
-        label="Spectrometer",
-        state="ready",
-        message=f"Spectrometer backend active: {name}.",
-        connected=True,
-        payload=name,
-    )
 
 
 # ── Profile-based device connection ───────────────────────────────────────────
@@ -154,12 +169,13 @@ def _pump_scan_step(service: DeviceCommunicationService) -> HardwareInitStepResu
     preferred_ports = [
         port
         for port in all_ports
-        if get_port_assignment(port.device) == "pump" and should_probe_port_for_role(port.device, "pump")
+        if _valid_port_name(port.device) and get_port_assignment(port.device) == "pump" and should_probe_port_for_role(port.device, "pump")
     ]
     probable_ports = [
         port
         for port in all_ports
-        if get_port_assignment(port.device) == "auto"
+        if _valid_port_name(port.device)
+        and get_port_assignment(port.device) == "auto"
         and is_probable_reglo_port(port)
         and should_probe_port_for_role(port.device, "pump")
     ]
@@ -178,28 +194,31 @@ def _pump_scan_step(service: DeviceCommunicationService) -> HardwareInitStepResu
     last_error: str | None = None
     assigned_error: str | None = None
     for port in ports:
-        assignment = get_port_assignment(port.device)
-        if not should_probe_port_for_role(port.device, "pump"):
+        port_name = _valid_port_name(port.device)
+        if port_name is None:
+            continue
+        assignment = get_port_assignment(port_name)
+        if not should_probe_port_for_role(port_name, "pump"):
             _record_startup_port_probe_event(
                 role="pump",
-                port=port.device,
+                port=port_name,
                 assignment=assignment,
                 action="skip",
                 result="skipped",
-                message=f"Port {port.device} is assigned to {assignment} and is excluded from pump probing.",
+                message=f"Port {port_name} is assigned to {assignment} and is excluded from pump probing.",
                 owner="startup:pump",
             )
             continue
         started = perf_counter()
         try:
-            probe = RegloICCClient.probe_port(port.device)
+            probe = RegloICCClient.probe_port(port_name)
         except Exception as exc:
             last_error = str(exc)
             if assignment == "pump" and assigned_error is None:
-                assigned_error = f"Assigned pump port {port.device} did not respond as Reglo ICC: {exc}"
+                assigned_error = f"Assigned pump port {port_name} did not respond as Reglo ICC: {exc}"
             _record_startup_port_probe_event(
                 role="pump",
-                port=port.device,
+                port=port_name,
                 assignment=assignment,
                 action="probe",
                 result="fail",
@@ -211,7 +230,7 @@ def _pump_scan_step(service: DeviceCommunicationService) -> HardwareInitStepResu
             continue
         _record_startup_port_probe_event(
             role="pump",
-            port=port.device,
+            port=port_name,
             assignment=assignment,
             action="probe",
             result="success",
@@ -225,7 +244,7 @@ def _pump_scan_step(service: DeviceCommunicationService) -> HardwareInitStepResu
         profile = service.find_or_create_profile(
             device_type="pump",
             fingerprint=fingerprint,
-            endpoint=port.device,
+            endpoint=port_name,
             identity={
                 "model": probe.model,
                 "serial_number": probe.serial_number,
@@ -235,7 +254,7 @@ def _pump_scan_step(service: DeviceCommunicationService) -> HardwareInitStepResu
             driver="reglo_icc",
         )
         try:
-            service.connect(profile.label)
+            service.connect(profile.label, cached_pump_probe=probe)
         except Exception:
             pass
         found_probes.append(probe)
@@ -294,7 +313,9 @@ def _selector_scan_step(service: DeviceCommunicationService) -> HardwareInitStep
         )
     found_profiles: list[DeviceProfile] = []
     for device in devices:
-        port_name = getattr(device, "port", "")
+        port_name = _valid_port_name(getattr(device, "port", ""))
+        if port_name is None:
+            continue
         sn = getattr(device, "serial_number", None) or ""
         fingerprint = f"amf-selector:{sn}" if sn else extract_usb_fingerprint(getattr(device, "hwid", ""))
         identity = {
@@ -312,7 +333,7 @@ def _selector_scan_step(service: DeviceCommunicationService) -> HardwareInitStep
         )
         found_profiles.append(profile)
     first = devices[0]
-    port_name = getattr(first, "port", "unknown")
+    port_name = _valid_port_name(getattr(first, "port", "")) or "unknown"
     primary_profile = found_profiles[0] if found_profiles else None
     return HardwareInitStepResult(
         key=primary_profile.label if primary_profile else "selector_scan",
@@ -333,12 +354,13 @@ def _valve_scan_step(service: DeviceCommunicationService) -> HardwareInitStepRes
     preferred_ports = [
         port
         for port in all_ports
-        if get_port_assignment(port.device) == "valve" and should_probe_port_for_role(port.device, "valve")
+        if _valid_port_name(port.device) and get_port_assignment(port.device) == "valve" and should_probe_port_for_role(port.device, "valve")
     ]
     likely_ports = [
         port
         for port in all_ports
-        if get_port_assignment(port.device) == "auto"
+        if _valid_port_name(port.device)
+        and get_port_assignment(port.device) == "auto"
         and controller_port_priority(port) > 0
         and should_probe_port_for_role(port.device, "valve")
     ]
@@ -356,28 +378,31 @@ def _valve_scan_step(service: DeviceCommunicationService) -> HardwareInitStepRes
     last_error: str | None = None
     assigned_error: str | None = None
     for port in ports:
-        assignment = get_port_assignment(port.device)
-        if not should_probe_port_for_role(port.device, "valve"):
+        port_name = _valid_port_name(port.device)
+        if port_name is None:
+            continue
+        assignment = get_port_assignment(port_name)
+        if not should_probe_port_for_role(port_name, "valve"):
             _record_startup_port_probe_event(
                 role="valve",
-                port=port.device,
+                port=port_name,
                 assignment=assignment,
                 action="skip",
                 result="skipped",
-                message=f"Port {port.device} is assigned to {assignment} and is excluded from valve probing.",
+                message=f"Port {port_name} is assigned to {assignment} and is excluded from valve probing.",
                 owner="startup:valve",
             )
             continue
         started = perf_counter()
         try:
-            probe_result = service.probe_endpoint(port.device, "valve")
+            probe_result = service.probe_endpoint(port_name, "valve")
         except Exception as exc:
             last_error = str(exc)
             if assignment == "valve" and assigned_error is None:
-                assigned_error = f"Assigned valve port {port.device} did not respond as a valve controller: {exc}"
+                assigned_error = f"Assigned valve port {port_name} did not respond as a valve controller: {exc}"
             _record_startup_port_probe_event(
                 role="valve",
-                port=port.device,
+                port=port_name,
                 assignment=assignment,
                 action="probe",
                 result="fail",
@@ -389,10 +414,10 @@ def _valve_scan_step(service: DeviceCommunicationService) -> HardwareInitStepRes
         if not probe_result.success:
             last_error = probe_result.error or "Valve probe failed."
             if assignment == "valve" and assigned_error is None:
-                assigned_error = f"Assigned valve port {port.device} did not respond as a valve controller: {probe_result.error or 'unknown error'}"
+                assigned_error = f"Assigned valve port {port_name} did not respond as a valve controller: {probe_result.error or 'unknown error'}"
             _record_startup_port_probe_event(
                 role="valve",
-                port=port.device,
+                port=port_name,
                 assignment=assignment,
                 action="probe",
                 result="fail",
@@ -402,7 +427,7 @@ def _valve_scan_step(service: DeviceCommunicationService) -> HardwareInitStepRes
             )
             continue
         probe = ControllerProbe(
-            port=port.device,
+            port=port_name,
             controller_type=probe_result.detected_type or "valve",
             model=probe_result.identity.get("model", ""),
             serial_number=probe_result.identity.get("serial_number") or None,
@@ -410,7 +435,7 @@ def _valve_scan_step(service: DeviceCommunicationService) -> HardwareInitStepRes
         )
         _record_startup_port_probe_event(
             role="valve",
-            port=port.device,
+            port=port_name,
             assignment=assignment,
             action="probe",
             result="success",
@@ -422,7 +447,7 @@ def _valve_scan_step(service: DeviceCommunicationService) -> HardwareInitStepRes
         profile = service.find_or_create_profile(
             device_type="valve",
             fingerprint=fingerprint,
-            endpoint=port.device,
+            endpoint=port_name,
             identity={
                 "model": probe.model,
                 "serial_number": probe.serial_number or "",
@@ -439,7 +464,7 @@ def _valve_scan_step(service: DeviceCommunicationService) -> HardwareInitStepRes
             key=profile.label,
             label="Valve scan",
             state="connected",
-            message=f"Valve controller connected on {port.device}.",
+            message=f"Valve controller connected on {port_name}.",
             connected=True,
             probe=probe,
             payload=probe,
@@ -463,14 +488,42 @@ def hardware_init_steps_for(window) -> list[HardwareInitStep]:
     Called by ``window._hardware_init_steps()`` which is invoked by
     ``start_hardware_initialization_for`` in ``main_window_lifecycle``.
     """
-    spectrometer = window._spectrometer
     service: DeviceCommunicationService = window._device_comm_service
+    available_pump_ports = {
+        port.device
+        for port in RegloICCClient.list_ports()
+        if _valid_port_name(getattr(port, "device", None))
+    }
+    available_serial_ports = {
+        port.device
+        for port in SerialController.list_ports()
+        if _valid_port_name(getattr(port, "device", None))
+    }
+    try:
+        available_selector_ports = {
+            _valid_port_name(getattr(device, "port", None))
+            for device in detect_amf_selector_devices()
+        }
+        available_selector_ports.discard(None)
+    except Exception:
+        available_selector_ports = set()
     steps: list[HardwareInitStep] = [
-        HardwareInitStep("spectrometer", "Spectrometer", lambda: _spectrometer_init_step(spectrometer)),
+        HardwareInitStep("spectrometer", "Spectrometer", _spectrometer_init_step),
     ]
     configured_types: set[str] = set()
     for profile in sorted(service.list_profiles(), key=lambda p: p.label):
-        if not profile.enabled or not profile.endpoint:
+        endpoint = _valid_port_name(profile.endpoint)
+        if not profile.enabled or not endpoint:
+            continue
+        profile_type = str(profile.type or "").strip().casefold()
+        endpoint_available = True
+        if profile_type == "pump":
+            endpoint_available = endpoint in available_pump_ports
+        elif profile_type == "valve":
+            endpoint_available = endpoint in available_serial_ports
+        elif profile_type == "selector":
+            endpoint_available = endpoint in available_selector_ports if available_selector_ports else False
+        if not endpoint_available:
             continue
         configured_types.add(profile.type)
         display = profile.display_name or profile.label

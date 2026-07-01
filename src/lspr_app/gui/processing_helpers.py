@@ -164,7 +164,7 @@ def compute_trace_metrics(
 
 def compute_centroid_nm(processed: Spectrum, fit: Spectrum | None, settings: ProcessingSettings) -> float:
     dense_wavelengths, dense_values, _ = get_dense_analysis_curve(processed, fit, settings)
-    centroid = centroid_from_curve(dense_wavelengths, dense_values)
+    centroid = centroid_from_curve(dense_wavelengths, dense_values, threshold_fraction=settings.crop_fraction)
     if centroid is not None:
         return centroid
     peak_index = _safe_nanargmax_index(processed.values)
@@ -316,7 +316,7 @@ def get_analysis_metrics(
         if processed_peak_index is not None and processed_peak_index < len(processed.wavelengths_nm):
             dense_max_nm = float(processed.wavelengths_nm[processed_peak_index])
 
-    centroid_nm = centroid_from_curve(dense_wavelengths, dense_values)
+    centroid_nm = centroid_from_curve(dense_wavelengths, dense_values, threshold_fraction=settings.crop_fraction)
     if centroid_nm is None:
         centroid_nm = dense_max_nm
 

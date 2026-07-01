@@ -875,6 +875,10 @@ class MainWindow(QMainWindow):
         self._debug_timing_enabled = self._diagnostics.debug_timing_enabled
         self._deep_timing_enabled = self._diagnostics.deep_timing_enabled
         self._diagnostics_panel_enabled = self._diagnostics.diagnostics_panel_enabled
+        self._device_comm_service.configure_timing(
+            debug=self._debug_timing_enabled,
+            deep=self._deep_timing_enabled,
+        )
         self._ui_state_timer = QTimer(self)
         self._ui_state_timer.setSingleShot(True)
         self._ui_state_timer.setInterval(500)

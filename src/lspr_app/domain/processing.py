@@ -208,7 +208,19 @@ def polynomial_peak_from_curve(
     return float(dense_x[int(np.nanargmax(dense_y))])
 
 
-def centroid_from_curve(wavelengths: np.ndarray, values: np.ndarray) -> float | None:
+def centroid_from_curve(
+    wavelengths: np.ndarray,
+    values: np.ndarray,
+    threshold_fraction: float | None = None,
+) -> float | None:
+    """Compute the intensity-weighted centroid wavelength.
+
+    *threshold_fraction* (0–1) sets the baseline level used as the zero-weight
+    reference: ``baseline + threshold_fraction × amplitude``.  Only signal
+    above that level contributes to the centroid, which anchors the result to
+    the true peak top rather than the broad skirts.  When ``None`` the local
+    minimum is used as the reference (legacy behaviour).
+    """
     if len(wavelengths) < 3:
         return None
 
@@ -216,8 +228,16 @@ def centroid_from_curve(wavelengths: np.ndarray, values: np.ndarray) -> float | 
     if cleaned is None:
         return None
     x, y, _ = cleaned
-    shifted = y - float(np.nanmin(y))
-    weights = np.clip(shifted, 0.0, None)
+
+    baseline = float(np.nanmin(y))
+    if threshold_fraction is not None:
+        fraction = float(np.clip(threshold_fraction, 0.0, 1.0))
+        amplitude = float(np.nanmax(y)) - baseline
+        reference = baseline + fraction * amplitude if amplitude > 0 else baseline
+    else:
+        reference = baseline
+
+    weights = np.clip(y - reference, 0.0, None)
     total = float(np.nansum(weights))
     if total <= 0:
         return None

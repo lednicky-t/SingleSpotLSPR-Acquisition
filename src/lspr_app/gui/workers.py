@@ -344,9 +344,21 @@ def _live_processing_worker_main(
                     if control_message.debug_mode_enabled is not None:
                         set_processing_debug_mode_enabled(bool(control_message.debug_mode_enabled))
 
-            try:
-                event = input_queue.get(timeout=0.05)
-            except queue.Empty:
+            # Drain the input queue and keep only the latest frame.
+            # If the source runs faster than the display poll rate, intermediate
+            # frames pile up here.  Processing them all would waste CPU and add
+            # latency; the GUI discards every result except the most recent one
+            # anyway.  Skipping to the latest frame keeps processing cost
+            # proportional to the display rate, not the source rate.
+            event = None
+            while True:
+                try:
+                    event = input_queue.get_nowait()
+                except queue.Empty:
+                    break
+            if event is None:
+                # Nothing pending — sleep briefly so the loop does not spin hot.
+                stop_event.wait(timeout=0.05)
                 continue
             if event.result is None:
                 continue

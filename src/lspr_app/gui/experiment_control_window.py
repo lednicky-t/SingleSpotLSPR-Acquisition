@@ -56,12 +56,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from lspr_app.device.device_comm_service import (
-    PortRefreshData,
-)
 from lspr_app.device.device_manager import DeviceCommunicationService
-from lspr_app.device.communication_models import DeviceCommand
-from lspr_app.device.connection_registry import claim_port, release_port
+from lspr_app.device.device_types import PUMP, SWITCH, SELECTOR
+from lspr_app.device.communication_models import DeviceCommand, DeviceStatus, PortRefreshData
 from lspr_app.device.port_assignments import get_port_assignment
 from lspr_app.device.serial_controllers import ControllerProbe, SerialController, controller_port_priority
 from lspr_app.device.reglo_icc import PumpProbe, RegloICCClient, is_probable_reglo_port
@@ -123,10 +120,9 @@ from lspr_app.gui.experiment_control_export import (
     ExperimentPlanExportTask,
 )
 from lspr_app.gui.experiment_control_connection import (
-    MSwitchConnectTask,
+    DeviceConnectTask,
     PortRefreshTask,
     PumpConnectTask,
-    ValveConnectTask,
 )
 from lspr_app.gui.experiment_control_widgets import (
     ExperimentControlTableView,
@@ -171,7 +167,7 @@ class ExperimentControlWindow(QWidget):
         ("Gold", "#EDC948"),
         ("Gray", "#9C9DA1"),
     ]
-    STARTUP_DEVICE_ORDER = ("pump", "valve", "mswitch")
+    STARTUP_DEVICE_ORDER = (PUMP, SWITCH, SELECTOR)
 
     PLAN_COLUMNS = [
         "step",
@@ -228,11 +224,11 @@ class ExperimentControlWindow(QWidget):
         self._connect_task: PumpConnectTask | None = None
         self._valve_probe: ControllerProbe | None = None
         self._valve_connect_in_progress = False
-        self._valve_connect_task: ValveConnectTask | None = None
+        self._valve_connect_task: DeviceConnectTask | None = None
         self._mswitch_probe: ControllerProbe | None = None
         self._mswitch_probe_cache: list[ControllerProbe] | None = list(initial_mswitch_devices or [])
         self._mswitch_connect_in_progress = False
-        self._mswitch_connect_task: MSwitchConnectTask | None = None
+        self._mswitch_connect_task: DeviceConnectTask | None = None
         self._connection_sync_in_progress = False
         self._auto_connect_devices = bool(auto_connect_devices)
         self._startup_auto_connect_enabled = False
@@ -377,7 +373,7 @@ class ExperimentControlWindow(QWidget):
 
         self.valve_connection_dot = QLabel(self)
         self.valve_connection_dot.setFixedSize(10, 10)
-        self.valve_connection_status_label = QLabel("Valve controller offline.", self)
+        self.valve_connection_status_label = QLabel("Switch controller offline.", self)
         self.valve_port_combo = QComboBox(self)
         self.valve_port_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.valve_refresh_ports_button = QPushButton("Refresh", self)
@@ -386,7 +382,7 @@ class ExperimentControlWindow(QWidget):
 
         self.mswitch_connection_dot = QLabel(self)
         self.mswitch_connection_dot.setFixedSize(10, 10)
-        self.mswitch_connection_status_label = QLabel("M-Switch offline.", self)
+        self.mswitch_connection_status_label = QLabel("Selector offline.", self)
         self.mswitch_connection_status_label.setWordWrap(True)
         self.mswitch_port_combo = QComboBox(self)
         self.mswitch_port_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
@@ -4169,7 +4165,7 @@ class ExperimentControlWindow(QWidget):
         for index, port in enumerate(ports):
             label = f"{port.device}  |  {port.description}"
             self.valve_port_combo.addItem(label, port.device)
-            if get_port_assignment(port.device) == "valve":
+            if get_port_assignment(port.device) == "switch":
                 manual_indices.append(index)
             priority = controller_port_priority(port)
             if priority > 0:
@@ -4209,11 +4205,11 @@ class ExperimentControlWindow(QWidget):
             return
 
         if self.valve_port_combo.count() == 0:
-            self._set_valve_connection_visual(False, "Valve controller offline. No serial ports found.")
+            self._set_valve_connection_visual(False, "Switch controller offline. No serial ports found.")
             _LOGGER.warning("Valve port scan found no serial ports.")
         else:
             self.valve_port_combo.setCurrentIndex(-1)
-            self._set_valve_connection_visual(False, "Valve controller offline. Select a port to connect manually.")
+            self._set_valve_connection_visual(False, "Switch controller offline. Select a port to connect manually.")
 
     def _populate_mswitch_ports(self, devices: list[object], *, amf_available: bool) -> None:
         current = self.mswitch_port_combo.currentData()
@@ -4222,7 +4218,7 @@ class ExperimentControlWindow(QWidget):
             self.mswitch_port_combo.clear()
             self.mswitch_port_combo.addItem("AMFTools not installed", None)
             self.mswitch_port_combo.blockSignals(False)
-            self._set_mswitch_connection_visual(False, "AMFTools is not installed. M-Switch unavailable.")
+            self._set_mswitch_connection_visual(False, "AMFTools is not installed. Selector unavailable.")
             self.mswitch_connection_toggle_button.setEnabled(False)
             self.mswitch_home_button.setEnabled(False)
             self.mswitch_move_button.setEnabled(False)
@@ -4247,7 +4243,7 @@ class ExperimentControlWindow(QWidget):
         if self.mswitch_port_combo.count() > 0:
             self.mswitch_port_combo.setCurrentIndex(0)
         else:
-            self._set_mswitch_connection_visual(False, "M-Switch offline. No AMF switch discovered.")
+            self._set_mswitch_connection_visual(False, "Selector offline. No AMF switch discovered.")
 
     def _start_port_refresh(self) -> None:
         if self._port_refresh_in_progress:
@@ -4295,22 +4291,23 @@ class ExperimentControlWindow(QWidget):
 
     def _device_label_for(self, device_key: str) -> str:
         return {
-            "pump": "pump_1",
-            "valve": "valve_1",
-            "mswitch": "switch_1",
+            PUMP: "pump_1",
+            SWITCH: "switch_1",
+            SELECTOR: "selector_1",
         }.get(device_key, f"{device_key}_main")
 
     def _ensure_device_profile(self, device_key: str, port: str, *, driver: str) -> str:
         label = self._device_label_for(device_key)
         role = {
-            "pump": "sample_pump",
-            "valve": "inlet_valve",
-            "mswitch": "main_switch",
+            PUMP: "sample_pump",
+            SWITCH: "inlet_switch",
+            SELECTOR: "main_selector",
         }.get(device_key)
+        device_type = device_key
         self._device_comm_service.register_endpoint_assignment(
             label,
             port,
-            device_type=device_key,
+            device_type=device_type,
             driver=driver,
             role=role,
         )
@@ -4452,7 +4449,7 @@ class ExperimentControlWindow(QWidget):
         return bool(selected_port is not None and self.port_combo.findData(selected_port) >= 0)
 
     def _startup_valve_ready(self) -> bool:
-        if self._service_device_connected("valve"):
+        if self._service_device_connected(SWITCH):
             return False
         if self._valve_connect_in_progress or self._valve_connect_task is not None:
             return False
@@ -4460,7 +4457,7 @@ class ExperimentControlWindow(QWidget):
         return bool(selected_port is not None and self.valve_port_combo.findData(selected_port) >= 0)
 
     def _startup_mswitch_ready(self) -> bool:
-        if self._service_device_connected("mswitch"):
+        if self._service_device_connected(SELECTOR):
             return False
         if self._mswitch_connect_in_progress or self._mswitch_connect_task is not None:
             return False
@@ -4470,18 +4467,18 @@ class ExperimentControlWindow(QWidget):
     def _startup_device_ready(self, device_key: str) -> bool:
         if device_key == "pump":
             return self._startup_pump_ready()
-        if device_key == "valve":
+        if device_key == SWITCH:
             return self._startup_valve_ready()
-        if device_key == "mswitch":
+        if device_key == SELECTOR:
             return self._startup_mswitch_ready()
         return False
 
     def _startup_attempt_device_connect(self, device_key: str) -> bool:
         if device_key == "pump":
             return self.connect_best_pump_controller()
-        if device_key == "valve":
+        if device_key == SWITCH:
             return self.connect_best_valve_controller()
-        if device_key == "mswitch":
+        if device_key == SELECTOR:
             return self.connect_best_mswitch_controller()
         return False
 
@@ -4496,7 +4493,7 @@ class ExperimentControlWindow(QWidget):
         return str(data) if data else None
 
     def _toggle_valve_connection(self) -> None:
-        if self._service_device_connected("valve"):
+        if self._service_device_connected(SWITCH):
             self._disconnect_valve_controller()
         else:
             self._connect_selected_valve_port()
@@ -4509,9 +4506,10 @@ class ExperimentControlWindow(QWidget):
         if self._valve_connect_task is not None:
             return
         self._valve_connect_in_progress = True
-        self._set_valve_connection_visual(False, f"Connecting valve controller on {port}...")
-        _LOGGER.info("Connecting valve controller on %s", port)
-        task = ValveConnectTask(port)
+        self._set_valve_connection_visual(False, f"Connecting switch controller on {port}...")
+        _LOGGER.info("Connecting switch controller on %s", port)
+        label = self._ensure_device_profile(SWITCH, port, driver="auto")
+        task = DeviceConnectTask(label, port)
         task.signals.finished.connect(self._handle_valve_connect_finished)
         self._valve_connect_task = task
         self._thread_pool.start(task)
@@ -4519,42 +4517,37 @@ class ExperimentControlWindow(QWidget):
     def _handle_valve_connect_finished(self, payload: object) -> None:
         self._valve_connect_in_progress = False
         self._valve_connect_task = None
-        if not isinstance(payload, tuple) or len(payload) != 4:
-            self._set_valve_connection_visual(False, "Valve connect failed.")
+        if not isinstance(payload, tuple) or len(payload) != 3:
+            self._set_valve_connection_visual(False, "Switch connect failed.")
             self.valve_availability_changed.emit(None)
-            _LOGGER.warning("Valve connect finished with unexpected payload.")
+            _LOGGER.warning("Switch connect finished with unexpected payload.")
             return
-        port, client, probe, error = payload
-        if client is None or probe is None:
-            self._device_comm_service.disconnect_device(self._device_label_for("valve"))
+        port, status, error = payload
+        if not isinstance(status, DeviceStatus):
+            self._device_comm_service.disconnect_device(self._device_label_for(SWITCH))
             self._valve_probe = None
-            self._set_valve_connection_visual(False, f"Valve connect failed on {port}: {error}")
+            self._set_valve_connection_visual(False, f"Switch connect failed on {port}: {error}")
             self.valve_availability_changed.emit(None)
-            _LOGGER.warning("Valve connect failed on %s: %s", port, error)
-            self._finish_startup_device_auto_connect_stage("valve")
+            _LOGGER.warning("Switch connect failed on %s: %s", port, error)
+            self._finish_startup_device_auto_connect_stage(SWITCH)
             return
-        label = self._ensure_device_profile("valve", probe.port, driver=str(getattr(probe, "controller_type", "auto") or "auto"))
-        try:
-            self._device_comm_service.adopt_connection(label, client)
-        except Exception as exc:
-            if hasattr(client, "close"):
-                client.close()
-            self._set_valve_connection_visual(False, f"Valve connect failed on {port}: {exc}")
-            self.valve_availability_changed.emit(None)
-            _LOGGER.warning("Valve service connect failed on %s: %s", port, exc)
-            self._finish_startup_device_auto_connect_stage("valve")
-            return
+        probe = ControllerProbe(
+            port=status.endpoint or port,
+            controller_type=status.identity.get("controller_type", ""),
+            model=status.identity.get("model", "valve controller"),
+            serial_number=status.identity.get("serial_number") or None,
+            protocol_version=status.identity.get("protocol_version") or None,
+        )
         self._valve_probe = probe
-        claim_port(probe.port, "Experiment Control / Valve")
         self._set_valve_connection_visual(True, f"Connected to {probe.model} [{probe.controller_type}] on {probe.port}.")
         self.valve_availability_changed.emit(probe)
-        _LOGGER.info("Valve controller connected | model=%s type=%s port=%s", probe.model, probe.controller_type, probe.port)
-        self._finish_startup_device_auto_connect_stage("valve")
+        _LOGGER.info("Switch controller connected | model=%s type=%s port=%s", probe.model, probe.controller_type, probe.port)
+        self._finish_startup_device_auto_connect_stage(SWITCH)
 
     def connect_best_valve_controller(self) -> bool:
         if self._port_refresh_in_progress:
             return False
-        if self._service_device_connected("valve"):
+        if self._service_device_connected(SWITCH):
             return False
         if self._valve_connect_in_progress or self._valve_connect_task is not None:
             return False
@@ -4567,14 +4560,11 @@ class ExperimentControlWindow(QWidget):
         return True
 
     def _disconnect_valve_controller(self) -> None:
-        port = getattr(self._valve_probe, "port", None)
-        self._device_comm_service.disconnect_device(self._device_label_for("valve"))
+        self._device_comm_service.disconnect_device(self._device_label_for(SWITCH))
         self._valve_probe = None
-        if port:
-            release_port(port, "Experiment Control / Valve")
-        self._set_valve_connection_visual(False, "Valve controller disconnected.")
+        self._set_valve_connection_visual(False, "Switch controller disconnected.")
         self.valve_availability_changed.emit(None)
-        _LOGGER.info("Valve controller disconnected.")
+        _LOGGER.info("Switch controller disconnected.")
 
     def _set_valve_connection_visual(self, connected: bool, text: str) -> None:
         color = "#2e7d32" if connected else "#9aa8b6"
@@ -4592,7 +4582,7 @@ class ExperimentControlWindow(QWidget):
             return
         if self._port_refresh_in_progress:
             return
-        if self._service_device_connected("valve"):
+        if self._service_device_connected(SWITCH):
             return
         if self._valve_connect_task is not None:
             return
@@ -4615,7 +4605,7 @@ class ExperimentControlWindow(QWidget):
         return str(data) if data else None
 
     def _toggle_mswitch_connection(self) -> None:
-        if self._service_device_connected("mswitch"):
+        if self._service_device_connected(SELECTOR):
             self._disconnect_mswitch_controller()
         else:
             self._connect_selected_mswitch_port()
@@ -4625,54 +4615,57 @@ class ExperimentControlWindow(QWidget):
         if not port:
             self._show_info("Select an AMF switch port first.")
             return
-        if self._mswitch_connect_in_progress:
+        if self._mswitch_connect_in_progress or self._mswitch_connect_task is not None:
             return
         self._mswitch_connect_in_progress = True
-        self._set_mswitch_connection_visual(False, f"Connecting M-Switch on {port}...")
-        _LOGGER.info("Connecting M-Switch on %s", port)
-        try:
-            client, probe = self._device_comm_service.connect_mswitch_port(port)
-        except Exception as exc:
-            self._device_comm_service.disconnect_device(self._device_label_for("mswitch"))
+        self._set_mswitch_connection_visual(False, f"Connecting selector on {port}...")
+        _LOGGER.info("Connecting selector on %s", port)
+        label = self._ensure_device_profile(SELECTOR, port, driver="amf-mswitch")
+        task = DeviceConnectTask(label, port)
+        task.signals.finished.connect(self._handle_mswitch_connect_finished)
+        self._mswitch_connect_task = task
+        self._thread_pool.start(task)
+
+    def _handle_mswitch_connect_finished(self, payload: object) -> None:
+        self._mswitch_connect_in_progress = False
+        self._mswitch_connect_task = None
+        if not isinstance(payload, tuple) or len(payload) != 3:
+            self._set_mswitch_connection_visual(False, "Selector connect failed.")
+            self.mswitch_availability_changed.emit(None)
+            _LOGGER.warning("Selector connect finished with unexpected payload.")
+            return
+        port, status, error = payload
+        if not isinstance(status, DeviceStatus):
+            self._device_comm_service.disconnect_device(self._device_label_for(SELECTOR))
             self._mswitch_probe = None
-            self._mswitch_connect_in_progress = False
-            self._set_mswitch_connection_visual(False, f"M-Switch connect failed on {port}: {exc}")
+            self._set_mswitch_connection_visual(False, f"Selector connect failed on {port}: {error}")
             self.mswitch_availability_changed.emit(None)
-            _LOGGER.error("M-Switch connect failed on %s: %s", port, exc)
-            self._finish_startup_device_auto_connect_stage("mswitch")
+            _LOGGER.error("Selector connect failed on %s: %s", port, error)
+            self._finish_startup_device_auto_connect_stage(SELECTOR)
             return
-        label = self._ensure_device_profile("mswitch", probe.port, driver="amf-mswitch")
-        try:
-            self._device_comm_service.adopt_connection(label, client)
-        except Exception as exc:
-            if hasattr(client, "close"):
-                client.close()
-            self._set_mswitch_connection_visual(False, f"M-Switch connect failed on {port}: {exc}")
-            self.mswitch_availability_changed.emit(None)
-            _LOGGER.error("M-Switch service connect failed on %s: %s", port, exc)
-            self._finish_startup_device_auto_connect_stage("mswitch")
-            return
+        probe = ControllerProbe(
+            port=status.endpoint or port,
+            controller_type=status.identity.get("controller_type", "amf-mswitch"),
+            model=status.identity.get("model", "AMF switch"),
+            serial_number=status.identity.get("serial_number") or None,
+            protocol_version=status.identity.get("protocol_version") or None,
+        )
         self._mswitch_probe = probe
-        claim_port(probe.port, "Experiment Control / M-Switch")
         self.mswitch_availability_changed.emit(probe)
         self._set_mswitch_connection_visual(True, f"Connected to {probe.model} on {probe.port}.")
         self._update_mswitch_state_from_probe()
         self._ensure_mswitch_homed()
-        self._mswitch_connect_in_progress = False
-        _LOGGER.info("M-Switch connected | model=%s port=%s", probe.model, probe.port)
-        self._finish_startup_device_auto_connect_stage("mswitch")
+        _LOGGER.info("Selector connected | model=%s port=%s", probe.model, probe.port)
+        self._finish_startup_device_auto_connect_stage(SELECTOR)
 
     def _disconnect_mswitch_controller(self) -> None:
-        port = getattr(self._mswitch_probe, "port", None)
-        self._device_comm_service.disconnect_device(self._device_label_for("mswitch"))
+        self._device_comm_service.disconnect_device(self._device_label_for(SELECTOR))
         self._mswitch_probe = None
-        if port:
-            release_port(port, "Experiment Control / M-Switch")
         self._mswitch_connect_in_progress = False
         self._mswitch_connect_task = None
-        self._set_mswitch_connection_visual(False, "M-Switch disconnected.")
+        self._set_mswitch_connection_visual(False, "Selector disconnected.")
         self.mswitch_availability_changed.emit(None)
-        _LOGGER.info("M-Switch disconnected.")
+        _LOGGER.info("Selector disconnected.")
 
     def _set_mswitch_connection_visual(self, connected: bool, text: str) -> None:
         color = "#2e7d32" if connected else "#9aa8b6"
@@ -4693,7 +4686,7 @@ class ExperimentControlWindow(QWidget):
             return
         if self._port_refresh_in_progress:
             return
-        if self._service_device_connected("mswitch"):
+        if self._service_device_connected(SELECTOR):
             return
         selected = self._selected_mswitch_port()
         if selected is not None:
@@ -4703,7 +4696,7 @@ class ExperimentControlWindow(QWidget):
     def connect_best_mswitch_controller(self) -> bool:
         if self._port_refresh_in_progress:
             return False
-        if self._service_device_connected("mswitch"):
+        if self._service_device_connected(SELECTOR):
             return False
         if self._mswitch_connect_in_progress:
             return False
@@ -4716,14 +4709,14 @@ class ExperimentControlWindow(QWidget):
         return True
 
     def _update_mswitch_state_from_probe(self) -> None:
-        if not self._service_device_connected("mswitch"):
+        if not self._service_device_connected(SELECTOR):
             return
         try:
             current_position = self._device_comm_service.send_command(
-                self._device_label_for("mswitch"),
+                self._device_label_for(SELECTOR),
                 DeviceCommand("switch.get_position", {}),
             ).response
-            connection = self._device_comm_service.connection(self._device_label_for("mswitch"))
+            connection = self._device_comm_service.connection(self._device_label_for(SELECTOR))
             port_count = connection.get_port_count() if connection is not None and hasattr(connection, "get_port_count") else 12
             current_position = int(current_position)
             self.mswitch_target_spin.setRange(1, max(port_count, 1))
@@ -4733,10 +4726,10 @@ class ExperimentControlWindow(QWidget):
             _LOGGER.warning("Could not refresh M-Switch state: %s", exc)
 
     def _ensure_mswitch_homed(self) -> bool:
-        if not self._service_device_connected("mswitch"):
+        if not self._service_device_connected(SELECTOR):
             return False
         try:
-            connection = self._device_comm_service.connection(self._device_label_for("mswitch"))
+            connection = self._device_comm_service.connection(self._device_label_for(SELECTOR))
             if connection is not None and hasattr(connection, "is_homed") and connection.is_homed():
                 return True
         except Exception as exc:
@@ -4745,7 +4738,7 @@ class ExperimentControlWindow(QWidget):
         try:
             _LOGGER.info("Homing M-Switch before use.")
             self._set_mswitch_connection_visual(True, "Homing M-Switch...")
-            self._send_device_command("mswitch", "switch.home", {"block": True})
+            self._send_device_command(SELECTOR, "switch.home", {"block": True})
             self._update_mswitch_state_from_probe()
             self._set_mswitch_connection_visual(True, f"M-Switch homed on {self._selected_mswitch_port() or 'current port'}.")
             _LOGGER.info("M-Switch homed.")
@@ -4756,17 +4749,17 @@ class ExperimentControlWindow(QWidget):
             return False
 
     def _home_mswitch(self) -> None:
-        if not self._service_device_connected("mswitch"):
+        if not self._service_device_connected(SELECTOR):
             return
         self._ensure_mswitch_homed()
 
     def _move_mswitch_to_target(self) -> None:
-        if not self._service_device_connected("mswitch"):
+        if not self._service_device_connected(SELECTOR):
             return
         target = int(self.mswitch_target_spin.value())
         try:
             self._set_mswitch_connection_visual(True, f"Moving M-Switch to port {target}...")
-            self._send_device_command("mswitch", "switch.move_to", {"position": target, "block": True})
+            self._send_device_command(SELECTOR, "switch.move_to", {"position": target, "block": True})
             self._update_mswitch_state_from_probe()
             _LOGGER.info("M-Switch moved to port %s", target)
         except Exception as exc:
@@ -4774,15 +4767,15 @@ class ExperimentControlWindow(QWidget):
             _LOGGER.error("M-Switch move failed: %s", exc)
 
     def _move_mswitch_and_verify(self, target: int) -> bool:
-        if not self._service_device_connected("mswitch"):
+        if not self._service_device_connected(SELECTOR):
             return False
         target = max(min(int(target), 12), 1)
-        self._send_device_command("mswitch", "switch.move_to", {"position": target, "block": True})
+        self._send_device_command(SELECTOR, "switch.move_to", {"position": target, "block": True})
         self._update_mswitch_state_from_probe()
         try:
             current = int(
                 self._device_comm_service.send_command(
-                    self._device_label_for("mswitch"),
+                    self._device_label_for(SELECTOR),
                     DeviceCommand("switch.get_position", {}),
                 ).response
             )
@@ -4839,14 +4832,11 @@ class ExperimentControlWindow(QWidget):
         self._thread_pool.start(task)
 
     def _disconnect_pump(self) -> None:
-        port = getattr(self._probe, "port", None)
         self._connect_generation += 1
         self._connect_in_progress = False
         self._device_comm_service.disconnect_device(self._device_label_for("pump"))
         self._client: RegloICCClient | None = None
         self._probe = None
-        if port:
-            release_port(port, "Experiment Control / Pump")
         self._set_connection_visual(False, "Pump disconnected.")
         self.availability_changed.emit(None)
         _LOGGER.info("Pump disconnected.")
@@ -4869,14 +4859,13 @@ class ExperimentControlWindow(QWidget):
             return
         try:
             label = self._ensure_device_profile("pump", probe.port, driver="reglo_icc")
-            self._device_comm_service.connect_device(label)
+            self._device_comm_service.connect(label, cached_pump_probe=probe)
         except Exception as exc:
             self._device_comm_service.disconnect_device(self._device_label_for("pump"))
             self._set_connection_visual(False, f"Connect failed on {probe.port}: {exc}")
             _LOGGER.error("Pump connect failed on %s: %s", probe.port, exc)
             self._finish_startup_device_auto_connect_stage("pump")
             return
-        claim_port(probe.port, "Experiment Control / Pump")
         self._client = self._device_comm_service.connection(self._device_label_for("pump"))
         self._probe = probe
         self._apply_probe(probe)
@@ -4930,31 +4919,24 @@ class ExperimentControlWindow(QWidget):
                 for port in SerialController.list_ports()
                 if str(getattr(port, "device", "") or "").strip()
             }
-            owner_snapshot = snapshot_port_ownership()
 
             pump_port = str(getattr(self._probe, "port", "") or "").strip()
             if self._service_device_connected("pump"):
-                if not pump_port or pump_port not in available_ports or "Experiment Control / Pump" not in owner_snapshot.get(pump_port, ""):
+                if not pump_port or pump_port not in available_ports:
                     _LOGGER.warning("Pump controller failed health check; disconnecting stale connection on %s.", pump_port or "unknown")
                     self._disconnect_pump()
-            elif pump_port and pump_port in available_ports:
-                release_port(pump_port, "Experiment Control / Pump")
 
             valve_port = str(getattr(self._valve_probe, "port", "") or "").strip()
-            if self._service_device_connected("valve"):
-                if not valve_port or valve_port not in available_ports or "Experiment Control / Valve" not in owner_snapshot.get(valve_port, ""):
-                    _LOGGER.warning("Valve controller failed health check; disconnecting stale connection on %s.", valve_port or "unknown")
+            if self._service_device_connected(SWITCH):
+                if not valve_port or valve_port not in available_ports:
+                    _LOGGER.warning("Switch controller failed health check; disconnecting stale connection on %s.", valve_port or "unknown")
                     self._disconnect_valve_controller()
-            elif valve_port and valve_port in available_ports:
-                release_port(valve_port, "Experiment Control / Valve")
 
             mswitch_port = str(getattr(self._mswitch_probe, "port", "") or "").strip()
-            if self._service_device_connected("mswitch"):
-                if not mswitch_port or mswitch_port not in available_ports or "Experiment Control / M-Switch" not in owner_snapshot.get(mswitch_port, ""):
-                    _LOGGER.warning("M-Switch failed health check; disconnecting stale connection on %s.", mswitch_port or "unknown")
+            if self._service_device_connected(SELECTOR):
+                if not mswitch_port or mswitch_port not in available_ports:
+                    _LOGGER.warning("Selector failed health check; disconnecting stale connection on %s.", mswitch_port or "unknown")
                     self._disconnect_mswitch_controller()
-            elif mswitch_port and mswitch_port in available_ports:
-                release_port(mswitch_port, "Experiment Control / M-Switch")
         finally:
             self._connection_sync_in_progress = False
 
@@ -6070,11 +6052,11 @@ class ExperimentControlWindow(QWidget):
         wait_for_switch_first = bool(self._wait_for_mswitch_first and switch_changed)
 
         pump_label = self._device_label_for("pump")
-        valve_label = self._device_label_for("valve")
-        switch_label = self._device_label_for("mswitch")
+        valve_label = self._device_label_for(SWITCH)
+        switch_label = self._device_label_for(SELECTOR)
         pump_connected = self._service_device_connected("pump")
-        valve_connected = self._service_device_connected("valve")
-        mswitch_connected = self._service_device_connected("mswitch")
+        valve_connected = self._service_device_connected(SWITCH)
+        mswitch_connected = self._service_device_connected(SELECTOR)
 
         channels_to_stop: list[int] = []
         channels_to_start: list[int] = []
@@ -6086,7 +6068,7 @@ class ExperimentControlWindow(QWidget):
             step.step,
             valve or "-",
             str(previous.valve or "").strip() or "-" if previous is not None else "-",
-            *self._service_connection_detail("valve"),
+            *self._service_connection_detail(SWITCH),
             self._plan_running,
             self._plan_holding,
             start,
@@ -6153,8 +6135,8 @@ class ExperimentControlWindow(QWidget):
             if not (valve and valve.lower() != previous_valve):
                 return []
             if valve_connected:
-                return [_PlannedCommand(valve_label, "valve.set_position", {"position": valve}, f"valve.set_position pos={valve}")]
-            status_messages.append("Valve controller not connected.")
+                return [_PlannedCommand(valve_label, "switch.set_position", {"position": valve}, f"switch.set_position pos={valve}")]
+            status_messages.append("Switch controller not connected.")
             _LOGGER.warning("Valve command skipped | controller not connected | step=%s valve=%s", step.step, valve)
             return []
 
@@ -6197,8 +6179,8 @@ class ExperimentControlWindow(QWidget):
             str(step.valve or "").strip() or "-",
             str(previous.valve or "").strip() if previous is not None else "-",
             self._service_device_connected("pump"),
-            self._service_device_connected("valve"),
-            self._service_device_connected("mswitch"),
+            self._service_device_connected(SWITCH),
+            self._service_device_connected(SELECTOR),
             self._plan_running,
             self._plan_holding,
             start,
@@ -6233,8 +6215,8 @@ class ExperimentControlWindow(QWidget):
             "Experiment control step apply (async) | step=%s pump_connected=%s valve_connected=%s switch_connected=%s",
             step.step,
             self._service_device_connected("pump"),
-            self._service_device_connected("valve"),
-            self._service_device_connected("mswitch"),
+            self._service_device_connected(SWITCH),
+            self._service_device_connected(SELECTOR),
         )
         try:
             commands, needs_mswitch_refresh, pre_status = self._plan_step_commands(step, start=start)
@@ -6506,8 +6488,8 @@ class ExperimentControlWindow(QWidget):
             "valve_position": str(step.valve or "") if step is not None else "",
             "switch_position": int(step.switch_position) if step is not None else "",
             "pump_connected": bool(self._service_device_connected("pump")),
-            "valve_connected": bool(self._service_device_connected("valve")),
-            "switch_connected": bool(self._service_device_connected("mswitch")),
+            "valve_connected": bool(self._service_device_connected(SWITCH)),
+            "switch_connected": bool(self._service_device_connected(SELECTOR)),
             "status": status,
         }
         tube_values = self._tube_mm_values()
@@ -6607,14 +6589,13 @@ class ExperimentControlWindow(QWidget):
                     _LOGGER.info("Shutdown: stopped all pump channels.")
                 except Exception as exc:
                     _LOGGER.warning("Shutdown: could not stop pump channels: %s", exc)
-            if self._service_device_connected("mswitch"):
-                _LOGGER.info("Shutdown: M-Switch left in current position before disconnect.")
+            if self._service_device_connected(SELECTOR):
+                _LOGGER.info("Shutdown: Selector left in current position before disconnect.")
         finally:
             self._stop_experiment_control()
-            self._release_claimed_device_ports()
-            self._device_comm_service.disconnect_device(self._device_label_for("valve"))
+            self._device_comm_service.disconnect_device(self._device_label_for(SWITCH))
             self._valve_probe = None
-            self._device_comm_service.disconnect_device(self._device_label_for("mswitch"))
+            self._device_comm_service.disconnect_device(self._device_label_for(SELECTOR))
             self._mswitch_probe = None
             self._device_comm_service.disconnect_device(self._device_label_for("pump"))
             self._client = None
@@ -6623,16 +6604,8 @@ class ExperimentControlWindow(QWidget):
             self.mswitch_availability_changed.emit(None)
             self.availability_changed.emit(None)
             self._set_connection_visual(False, "Pump disconnected.")
-            self._set_valve_connection_visual(False, "Valve controller disconnected.")
-            self._set_mswitch_connection_visual(False, "M-Switch disconnected.")
-
-    def _release_claimed_device_ports(self) -> None:
-        if self._probe is not None:
-            release_port(self._probe.port, "Experiment Control / Pump")
-        if self._valve_probe is not None:
-            release_port(self._valve_probe.port, "Experiment Control / Valve")
-        if self._mswitch_probe is not None:
-            release_port(self._mswitch_probe.port, "Experiment Control / M-Switch")
+            self._set_valve_connection_visual(False, "Switch controller disconnected.")
+            self._set_mswitch_connection_visual(False, "Selector disconnected.")
 
     def _read_live_status(self) -> None:
         if not self._service_device_connected("pump"):
@@ -7156,12 +7129,11 @@ class ExperimentControlWindow(QWidget):
         _LOGGER.info("Experiment control window closed.")
         self.save_ui_state()
         self._device_comm_service.disconnect_device(self._device_label_for("pump"))
-        self._release_claimed_device_ports()
-        self._device_comm_service.disconnect_device(self._device_label_for("valve"))
+        self._device_comm_service.disconnect_device(self._device_label_for(SWITCH))
         self._valve_probe = None
         self.availability_changed.emit(None)
         self.valve_availability_changed.emit(None)
-        self._device_comm_service.disconnect_device(self._device_label_for("mswitch"))
+        self._device_comm_service.disconnect_device(self._device_label_for(SELECTOR))
         self._mswitch_probe = None
         self.mswitch_availability_changed.emit(None)
         super().closeEvent(event)

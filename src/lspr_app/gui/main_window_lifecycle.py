@@ -293,6 +293,12 @@ def handle_hardware_init_step_for(window, result: object) -> None:
     window.status_label.setText(result.message)
     key = result.key
     if key == "spectrometer":
+        payload = result.payload
+        if payload is not None and not isinstance(payload, SimulatedSpectrometer):
+            # Real spectrometer discovered on background thread — swap it in now,
+            # before live acquisition starts, so no restart is needed.
+            window._spectrometer = payload
+            window._capabilities = payload.capabilities()
         window._hardware_available = not isinstance(window._spectrometer, SimulatedSpectrometer)
     elif key.startswith("pump"):
         if result.probe is not None:

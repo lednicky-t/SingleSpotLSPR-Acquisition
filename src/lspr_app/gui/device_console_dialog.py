@@ -26,7 +26,6 @@ from lspr_app.device.communication_models import DeviceCommand, DeviceEvent, Dev
 from lspr_app.device.device_manager import DeviceCommunicationService, extract_usb_fingerprint
 from lspr_app.device.port_assignments import device_assignment_label, set_port_assignment
 from lspr_app.device.probe_diagnostics import snapshot_port_probe_events
-from lspr_app.device.hardware_inventory import scan_connected_serial_devices
 from lspr_app.device.reglo_icc import RegloICCClient, is_probable_reglo_port
 from lspr_app.device.serial_controllers import SerialController, controller_port_priority
 
@@ -92,19 +91,19 @@ class _DiscoverTask(QRunnable):
             except Exception:
                 pass
 
-        self.signals.progress.emit("Scanning for valve controllers…")
+        self.signals.progress.emit("Scanning for switch controllers…")
         for port in SerialController.list_ports():
             if controller_port_priority(port) <= 0 or port.device in configured_endpoints:
                 continue
             try:
-                result = self._service.probe_endpoint(port.device, "valve")
+                result = self._service.probe_endpoint(port.device, "switch")
             except Exception:
                 continue
             if not result.success:
                 continue
             fingerprint = extract_usb_fingerprint(port.hwid)
             profile = self._service.find_or_create_profile(
-                device_type="valve",
+                device_type="switch",
                 fingerprint=fingerprint,
                 endpoint=port.device,
                 identity={k: result.identity.get(k, "") for k in ("model", "serial_number", "protocol_version", "controller_type")},
@@ -120,6 +119,8 @@ class _DiscoverTask(QRunnable):
             self.signals.progress.emit("Scanning for selectors…")
             for device in detect_amf_selector_devices():
                 port_name = getattr(device, "port", "")
+                if port_name in configured_endpoints:
+                    continue
                 sn = getattr(device, "serial_number", None) or ""
                 fingerprint = f"amf-selector:{sn}" if sn else extract_usb_fingerprint(getattr(device, "hwid", ""))
                 profile = self._service.find_or_create_profile(
@@ -380,7 +381,7 @@ class DeviceManagerDialog(QDialog):
         for label, value in (
             ("Auto", "auto"),
             ("Pump", "pump"),
-            ("Valve", "valve"),
+            ("Switch", "switch"),
             ("Selector", "selector"),
         ):
             self._probe_type_combo.addItem(label, value)
@@ -429,9 +430,9 @@ class DeviceManagerDialog(QDialog):
             ("Pump start", "pump.start"),
             ("Pump stop", "pump.stop"),
             ("Pump set flow", "pump.set_flow"),
-            ("Valve set left", "valve.set_position:left"),
-            ("Valve set right", "valve.set_position:right"),
-            ("Valve stop", "valve.stop"),
+            ("Switch set left", "switch.set_position:left"),
+            ("Switch set right", "switch.set_position:right"),
+            ("Switch stop", "switch.stop"),
             ("Selector home", "switch.home"),
             ("Selector move 1", "switch.move_to:1"),
             ("Selector move 2", "switch.move_to:2"),
@@ -820,7 +821,7 @@ class DeviceManagerDialog(QDialog):
         command_type, _, preset_arg = command_value.partition(":")
         payload: dict[str, object] = {}
         if preset_arg:
-            if command_type == "valve.set_position":
+            if command_type == "switch.set_position":
                 payload["position"] = preset_arg
             elif command_type == "switch.move_to":
                 payload["position"] = int(preset_arg)

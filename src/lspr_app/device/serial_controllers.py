@@ -63,6 +63,7 @@ class SerialController(ABC):
         return [
             ControllerPort(device=port.device, description=port.description, hwid=port.hwid)
             for port in list_ports.comports()
+            if str(getattr(port, "device", "") or "").strip()
         ]
 
     @classmethod

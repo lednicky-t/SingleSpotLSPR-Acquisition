@@ -53,6 +53,7 @@ class RegloICCClient:
         return [
             PumpPort(device=port.device, description=port.description, hwid=port.hwid)
             for port in list_ports.comports()
+            if str(getattr(port, "device", "") or "").strip()
         ]
 
     @classmethod
@@ -97,14 +98,20 @@ class RegloICCClient:
         return self._serial is not None and self._serial.is_open
 
     def get_probe(self) -> PumpProbe:
-        protocol_version = self.query("0x!")
-        serial_number = self.query("0xS")
-        raw_channels = self.query("0xA")
+        # Try broadcast address (0) first; fall back to pump address 1 if rejected.
+        # Some Reglo ICC units in single-pump RS-232 mode only answer to address 1.
+        try:
+            addr = self._discover_pump_address()
+        except RegloICCError:
+            addr = "0"
+        protocol_version = self.query(f"{addr}x!")
+        serial_number = self.query(f"{addr}xS")
+        raw_channels = self.query(f"{addr}xA")
         try:
             channel_count = int(raw_channels.split()[0])
         except (ValueError, IndexError):
             channel_count = 0
-        model = self.query("0#")
+        model = self.query(f"{addr}#")
         return PumpProbe(
             port=self.port or "",
             protocol_version=protocol_version,
@@ -112,6 +119,15 @@ class RegloICCClient:
             channel_count=channel_count,
             model=model,
         )
+
+    def _discover_pump_address(self) -> str:
+        """Return the pump address string ('0' or '1') that responds to x!."""
+        try:
+            self.query("0x!")
+            return "0"
+        except RegloICCError:
+            self.query("1x!")  # raises if address 1 also fails
+            return "1"
 
     def query(self, command: str) -> str:
         return self.send(command)
