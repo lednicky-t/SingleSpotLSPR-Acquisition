@@ -18,6 +18,7 @@ lspr_settings.json
 measurement_*.h5
 .appdata/
 tmp_*.txt
+data/
 
 # OS / editor noise
 .DS_Store
