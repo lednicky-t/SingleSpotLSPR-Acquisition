@@ -6,7 +6,9 @@ from time import monotonic, sleep
 
 import serial
 
+from lspr_app.device.communication_models import DeviceCommand
 from lspr_app.device.connection_registry import release_port, try_claim_port
+from lspr_app.device.device_driver import DeviceDriver, DeviceError
 from serial.tools import list_ports
 
 
@@ -26,7 +28,7 @@ class PumpProbe:
     model: str
 
 
-class RegloICCError(RuntimeError):
+class RegloICCError(DeviceError):
     pass
 
 
@@ -42,7 +44,7 @@ def is_probable_reglo_port(port: PumpPort) -> bool:
     )
 
 
-class RegloICCClient:
+class RegloICCClient(DeviceDriver):
     def __init__(self) -> None:
         self._serial: serial.Serial | None = None
         self.port: str | None = None
@@ -119,6 +121,31 @@ class RegloICCClient:
             channel_count=channel_count,
             model=model,
         )
+
+    def execute_command(self, command: DeviceCommand) -> object | None:
+        command_type = str(command.command_type or "").strip().casefold()
+        payload = dict(command.payload or {})
+        if command_type == "pump.stop_all":
+            self.stop_all(int(payload.get("channel_count", 4)))
+            return None
+        if command_type == "pump.start":
+            self.start_channel(int(payload.get("channel", 1)))
+            return None
+        if command_type == "pump.stop":
+            self.stop_channel(int(payload.get("channel", 1)))
+            return None
+        if command_type == "pump.set_flow":
+            self.apply_channel(
+                int(payload.get("channel", 1)),
+                float(payload.get("flow_ul_min", 0.0)),
+                str(payload.get("direction", "OFF")),
+                float(payload.get("tube_mm", 0.0)),
+                start=bool(payload.get("start", False)),
+            )
+            return None
+        if command_type in {"pump.query", "raw.query"}:
+            return self.query(str(payload.get("command", "")))
+        raise RegloICCError(f"Unsupported command type {command.command_type!r} for {type(self).__name__}.")
 
     def _discover_pump_address(self) -> str:
         """Return the pump address string ('0' or '1') that responds to x!."""

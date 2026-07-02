@@ -1,11 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from time import sleep
-
-import serial
-
-from lspr_app.device.connection_registry import release_port, try_claim_port
 from lspr_app.device.serial_controllers import (
     ControllerError,
     ControllerPort,
@@ -20,6 +14,9 @@ from lspr_app.device.serial_controllers import (
 class ArduinoValveController(SerialController):
     controller_type = "arduino-valve"
     priority = 20
+    _BAUD_RATE = 115200
+    _TIMEOUT = 0.35
+    _BOOTLOADER_WAIT_S = 2.0  # Arduino resets via DTR on open; bootloader runs ~2 s
 
     @classmethod
     def is_probable_port(cls, port: ControllerPort) -> bool:
@@ -32,40 +29,6 @@ class ArduinoValveController(SerialController):
             or "2341" in hwid  # Arduino LLC VID
             or "1A86" in hwid  # QinHeng CH340 VID
         ) and "239A" not in hwid  # exclude Adafruit/ItsyBitsy
-
-    def connect(self, port: str) -> None:
-        self.close()
-        if not try_claim_port(port, self.controller_type):
-            raise ControllerError(f"Port {port} is busy.")
-        try:
-            self._serial = serial.Serial(
-                port=port,
-                baudrate=115200,
-                bytesize=8,
-                parity="N",
-                stopbits=1,
-                timeout=0.35,
-                write_timeout=0.35,
-            )
-        except Exception:
-            release_port(port, self.controller_type)
-            raise
-        self.port = port
-        sleep(2.0)
-        self._serial.reset_input_buffer()
-
-    def close(self) -> None:
-        if self._serial is not None:
-            try:
-                self._serial.close()
-            finally:
-                if self.port is not None:
-                    release_port(self.port, self.controller_type)
-                self._serial = None
-                self.port = None
-
-    def is_connected(self) -> bool:
-        return self._serial is not None and self._serial.is_open
 
     def get_probe(self) -> ControllerProbe:
         protocol_version = self.query("asn")
@@ -93,6 +56,8 @@ class ArduinoValveController(SerialController):
 class ItsyBitsy32U4ValveController(ArduinoValveController):
     controller_type = "itsybitsy-32u4-valve"
     priority = 30
+    _TIMEOUT = 1.0
+    _BOOTLOADER_WAIT_S = 3.0  # 32u4 bootloader is slower than standard Arduino; needs ~3 s
 
     @classmethod
     def is_probable_port(cls, port: ControllerPort) -> bool:
@@ -103,28 +68,6 @@ class ItsyBitsy32U4ValveController(ArduinoValveController):
             or "ADAFRUIT" in description
             or "239A" in hwid
         )
-
-    def connect(self, port: str) -> None:
-        self.close()
-        if not try_claim_port(port, self.controller_type):
-            raise ControllerError(f"Port {port} is busy.")
-        try:
-            self._serial = serial.Serial(
-                port=port,
-                baudrate=115200,
-                bytesize=8,
-                parity="N",
-                stopbits=1,
-                timeout=1.0,
-                write_timeout=1.0,
-            )
-        except Exception:
-            release_port(port, self.controller_type)
-            raise
-        self.port = port
-        sleep(3.0)
-        if self._serial is not None:
-            self._serial.reset_input_buffer()
 
     def get_probe(self) -> ControllerProbe:
         protocol_version = self.query("asn", max_wait_s=1.25)
@@ -142,6 +85,9 @@ class ItsyBitsy32U4ValveController(ArduinoValveController):
 class LegacyValveController(SerialController):
     controller_type = "legacy-valve"
     priority = 10
+    _BAUD_RATE = 9600
+    _TIMEOUT = 1.0
+    _BOOTLOADER_WAIT_S = 0.5
 
     def __init__(self, channel_count: int = 4) -> None:
         super().__init__()
@@ -163,39 +109,8 @@ class LegacyValveController(SerialController):
             or "067B" in hwid
         )
 
-    def connect(self, port: str) -> None:
-        self.close()
-        if not try_claim_port(port, self.controller_type):
-            raise ControllerError(f"Port {port} is busy.")
-        try:
-            self._serial = serial.Serial(
-                port=port,
-                baudrate=9600,
-                bytesize=8,
-                parity="N",
-                stopbits=1,
-                timeout=1.0,
-                write_timeout=1.0,
-            )
-        except Exception:
-            release_port(port, self.controller_type)
-            raise
-        self.port = port
-        sleep(0.5)
-        self.query("vi", max_wait_s=1.0)
-
-    def close(self) -> None:
-        if self._serial is not None:
-            try:
-                self._serial.close()
-            finally:
-                if self.port is not None:
-                    release_port(self.port, self.controller_type)
-                self._serial = None
-                self.port = None
-
-    def is_connected(self) -> bool:
-        return self._serial is not None and self._serial.is_open
+    def _post_connect(self) -> None:
+        self.query("vi", max_wait_s=1.0)  # legacy handshake confirms firmware is alive
 
     def get_probe(self) -> ControllerProbe:
         serial_number = self.query("vi", max_wait_s=1.0)

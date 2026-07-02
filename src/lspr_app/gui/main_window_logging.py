@@ -44,6 +44,7 @@ _DEVICE_KEYWORDS = (
     "connected",
     "disconnected",
     "discovered",
+    "error",
 )
 
 _GUI_KEYWORDS = (

@@ -4,7 +4,9 @@ import os
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from io import StringIO
 
+from lspr_app.device.communication_models import DeviceCommand
 from lspr_app.device.connection_registry import claim_port, release_port, try_claim_port
+from lspr_app.device.device_driver import DeviceDriver
 from lspr_app.device.serial_controllers import ControllerError, ControllerProbe
 
 try:  # Optional proprietary dependency.
@@ -68,7 +70,7 @@ def detect_amf_mswitch_devices() -> list[ControllerProbe]:
     return probes
 
 
-class AMFSwitchController:
+class AMFSwitchController(DeviceDriver):
     controller_type = "amf-mswitch"
 
     def __init__(self) -> None:
@@ -83,13 +85,17 @@ class AMFSwitchController:
             raise ControllerError(f"Port {port} is busy.")
         try:
             self._amf = amfTools.AMF(port)
-            self.port = str(self._amf.getSerialPort())
+            canonical = str(self._amf.getSerialPort())
         except Exception as exc:
             self._amf = None
             self.port = None
             release_port(port, self.controller_type)
             raise ControllerError(str(exc)) from exc
-        claim_port(self.port or port, self.controller_type)
+        if canonical and canonical != port:
+            # AMF normalized the port name — swap the claim to the canonical form.
+            release_port(port, self.controller_type)
+            claim_port(canonical, self.controller_type)
+        self.port = canonical or port
 
     def close(self) -> None:
         if self._amf is not None:
@@ -122,6 +128,19 @@ class AMFSwitchController:
             serial_number=str(serial_number) if serial_number is not None else None,
             protocol_version=str(protocol_version) if protocol_version is not None else None,
         )
+
+    def execute_command(self, command: DeviceCommand) -> object | None:
+        command_type = str(command.command_type or "").strip().casefold()
+        payload = dict(command.payload or {})
+        if command_type == "switch.home":
+            self.home(block=bool(payload.get("block", True)))
+            return None
+        if command_type == "switch.move_to":
+            self.move_to(int(payload.get("position", 1)), block=bool(payload.get("block", True)))
+            return None
+        if command_type == "switch.get_position":
+            return self.get_position()
+        raise ControllerError(f"Unsupported command type {command.command_type!r} for {type(self).__name__}.")
 
     def get_position(self) -> int:
         if self._amf is None:

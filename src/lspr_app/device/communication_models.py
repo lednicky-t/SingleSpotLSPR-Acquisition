@@ -1,8 +1,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 from uuid import uuid4
+
+
+class DeviceLifecycleState(str, Enum):
+    """All valid lifecycle states for a hardware device connection.
+
+    Inherits from ``str`` so that enum values compare equal to the plain
+    string literals already used throughout the GUI
+    (e.g. ``status.state == "connected"`` still works without change).
+
+    Transitions:
+        DISCONNECTED → CONNECTED  : successful connect()
+        CONNECTED    → DISCONNECTED: successful disconnect()
+        *            → ERROR      : connect() raised an exception
+        ERROR        → DISCONNECTED: explicit disconnect() clears the error
+        ERROR        → CONNECTED  : successful reconnect()
+        DISCONNECTED → DISCOVERED : device found by scan but not yet connected
+        DISCOVERED   → CONNECTED  : user-triggered connect after scan
+    """
+
+    DISCONNECTED = "disconnected"
+    CONNECTED = "connected"
+    ERROR = "error"
+    DISCOVERED = "discovered"
 
 
 @dataclass(frozen=True, slots=True)

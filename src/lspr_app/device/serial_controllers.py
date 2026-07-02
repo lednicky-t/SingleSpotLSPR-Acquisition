@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from dataclasses import dataclass
 from time import monotonic, sleep
 from typing import ClassVar
 
 import serial
 from serial.tools import list_ports
+
+from lspr_app.device.communication_models import DeviceCommand
+from lspr_app.device.connection_registry import release_port, try_claim_port
+from lspr_app.device.device_driver import DeviceDriver, DeviceError
 
 @dataclass(slots=True)
 class ControllerPort:
@@ -24,7 +28,7 @@ class ControllerProbe:
     protocol_version: str | None = None
 
 
-class ControllerError(RuntimeError):
+class ControllerError(DeviceError):
     pass
 
 
@@ -50,9 +54,18 @@ def controller_port_priority(port: ControllerPort) -> int:
     return max(priorities, default=0)
 
 
-class SerialController(ABC):
+class SerialController(DeviceDriver):
     controller_type: ClassVar[str] = "controller"
     priority: ClassVar[int] = 0
+
+    # Subclasses set these to configure the shared connect() implementation.
+    _BAUD_RATE: ClassVar[int] = 115200
+    _TIMEOUT: ClassVar[float] = 0.5
+    # Opening a serial port resets many Arduino-family boards via the DTR line,
+    # triggering the bootloader. _BOOTLOADER_WAIT_S is how long to wait for the
+    # sketch to start before sending any commands. Set to 0 for devices that do
+    # not need this (e.g. FTDI-based boards with DTR ignored).
+    _BOOTLOADER_WAIT_S: ClassVar[float] = 0.0
 
     def __init__(self) -> None:
         self._serial: serial.Serial | None = None
@@ -91,21 +104,66 @@ class SerialController(ABC):
         finally:
             controller.close()
 
-    @abstractmethod
     def connect(self, port: str) -> None:
-        raise NotImplementedError
+        self.close()
+        if not try_claim_port(port, self.controller_type):
+            raise ControllerError(f"Port {port} is busy.")
+        try:
+            self._serial = serial.Serial(
+                port=port,
+                baudrate=self._BAUD_RATE,
+                bytesize=8,
+                parity="N",
+                stopbits=1,
+                timeout=self._TIMEOUT,
+                write_timeout=self._TIMEOUT,
+            )
+        except Exception:
+            release_port(port, self.controller_type)
+            raise
+        self.port = port
+        if self._BOOTLOADER_WAIT_S:
+            sleep(self._BOOTLOADER_WAIT_S)
+        self._serial.reset_input_buffer()
+        self._post_connect()
 
-    @abstractmethod
+    def _post_connect(self) -> None:
+        """Called after the port is open and the bootloader wait has elapsed.
+
+        Override in subclasses that need a post-connect handshake.
+        """
+
     def close(self) -> None:
-        raise NotImplementedError
+        if self._serial is not None:
+            try:
+                self._serial.close()
+            finally:
+                if self.port is not None:
+                    release_port(self.port, self.controller_type)
+                self._serial = None
+                self.port = None
 
-    @abstractmethod
     def is_connected(self) -> bool:
-        raise NotImplementedError
+        return self._serial is not None and self._serial.is_open
 
     @abstractmethod
     def get_probe(self) -> ControllerProbe:
         raise NotImplementedError
+
+    def execute_command(self, command: DeviceCommand) -> object | None:
+        command_type = str(command.command_type or "").strip().casefold()
+        payload = dict(command.payload or {})
+        if command_type in {"switch.set_position", "valve.set_position"}:
+            self.set_position(str(payload.get("position", "")))
+            return None
+        if command_type in {"switch.stop", "valve.stop"}:
+            stop = getattr(self, "stop", None)
+            if callable(stop):
+                stop()
+            return None
+        if command_type == "raw.query":
+            return self.query(str(payload.get("command", "")))
+        raise ControllerError(f"Unsupported command type {command.command_type!r} for {type(self).__name__}.")
 
     def set_position(self, position: str) -> None:
         raise ControllerError(f"{self.controller_type} does not support position commands.")

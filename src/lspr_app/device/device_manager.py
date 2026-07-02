@@ -3,15 +3,17 @@ from __future__ import annotations
 import logging
 import threading
 from contextlib import contextmanager
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from collections import deque
 from time import perf_counter
 
 from lspr_app.device.amf_mswitch import AMFSwitchController, amf_tools_available, detect_amf_mswitch_devices, detect_amf_selector_devices
+from lspr_app.device.device_driver import DeviceDriver
 from lspr_app.device.communication_models import (
     DeviceCommand,
     DeviceCommandResult,
     DeviceEvent,
+    DeviceLifecycleState,
     DeviceProfile,
     DeviceStatus,
     PortDescriptor,
@@ -75,17 +77,27 @@ def extract_usb_fingerprint(hwid: str) -> str:
                 return f"usb-ser:{serial}"
     return ""
 
-_LEGACY_LABEL_MIGRATIONS: dict[str, tuple[str, str, str | None, str | None]] = {
-    "pump_main": ("pump_1", "Main Pump", "sample_pump", "pump_main"),
-    "pump_aux": ("pump_2", "Aux Pump", "aux_pump", "pump_aux"),
-    "pump_waste": ("pump_3", "Waste Pump", "waste_pump", "pump_waste"),
+@dataclass(frozen=True, slots=True)
+class _LabelMigration:
+    new_label: str
+    display_name: str
+    role: str
+    # Stored in profile metadata so the original label can be traced after migration.
+    # None means the old label is not worth preserving (e.g. generic "valve_1").
+    legacy_label: str | None
+
+
+_LEGACY_LABEL_MIGRATIONS: dict[str, _LabelMigration] = {
+    "pump_main":    _LabelMigration("pump_1",     "Main Pump",      "sample_pump",   "pump_main"),
+    "pump_aux":     _LabelMigration("pump_2",     "Aux Pump",       "aux_pump",      "pump_aux"),
+    "pump_waste":   _LabelMigration("pump_3",     "Waste Pump",     "waste_pump",    "pump_waste"),
     # "valve_*" labels from before the rename to "switch"
-    "valve_inlet": ("switch_1", "Inlet Switch", "inlet_switch", "valve_inlet"),
-    "valve_outlet": ("switch_2", "Outlet Switch", "outlet_switch", "valve_outlet"),
-    "valve_1": ("switch_1", "Inlet Switch", "inlet_switch", None),
-    "valve_2": ("switch_2", "Outlet Switch", "outlet_switch", None),
+    "valve_inlet":  _LabelMigration("switch_1",   "Inlet Switch",   "inlet_switch",  "valve_inlet"),
+    "valve_outlet": _LabelMigration("switch_2",   "Outlet Switch",  "outlet_switch", "valve_outlet"),
+    "valve_1":      _LabelMigration("switch_1",   "Inlet Switch",   "inlet_switch",  None),
+    "valve_2":      _LabelMigration("switch_2",   "Outlet Switch",  "outlet_switch", None),
     # "switch_main" was an old label for the AMF selector (before "selector" type was established)
-    "switch_main": ("selector_1", "Main Selector", "main_selector", "switch_main"),
+    "switch_main":  _LabelMigration("selector_1", "Main Selector",  "main_selector", "switch_main"),
 }
 
 
@@ -571,9 +583,11 @@ class DeviceCommunicationService:
             return None
         migrated = _LEGACY_LABEL_MIGRATIONS.get(raw_label)
         if migrated is not None:
-            raw_label, display_name, role, legacy_label = migrated
             metadata = dict(item.get("metadata", {}) or {})
-            metadata.setdefault("legacy_label", legacy_label or str(item.get("label", "")).strip())
+            metadata.setdefault("legacy_label", migrated.legacy_label or str(item.get("label", "")).strip())
+            raw_label = migrated.new_label
+            display_name = migrated.display_name
+            role = migrated.role
         else:
             metadata = {str(k): v for k, v in dict(item.get("metadata", {}) or {}).items()}
             display_name = _normalize_optional_text(item.get("display_name", ""))
@@ -629,11 +643,11 @@ class DeviceCommunicationService:
         display_name = profile.display_name or None
         metadata = dict(profile.metadata or {})
         if label in _LEGACY_LABEL_MIGRATIONS:
-            migrated_label, migrated_display_name, migrated_role, legacy_label = _LEGACY_LABEL_MIGRATIONS[label]
-            metadata.setdefault("legacy_label", legacy_label or label)
-            label = migrated_label
-            display_name = display_name or migrated_display_name
-            role = profile.role or migrated_role
+            m = _LEGACY_LABEL_MIGRATIONS[label]
+            metadata.setdefault("legacy_label", m.legacy_label or label)
+            label = m.new_label
+            display_name = display_name or m.display_name
+            role = profile.role or m.role
         else:
             role = profile.role
         return DeviceProfile(
@@ -651,47 +665,8 @@ class DeviceCommunicationService:
         )
 
     def _dispatch_command(self, connection: object, command: DeviceCommand) -> object | None:
-        command_type = str(command.command_type or "").strip().casefold()
-        payload = dict(command.payload or {})
-        if isinstance(connection, RegloICCClient):
-            if command_type == "pump.stop_all":
-                connection.stop_all(int(payload.get("channel_count", 4)))
-                return None
-            if command_type == "pump.start":
-                connection.start_channel(int(payload.get("channel", 1)))
-                return None
-            if command_type == "pump.stop":
-                connection.stop_channel(int(payload.get("channel", 1)))
-                return None
-            if command_type == "pump.set_flow":
-                connection.apply_channel(
-                    int(payload.get("channel", 1)),
-                    float(payload.get("flow_ul_min", 0.0)),
-                    str(payload.get("direction", "OFF")),
-                    float(payload.get("tube_mm", 0.0)),
-                    start=bool(payload.get("start", False)),
-                )
-                return None
-            if command_type == "pump.query":
-                return connection.query(str(payload.get("command", "")))
-        if hasattr(connection, "set_position"):
-            if command_type in {"switch.set_position", "valve.set_position"}:
-                connection.set_position(str(payload.get("position", "")))
-                return None
-            if command_type in {"switch.stop", "valve.stop"} and hasattr(connection, "stop"):
-                connection.stop()
-                return None
-        if isinstance(connection, AMFSwitchController):
-            if command_type == "switch.home":
-                connection.home(block=bool(payload.get("block", True)))
-                return None
-            if command_type == "switch.move_to":
-                connection.move_to(int(payload.get("position", 1)), block=bool(payload.get("block", True)))
-                return None
-            if command_type == "switch.get_position":
-                return connection.get_position()
-        if command_type == "raw.query" and hasattr(connection, "query"):
-            return connection.query(str(payload.get("command", "")))
+        if isinstance(connection, DeviceDriver):
+            return connection.execute_command(command)
         raise ControllerError(f"Unsupported command type {command.command_type!r} for {type(connection).__name__}.")
 
     def _require_profile(self, label: str) -> DeviceProfile:
@@ -705,10 +680,16 @@ class DeviceCommunicationService:
         normalized = str(label or "").strip()
         migrated = _LEGACY_LABEL_MIGRATIONS.get(normalized)
         if migrated is not None:
-            return migrated[0]
+            return migrated.new_label
         return normalized
 
     def _make_status(self, label: str, profile: DeviceProfile, connected: bool, last_error: str | None, identity: dict[str, str]) -> DeviceStatus:
+        if connected:
+            state = DeviceLifecycleState.CONNECTED
+        elif last_error is not None:
+            state = DeviceLifecycleState.ERROR
+        else:
+            state = DeviceLifecycleState.DISCONNECTED
         return DeviceStatus(
             uuid=profile.uuid,
             label=label,
@@ -716,7 +697,7 @@ class DeviceCommunicationService:
             driver=profile.driver,
             endpoint=profile.endpoint,
             connected=connected,
-            state="connected" if connected else "disconnected",
+            state=state,
             last_error=last_error,
             identity=identity,
             display_name=profile.display_name,
