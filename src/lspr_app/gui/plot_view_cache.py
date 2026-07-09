@@ -646,7 +646,13 @@ def build_metric_series_token(window, metric_name: str) -> tuple[object, ...]:
         except OSError:
             mtime_ns = 0
         return (str(metric_name), "archive", str(archive_path), int(mtime_ns))
-    plot_view_cache = getattr(window, "_plot_view_cache", None)
+    # FIXME: unlike its sibling build_metric_view_token (above), this never consults
+    # plot_view_cache.live_absolute_metric_state(metric_name) and always returns an
+    # "empty" token when there's no archive - flagged during a pyflakes/ruff sweep,
+    # not fixed here since changing this token's shape/semantics could affect cache-key
+    # comparisons at both call sites (plot_controller.py) without full context on that
+    # contract. Needs a maintainer decision, not a guess.
+    plot_view_cache = getattr(window, "_plot_view_cache", None)  # noqa: F841
     return (str(metric_name), "empty", 0, 0, 0)
 
 
@@ -1536,4 +1542,3 @@ class PlotViewCache:
                 "window_end_x": cached.last_window_end_x,
             }
         return modes
-

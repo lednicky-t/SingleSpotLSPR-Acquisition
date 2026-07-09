@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import logging
-import math
-import os
 import queue
 import threading
 from collections import deque
-from html import escape
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -15,8 +12,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
-from scipy.interpolate import CubicSpline
-from pyqtgraph import exporters as pg_exporters
 
 from PyQt6.QtCore import QPoint, QSize, Qt, QThreadPool, QTimer, QUrl, QRectF, pyqtSignal
 from PyQt6.QtCore import QEvent
@@ -24,15 +19,10 @@ from PyQt6.QtGui import (
     QDesktopServices,
     QFont,
     QColor,
-    QGuiApplication,
     QIcon,
     QKeySequence,
-    QFontMetricsF,
-    QPainter,
-    QPixmap,
     QTransform,
     QShortcut,
-    QTextCursor,
 )
 from PyQt6.QtWidgets import (
     QAbstractSpinBox,
@@ -41,70 +31,49 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
-    QMenu,
-    QGraphicsRectItem,
     QPushButton,
-    QScrollArea,
-    QSizeGrip,
     QSizePolicy,
     QSpinBox,
     QTextEdit,
     QToolButton,
-    QToolBar,
     QTabWidget,
-    QSlider,
-    QSplitter,
-    QSplitterHandle,
     QStackedWidget,
-    QVBoxLayout,
     QWidget,
 )
 
 from lspr_app import __version__
 from lspr_app.diagnostics import DiagnosticsConfig
 from lspr_app.device.base import Spectrometer, SpectrometerCapabilities
-from lspr_app.device.amf_mswitch import detect_amf_selector_devices
-from lspr_app.device.communication_models import DeviceProfile
-from lspr_app.device.device_manager import DeviceCommunicationService, extract_usb_fingerprint
-from lspr_app.device.reglo_icc import PumpProbe, RegloICCClient, is_probable_reglo_port
-from lspr_app.device.port_assignments import get_port_assignment, should_probe_port_for_role
-from lspr_app.device.probe_diagnostics import record_port_probe_event
-from lspr_app.device.serial_controllers import ControllerProbe, SerialController, controller_port_priority
+from lspr_app.device.device_manager import DeviceCommunicationService
+from lspr_app.device.reglo_icc import PumpProbe
 
-from lspr_app.device.simulated import SimulationParameters, SimulatedSpectrometer
+from lspr_app.device.simulated import SimulatedSpectrometer
 from lspr_app.domain.models import AcquisitionSettings, ProcessingSettings, Spectrum
-from lspr_app.domain.processing import fit_processed_spectrum, set_processing_debug_mode_enabled
-from lspr_app.domain.session import MeasurementError, MeasurementSession
+from lspr_app.domain.processing import set_processing_debug_mode_enabled
+from lspr_app.domain.session import MeasurementSession
 from lspr_app.storage.app_config import (
     load_processing_settings,
     load_acquisition_state,
     load_app_setting,
     load_window_ui_state,
-    save_acquisition_state,
     save_app_setting,
-    save_window_ui_state,
 )
-from lspr_app.storage.csv_export import export_spectrum_to_csv
-from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter, load_processed_metric_history
+from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter
 from lspr_core import (
     DEFAULT_LAUNCH_PROFILE,
     LAUNCH_PROFILE_CONTROL_EDITOR,
-    LAUNCH_PROFILE_FULL,
     launch_profile_spec,
     normalize_launch_profile,
 )
 from lspr_app.gui.chrome import build_menu_bar
-from lspr_app.gui.logging_utils import GuiLogBridge, GuiLogHandler, SUCCESS_LOG_LEVEL
+from lspr_app.gui.logging_utils import SUCCESS_LOG_LEVEL
 from lspr_app.gui.main_window_headers import (
     install_source_link_buttons,
     install_source_tab_headers,
-    math_function_tab_icon,
-    prism_tab_icon,
     update_source_link_buttons,
     update_source_tab_headers,
 )
@@ -124,10 +93,8 @@ from lspr_app.gui.icon_helpers import (
 )
 from lspr_app.gui.main_window_titlebar import build_title_bar, refresh_hw_device_status_strip, sync_window_control_icons
 from lspr_app.gui.main_window_panels import (
-    build_spectra_processing_group,
     build_simulation_page,
     build_spectrometer_page,
-    configure_spectra_processing_group_controls,
 )
 from lspr_app.gui.main_window_plot_settings import show_sensorgram_plot_settings_dialog_for
 from lspr_app.gui.main_window_preferences import show_preferences_dialog_for
@@ -216,7 +183,6 @@ from lspr_app.gui.main_window_sensorgram_overlay import (
     sync_sensorgram_control_step_overlay as sync_sensorgram_control_step_overlay_for_sensorgram,
 )
 from lspr_app.gui.main_window_state import (
-    acquisition_state_payload,
     apply_source_mode_for,
     fit_window_to_available_screen_for,
     activate_experimental_control_view,
@@ -224,14 +190,8 @@ from lspr_app.gui.main_window_state import (
     activate_spectra_view,
     apply_acquisition_state_to_widgets,
     apply_layout_preset,
-    collapsible_section_state,
-    persist_acquisition_state,
     reset_layout_presets_to_defaults,
-    restore_collapsible_section_state,
-    restore_ui_state,
     save_current_layout_to_preset,
-    save_ui_state,
-    schedule_acquisition_state_persist,
     set_gui_housekeeping_enabled,
     set_diagnostics_panel_visible,
     set_measurement_hdf5_flush_interval_s,
@@ -246,7 +206,6 @@ from lspr_app.gui.main_window_state import (
     toggle_experimental_control_panel_visibility,
     toggle_left_controls,
     toggle_sensorgram,
-    launch_profile_settings,
     apply_launch_profile_layout,
 )
 from lspr_app.gui.main_window_processing import (
@@ -256,15 +215,11 @@ from lspr_app.gui.main_window_processing import (
     normalize_sensorgram_metric_name,
     load_processing_settings_dialog,
     persist_processing_settings,
-    primary_trace_metric,
     save_processing_settings_dialog,
     selected_trace_metrics,
-    sensorgram_metric_archive_names,
     sensorgram_metric_order,
-    sensorgram_metric_selection,
     schedule_processing_refresh,
     sync_processing_crop_parameter_widget,
-    sync_legacy_metric_widgets_from_state,
 )
 from lspr_app.gui.main_window_plotting import (
     analysis_cache_token_for,
@@ -272,7 +227,6 @@ from lspr_app.gui.main_window_plotting import (
     apply_metric_color_styles_for,
     apply_temporal_smoothing_for,
     export_current_plot_for,
-    autoscale_residual_axis_for,
     autoscale_spectrum_plot_for,
     apply_processing_range_to_spectrum_plot_for,
     autoscale_metric_plot_for,
@@ -284,8 +238,6 @@ from lspr_app.gui.main_window_plotting import (
     compute_trace_metrics_for,
     headroom_value_text_for,
     enqueue_plot_processing_for,
-    flush_deferred_ui_refreshes_for,
-    flush_plot_refreshes_for,
     get_analysis_metrics_for,
     get_analysis_processed_spectrum_for,
     get_dense_analysis_curve_for,
@@ -305,28 +257,17 @@ from lspr_app.gui.main_window_plotting import (
     refresh_spectrometer_stats_for,
     refresh_metric_plot_for,
     start_plot_processing_task_for,
-    reference_peak_nm_for_shift_for,
     render_metric_series_for,
     request_metric_autoscale_for,
     set_sensorgram_frozen_for,
     set_plots_frozen_for,
-    temporal_history_token_for,
     update_poly_warning_indicator_for,
-    update_residual_axis_visibility_for,
-    update_residual_view_geometry_for,
     update_spectrum_stats_for,
     update_metric_stats_for,
     update_live_estimate_for,
-    update_window_mode_label_for,
-)
-from lspr_app.gui.sensorgram_control_step_overlay import (
-    normalize_sensorgram_control_step_overlay_color,
-    normalize_sensorgram_control_step_overlay_label,
-    resolve_sensorgram_control_step_overlay_palette_label,
 )
 from lspr_app.gui.plot_view_cache import (
     PlotViewCache,
-    build_active_trace_series_token,
 )
 from lspr_app.gui.update_scheduler import GuiTaskScheduler
 from lspr_app.resources import app_icon_path
@@ -346,8 +287,6 @@ from lspr_app.gui.main_window_logging import (
     log_success,
     log_throttled,
     log_warning,
-    refresh_session_summary_for,
-    refresh_session_statistics_for,
     set_log_following,
     set_log_view_mode,
     save_session_stats_log_for,
@@ -367,6 +306,7 @@ from lspr_app.gui.acquisition_controller import (
     set_manual_acquisition_buttons_enabled,
     set_measurement_buttons_enabled,
     set_measurement_ui_locked,
+    pause_measurement_run,
     start_acquisition,
     start_measurement_run,
     start_live_acquisition,
@@ -377,52 +317,22 @@ from lspr_app.gui.acquisition_controller import (
     update_window_mode_label,
 )
 from lspr_app.gui.shortcut_help import build_shortcuts_help_text
-from lspr_app.gui.plot_controller import flush_deferred_ui_refreshes, flush_plot_refreshes, refresh_plot
 from lspr_app.gui.spectrum_plot_controller import (
     autoscale_residual_axis,
-    autoscale_spectrum_plot,
     clear_residual_display,
-    clip_series_to_window,
-    downsample_spectrum_series_for_view,
-    handle_spectrum_mouse_moved,
     ResidualViewBox,
     render_residual_display,
-    spectrum_render_cache_key,
     update_residual_axis_visibility,
     update_residual_view_geometry,
-    update_spectrum_stats,
-)
-from lspr_app.gui.trace_plot_controller import (
-    autoscale_metric_plot,
-    handle_metric_mouse_moved,
-    refresh_metric_plot,
-    render_metric_series,
-    request_metric_autoscale,
-    update_metric_stats,
-)
-from lspr_app.gui.processing_helpers import (
-    analysis_cache_token,
-    analysis_metrics_cache_token,
-    compute_centroid_nm,
-    compute_metric_nm,
-    compute_peak_metric_nm,
-    compute_trace_metrics,
-    get_analysis_metrics,
-    get_dense_analysis_curve,
-    get_processed_spectrum,
-    needs_gaussian_metric,
-    processing_cache_token,
 )
 from lspr_app.gui.hardware_initializer import (
-    HardwareInitResult,
     HardwareInitStep,
-    HardwareInitStepResult,
     HardwareInitTask,
 )
 from lspr_app.gui.device_console_dialog import show_device_manager_dialog
 from lspr_app.gui.workers import (
     AcquisitionResult,
-    MetricArchiveReloadRequest,
+    MeasurementCompressionTask,
     MetricArchiveReloadResult,
     MetricArchiveReloadTask,
     LiveAcquisitionEvent,
@@ -431,27 +341,19 @@ from lspr_app.gui.workers import (
     LiveProcessingWorker,
     ProcessingRequest,
     ProcessingResult,
-    ProcessingTask,
 )
 from lspr_app.gui.widgets import InlineWheelDoubleLabel
 from lspr_app.gui.ui_helpers import (
-    create_status_dot_icon,
     make_compact_spinbox,
     make_sim_slider,
-    make_window_button,
-    window_control_icon,
 )
 from lspr_app.gui.widgets import (
-    CollapsibleSection,
-    CompactSplitter,
     ElidingLabel,
     FlexibleTimeAxis,
     ScientificAxis,
 )
 from lspr_app.gui.main_window_plot_widgets import (
-    LogTerminalTextEdit,
     TimedPlotWidget,
-    _spline_render_series,
 )
 from lspr_app.gui.main_window_hardware_scan import hardware_init_steps_for
 from lspr_app.gui.main_window_style import apply_modern_style_for, style_plot_widgets_for
@@ -3390,6 +3292,3 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.quit()
-
-
-

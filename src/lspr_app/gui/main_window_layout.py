@@ -16,10 +16,8 @@ from PyQt6.QtWidgets import (
 )
 
 from lspr_app.gui.main_window_panels import build_spectra_processing_group, configure_spectra_processing_group_controls
-from lspr_app.gui.icon_helpers import flow_tabler_icon, storage_compression_icon, tint_tabler_icon
+from lspr_app.gui.icon_helpers import flow_tabler_icon, tint_tabler_icon
 from lspr_app.gui.widgets import CollapsibleSection, CompactSplitter
-from lspr_app.gui.main_window_titlebar import refresh_hw_device_status_strip
-from lspr_app.gui.main_window_headers import update_source_tab_headers, update_source_link_buttons
 
 
 def build_recording_context_row_for(window) -> QWidget:

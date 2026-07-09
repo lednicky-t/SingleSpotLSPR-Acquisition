@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from time import perf_counter
-from datetime import datetime
 
 import pyqtgraph as pg
 from pyqtgraph import exporters as _pg_exporters
@@ -33,13 +32,15 @@ from lspr_app.gui.plot_controller import (
 )
 from lspr_app.gui.spectrum_plot_controller import (
     autoscale_residual_axis as _autoscale_residual_axis,
+    update_residual_axis_visibility as _update_residual_axis_visibility,
+    update_residual_view_geometry as _update_residual_view_geometry,
+)
+from lspr_app.gui.plot_controller import (
     autoscale_spectrum_plot as _autoscale_spectrum_plot,
     clip_series_to_window as _clip_series_to_window,
     downsample_spectrum_series_for_view as _downsample_spectrum_series_for_view,
     handle_spectrum_mouse_moved as _handle_spectrum_mouse_moved,
     spectrum_render_cache_key as _spectrum_render_cache_key,
-    update_residual_axis_visibility as _update_residual_axis_visibility,
-    update_residual_view_geometry as _update_residual_view_geometry,
     update_spectrum_stats as _update_spectrum_stats,
 )
 from lspr_app.gui.trace_plot_controller import (
@@ -50,7 +51,6 @@ from lspr_app.gui.trace_plot_controller import (
     request_metric_autoscale as _request_metric_autoscale,
     update_metric_stats as _update_metric_stats,
 )
-from lspr_app.gui.sensorgram_control_step_overlay import build_sensorgram_control_step_overlay_segments
 from lspr_app.gui.processing_helpers import (
     analysis_cache_token as _analysis_cache_token,
     analysis_metrics_cache_token as _analysis_metrics_cache_token,

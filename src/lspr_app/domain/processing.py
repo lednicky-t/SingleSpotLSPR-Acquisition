@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import warnings
 from dataclasses import replace
 from time import perf_counter, thread_time
 

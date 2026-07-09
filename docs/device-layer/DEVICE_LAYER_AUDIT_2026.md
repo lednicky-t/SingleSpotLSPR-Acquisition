@@ -1,7 +1,7 @@
 # Device Layer Audit — singleLSPR Acquisition
 
-**Date:** 2026-06-25  
-**Scope:** `apps/sLSPR/acq/src/lspr_app/device/` and related GUI initializer  
+**Date:** 2026-06-25
+**Scope:** `apps/sLSPR/acq/src/lspr_app/device/` and related GUI initializer
 **Status:** Fixes in progress
 
 ---
@@ -18,7 +18,7 @@ but contains several concrete bugs that directly cause the failures.
 ## Issues — Red (fix now, active failures)
 
 ### R1 — `probe_endpoint()` outer claim blocks all inner clients
-**File:** `device_manager.py:115`  
+**File:** `device_manager.py:115`
 **Status:** ✅ fixed
 
 The method wraps everything in `claim_port_context(endpoint, "device_comm:probe")` before calling
@@ -40,7 +40,7 @@ keyed on `endpoint` that does not interact with the owner registry.
 ---
 
 ### R2 — `ArduinoValveController.connect()` does not flush input buffer after bootloader sleep
-**File:** `valve_controllers.py:43`  
+**File:** `valve_controllers.py:43`
 **Status:** ✅ fixed
 
 Opening the serial port asserts DTR, which resets the Arduino bootloader. The 2-second sleep
@@ -57,7 +57,7 @@ garbage as `protocol_version`.
 ---
 
 ### R3 — `detect_controller()` ignores `is_probable_port`, tries ItsyBitsy on every valve connect
-**File:** `serial_controllers.py:136` — called from `device_manager.py:219`  
+**File:** `serial_controllers.py:136` — called from `device_manager.py:219`
 **Status:** ✅ fixed
 
 `device_manager.connect()` calls `detect_valve_controller(endpoint)` → `detect_controller(port)`
@@ -79,7 +79,7 @@ Fall back to all controllers only if no candidates match (unknown/generic port).
 ---
 
 ### R4 — `ArduinoValveController` has no `is_probable_port` override
-**File:** `valve_controllers.py:19`  
+**File:** `valve_controllers.py:19`
 **Status:** ✅ fixed
 
 `ItsyBitsy32U4ValveController` correctly narrows to `"ITSYBITSY" / "ADAFRUIT" / "239A"`.
@@ -108,7 +108,7 @@ def is_probable_port(cls, port: ControllerPort) -> bool:
 ## Issues — Orange (fix soon, logic errors)
 
 ### O1 — `RegloICCClient.get_probe()` calls `int()` without error handling
-**File:** `reglo_icc.py:103`  
+**File:** `reglo_icc.py:103`
 **Status:** ✅ fixed
 
 ```python
@@ -126,7 +126,7 @@ Also: `query()` has a dead if/else — both branches return `response` identical
 ---
 
 ### O2 — Unknown driver type silently falls through to valve detection
-**File:** `device_manager.py:219`  
+**File:** `device_manager.py:219`
 **Status:** ✅ fixed
 
 `connect()` has three branches: pump, mswitch, and then an unconditional fallback to
@@ -140,7 +140,7 @@ instead of silently falling through.
 ---
 
 ### O3 — Same `_claim_owner` string for all `RegloICCClient` instances
-**File:** `reglo_icc.py:49`  
+**File:** `reglo_icc.py:49`
 **Status:** ✅ fixed
 
 ```python
@@ -158,7 +158,7 @@ simultaneously — defeating the registry's exclusive-access guarantee.
 ## Issues — Yellow (next sprint, performance/design)
 
 ### Y1 — `port_assignments.py` reads JSON from disk on every call
-**File:** `port_assignments.py:55`  
+**File:** `port_assignments.py:55`
 **Status:** ✅ fixed
 
 `get_port_assignment(port)` calls `_load_port_assignments()` → `load_app_setting()` →
@@ -170,7 +170,7 @@ this is called at least twice per port. With 5 ports that is 10 file reads per s
 ---
 
 ### Y2 — `ensure_default_profiles()` always creates 6 profiles on every startup
-**File:** `device_manager.py:327`  
+**File:** `device_manager.py:327`
 **Status:** ✅ fixed (metadata flag added; UI distinction is B2 scope)
 
 Every startup ensures pump_1/pump_2/pump_3 + valve_1/valve_2 + switch_1 exist, all with
@@ -184,7 +184,7 @@ pump_3, valve_2 automatically and let the user add them via the device UI.
 ---
 
 ### Y3 — `arduino_valve.py` is orphaned dead code
-**File:** `arduino_valve.py`  
+**File:** `arduino_valve.py`
 **Status:** ✅ fixed (file removed)
 
 `ArduinoValveClient` predates the `SerialController` framework. It has no connection registry
@@ -196,7 +196,7 @@ The canonical Arduino valve implementation is `valve_controllers.py:ArduinoValve
 ---
 
 ### Y4 — Duplicate `claim_port` call pattern (redundant, harmless)
-**Files:** `reglo_icc.py:85`, `valve_controllers.py:42`  
+**Files:** `reglo_icc.py:85`, `valve_controllers.py:42`
 **Status:** ✅ fixed
 
 Both `connect()` methods call `try_claim_port()` (which already adds the owner to the set)
@@ -210,7 +210,7 @@ a Python `set`, the duplicate add is idempotent and causes no bug. It is confusi
 ## Issues — Blue (roadmap, structural)
 
 ### B1 — `HardwareInitResult` assumes one device per type
-**File:** `hardware_initializer.py:23`  
+**File:** `hardware_initializer.py:23`
 **Status:** ✅ done
 
 Implemented multi-device init refactor + nomenclature standardization + device fingerprinting:

@@ -303,4 +303,3 @@ For now, the intended meaning is:
 - `STOP` equals full termination
 
 The table and bar remain plan selectors, while the recorded runtime sequence is built live from the actual experiment.
-

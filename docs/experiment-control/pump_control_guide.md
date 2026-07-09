@@ -279,4 +279,3 @@ If re-initialization causes problems:
 - [`src/lspr_app/domain/pump_plan.py`](../../src/lspr_app/domain/pump_plan.py)
 - [`src/lspr_app/gui/experiment_control_window.py`](../../src/lspr_app/gui/experiment_control_window.py)
 - [`src/lspr_app/gui/workers.py`](../../src/lspr_app/gui/workers.py)
-

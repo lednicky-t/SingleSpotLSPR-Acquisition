@@ -4,7 +4,7 @@ import csv
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QSize, QEvent, QModelIndex
-from PyQt6.QtGui import QColor, QIcon, QCursor, QGuiApplication, QPalette
+from PyQt6.QtGui import QColor, QIcon, QCursor, QGuiApplication
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QColorDialog,
@@ -16,9 +16,6 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QScrollArea,
-    QComboBox,
-    QDoubleSpinBox,
     QTableView,
     QTableWidget,
     QTableWidgetItem,
@@ -26,21 +23,11 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QStyledItemDelegate,
-    QSizePolicy,
 )
 
 from tablerqicon import TablerQIcon
 
-from lspr_app.domain.pump_plan import ACTIVE_PUMP_CHANNELS, PumpChannelStep, PumpPlanStep
-from lspr_app.gui.experiment_control_builders import (
-    create_table_color_combo,
-    create_table_comment_edit,
-    create_table_duration_spin,
-    create_table_flow_spin,
-    create_table_switch_combo,
-    create_table_valve_button,
-    direction_glyph,
-)
+from lspr_app.domain.pump_plan import ACTIVE_PUMP_CHANNELS, PumpPlanStep
 from lspr_app.gui.experiment_control_plan_view import (
     build_experiment_control_pause_model,
     configure_experiment_control_plan_preview,
@@ -49,7 +36,6 @@ from lspr_app.gui.experiment_control_plan_view import (
     restore_experiment_control_pause_dialog_state,
     save_experiment_control_pause_dialog_state,
 )
-from lspr_app.gui.flow_plan_model import ExperimentPlanTableModel
 from lspr_app.gui.icon_helpers import flow_tabler_icon
 
 

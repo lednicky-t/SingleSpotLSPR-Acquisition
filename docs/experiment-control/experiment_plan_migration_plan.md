@@ -103,4 +103,3 @@ The migration should keep the current behavior as much as possible:
 - Do not start this migration unless the current table becomes a real usability bottleneck.
 - Prefer keeping the current widget table while it is still fast enough.
 - If the migration starts, do it in small steps so the app stays usable throughout.
-

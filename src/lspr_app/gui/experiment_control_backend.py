@@ -112,4 +112,3 @@ class AcquisitionExperimentControlBackend:
     def disconnect_device(self, device_key: str) -> bool:
         _ = device_key
         return False  # disconnection goes through the window's shutdown_devices lifecycle
-

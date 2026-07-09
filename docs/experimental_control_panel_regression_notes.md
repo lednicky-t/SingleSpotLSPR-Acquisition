@@ -43,4 +43,3 @@ The panel was still being created and inserted, but the top splitter could stay 
 - `src/lspr_app/gui/main_window_lifecycle.py`
 - `src/lspr_app/gui/main_window.py`
 - `src/lspr_app/gui/experiment_control_window.py`
-

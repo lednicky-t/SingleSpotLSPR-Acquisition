@@ -208,9 +208,6 @@ def apply_sensorgram_metric_y_axis_mode_once(window) -> None:
         window._trace_view_autoscaling = False
         window._metric_autoscale_pending = False
 
-    if save:
-        window._schedule_ui_state_persist()
-
 
 def cycle_sensorgram_metric_y_axis_mode(window) -> None:
     current = normalize_sensorgram_metric_y_axis_mode(getattr(window, "_sensorgram_metric_y_axis_mode", "auto"))

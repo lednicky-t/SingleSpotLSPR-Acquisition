@@ -353,7 +353,7 @@ class PumpPlanTimelineWidget(QWidget):
             # Running plan: derive ETA from _plan_active_row + _plan_elapsed_s.
             # This branch is currently unreachable because the parent never sets
             # _plan_active_row on the widget — it is kept for potential future use.
-            progress_s = min(max(float(self._progress_s), 0.0), total_end_s)
+            progress_s = min(max(float(self._progress_s), 0.0), total_end_s)  # noqa: F841 - unreachable-for-now branch, kept intentionally
             current_step = self._steps[plan_active_row]
             active_elapsed_s = max(float(self._plan_elapsed_s), 0.0)
             total_runtime_s = max(float(self._runtime_s if self._runtime_s is not None else 0.0), 0.0)
@@ -406,7 +406,6 @@ class PumpPlanTimelineWidget(QWidget):
     def paintEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
         dark = self._theme_mode == "dark"
         palette = self._theme_palette or {}
-        border = QColor(palette.get("border", "#2b3138" if dark else "#d9e0e7"))
         text_color = QColor(palette.get("fg", "#e6ebf1" if dark else "#1d2733"))
         muted = QColor(palette.get("muted", "#a8b0ba" if dark else "#5f7388"))
         painter = QPainter(self)

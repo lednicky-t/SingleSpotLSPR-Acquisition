@@ -22,7 +22,6 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QLabel,
     QVBoxLayout,
-    QSlider,
     QDoubleSpinBox,
     QSpinBox,
     QSizePolicy,
@@ -1130,4 +1129,3 @@ def show_sensorgram_plot_settings_dialog_for(window) -> None:
         f"Sensorgram settings dialog open path completed in {(perf_counter() - started) * 1000.0:.2f} ms before exec()",
     )
     dialog.exec()
-

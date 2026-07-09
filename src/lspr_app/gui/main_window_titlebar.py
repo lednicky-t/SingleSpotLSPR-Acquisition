@@ -256,4 +256,3 @@ def refresh_hw_device_status_strip(window) -> None:
 
 def sync_window_control_icons(window) -> None:
     return
-

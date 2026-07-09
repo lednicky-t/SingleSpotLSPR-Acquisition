@@ -239,4 +239,3 @@ If you see `Device not initialized` or `Not homed`:
 - [`src/lspr_app/device/amf_mswitch.py`](../../src/lspr_app/device/amf_mswitch.py)
 - [`src/lspr_app/gui/experiment_control_window.py`](../../src/lspr_app/gui/experiment_control_window.py)
 - [`src/lspr_app/gui/main_window.py`](../../src/lspr_app/gui/main_window.py)
-

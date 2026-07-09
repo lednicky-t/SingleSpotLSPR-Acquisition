@@ -89,7 +89,7 @@ def ensure_metric_archive_path(window: Any) -> Path:
 def _open_archive_handle(window: Any) -> _ArchiveState:
     handle = getattr(window, _ARCHIVE_HANDLE_ATTR, None)
     path = ensure_metric_archive_path(window)
-    if handle is not None and not getattr(handle, "id", None) is None:
+    if handle is not None and getattr(handle, "id", None) is not None:
         return _ArchiveState(path=path, handle=handle, row_count=int(getattr(window, _ARCHIVE_ROWS_ATTR, 0)))
 
     path.parent.mkdir(parents=True, exist_ok=True)

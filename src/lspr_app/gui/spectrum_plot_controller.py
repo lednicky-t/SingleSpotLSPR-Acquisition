@@ -4,17 +4,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPen
 
-from lspr_app.gui.plot_controller import (
-    autoscale_spectrum_plot,
-    clip_series_to_window,
-    downsample_spectrum_series_for_view,
-    handle_spectrum_mouse_moved,
-    spectrum_render_cache_key,
-    update_spectrum_stats,
-)
 
 if TYPE_CHECKING:
     from lspr_app.gui.main_window import MainWindow

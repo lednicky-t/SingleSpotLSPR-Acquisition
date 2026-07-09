@@ -35,4 +35,3 @@ Implementation scaffolding:
 - `src/lspr_app/gui/experiment_control_controller.py`
 - `src/lspr_app/gui/experiment_control_capabilities.py`
 - `src/lspr_app/gui/experiment_control_backend.py`
-

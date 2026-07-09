@@ -19,7 +19,6 @@ from lspr_ui import (
     trash_icon,
 )
 
-from lspr_app.resources import shared_icon_path
 
 
 _PRISM_ICON_SVG = """

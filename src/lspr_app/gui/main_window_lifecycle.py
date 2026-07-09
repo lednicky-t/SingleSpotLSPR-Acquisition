@@ -3,7 +3,6 @@ from __future__ import annotations
 import traceback
 
 from time import perf_counter
-from typing import Any
 
 from PyQt6.QtCore import QEvent, Qt, QTimer
 
@@ -11,14 +10,12 @@ from lspr_app.device.simulated import SimulatedSpectrometer
 from lspr_app.gui.hardware_initializer import HardwareInitResult, HardwareInitStepResult, HardwareInitTask
 from lspr_app.gui.main_window_state import (
     acquisition_state_payload,
-    apply_acquisition_state_to_widgets,
     collapsible_section_state,
     launch_profile_settings,
     persist_acquisition_state,
     ensure_visible_top_content_splitter,
     restore_collapsible_section_state,
     restore_ui_state,
-    normalize_top_content_mode,
     save_ui_state,
     schedule_acquisition_state_persist,
 )
@@ -317,7 +314,6 @@ def handle_hardware_init_finished_for(window, result: object) -> None:
     window._hardware_init_task = None
     if getattr(window, "_closing", False):
         return
-    experiment_control_window = getattr(window, "_experiment_control_window", None)
     if not isinstance(result, HardwareInitResult):
         window._log_warning("Hardware initialization finished with an unexpected result payload.")
         finish_hardware_initialization_for(window, "Hardware initialization finished.")

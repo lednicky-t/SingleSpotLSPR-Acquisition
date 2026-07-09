@@ -9,7 +9,6 @@ from dataclasses import asdict
 from pathlib import Path
 from time import monotonic
 from datetime import datetime, timezone
-from pathlib import Path
 
 import h5py
 import numpy as np
@@ -22,7 +21,6 @@ from lspr_io import (
     LSPR_MEASUREMENT_PLAN_COLUMNS,
     LSPR_MEASUREMENT_RUNTIME_COLUMNS,
     LSPR_MEASUREMENT_RUNTIME_DATASET_NAME,
-    LSPR_MEASUREMENT_RUNTIME_TIMESTAMP_UTC_COLUMN,
     LSPR_MEASUREMENT_TIME_COLUMNS,
     LSPR_MEASUREMENT_WAVELENGTHS_DATASET_NAME,
     LSPR_MEASUREMENT_SWITCH_SOLUTION_MAP_DATASET_NAME,

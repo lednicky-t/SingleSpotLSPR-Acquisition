@@ -3,19 +3,19 @@
 import multiprocessing as mp
 import queue
 import logging
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 
 import numpy as np
-from PyQt6.QtGui import QColor, QIcon
+from PyQt6.QtGui import QColor
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QFileDialog, QInputDialog
 
 from lspr_app.app import create_spectrometer
 from lspr_app.domain.models import Spectrum
-from lspr_app.domain.processing import processing_debug_mode_enabled
+from lspr_core import DEFAULT_LAUNCH_PROFILE, launch_profile_spec
 from lspr_app.domain.session import MeasurementError
 from lspr_app.device.simulated import SimulatedSpectrometer, SimulationParameters
 from lspr_app.gui.icon_helpers import flow_tabler_icon, math_function_tab_icon, prism_tab_icon, tint_tabler_icon, transport_icon
@@ -38,6 +38,7 @@ from lspr_app.gui.workers import (
     MeasurementCompressionTask,
 )
 from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter
+from lspr_app.storage.measurement_archive import close_temp_measurement_writer
 
 
 def _flush_live_processing_logs(window) -> None:
@@ -1281,7 +1282,6 @@ def stop_measurement_run(window) -> None:
     if not window._measurement_active:
         return
     # STOP is the only state that finalizes the recording file.
-    started_at = window._measurement_started_at
     measurement_path = window._measurement_path
     if window._live_worker is not None and window._live_worker.is_alive():
         window._live_worker.update_archive_context(None, False, None)
@@ -1536,8 +1536,6 @@ def _reserve_unique_measurement_destination(destination: Path) -> Path:
         if not candidate.exists():
             return candidate
     raise FileExistsError(f"Unable to reserve a unique measurement file name under {destination.parent}")
-
-from lspr_app.storage.measurement_archive import close_temp_measurement_writer, ensure_temp_measurement_writer
 
 
 def _is_recording_active(window: Any) -> bool:

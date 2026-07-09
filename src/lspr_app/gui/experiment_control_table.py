@@ -175,4 +175,3 @@ def update_plan_detail_toggle_icon(window) -> None:
         tooltip = "Show the per-channel direction and tube columns."
     window.plan_detail_toggle.setIcon(icon)
     window.plan_detail_toggle.setToolTip(tooltip)
-

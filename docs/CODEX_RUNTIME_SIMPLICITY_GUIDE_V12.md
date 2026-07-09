@@ -198,4 +198,3 @@ The architecture is good only if these remain true:
 - one-metric and three-metric runs do not collapse the scheduler;
 - diagnostics do not cause slowdown;
 - a developer can explain the live data path in under one minute.
-

@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import csv
 import logging
 import math
 import re
 from copy import deepcopy
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from time import monotonic, perf_counter
 
@@ -20,8 +18,8 @@ try:
 except ImportError:  # pragma: no cover - optional dependency guard
     yaml = None
 
-from PyQt6.QtCore import QByteArray, QObject, QRectF, QRunnable, QSize, QThreadPool, QTimer, Qt, QEvent, QModelIndex, QItemSelectionModel, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap
+from PyQt6.QtCore import QByteArray, QRect, QSize, QThreadPool, QTimer, Qt, QEvent, QModelIndex, pyqtSignal
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -33,7 +31,6 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFrame,
     QGridLayout,
-    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -43,15 +40,10 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSplitter,
     QSizePolicy,
-    QStyle,
-    QStyledItemDelegate,
-    QTableView,
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
-    QToolTip,
     QSpinBox,
-    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
@@ -77,22 +69,8 @@ from lspr_app.domain.pump_plan import (
 from lspr_app.gui.experiment_control_builders import (
     create_direction_button,
     create_flow_step_action_button,
-    create_table_color_combo,
-    create_table_comment_edit,
-    create_table_duration_spin,
-    create_table_flow_spin,
-    create_table_switch_combo,
-    create_table_valve_button,
     direction_glyph,
     set_step_valve_button_state_for_button,
-)
-from lspr_app.gui.flow_plan_model import (
-    ExperimentPlanColorDelegate,
-    ExperimentPlanDurationDelegate,
-    ExperimentPlanFlowDelegate,
-    ExperimentPlanSwitchDelegate,
-    ExperimentPlanTableModel,
-    ExperimentPlanValveDelegate,
 )
 from lspr_app.gui.experiment_control_table import (
     configure_experiment_control_table_columns,
@@ -126,7 +104,6 @@ from lspr_app.gui.experiment_control_connection import (
 )
 from lspr_app.gui.experiment_control_widgets import (
     ExperimentControlTableView,
-    PlanColorDelegate,
     _NoFocusItemDelegate,
     _make_frameless_icon_button,
 )
@@ -139,10 +116,7 @@ from lspr_app.gui.icon_helpers import flow_tabler_icon, tint_tabler_icon, transp
 from lspr_app.gui.ui_helpers import make_compact_spinbox
 from lspr_app.storage.app_config import load_app_setting, save_app_setting, save_window_ui_state
 from lspr_io import (
-    LSPR_MEASUREMENT_PLAN_COLUMNS,
-    LSPR_MEASUREMENT_RUNTIME_DATASET_NAME,
     build_legacy_experiment_plan_row_table,
-    validate_measurement_file,
 )
 
 
@@ -2215,383 +2189,6 @@ class ExperimentControlWindow(QWidget):
         self._update_timeline_selection()
         return
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Color palette")
-        dialog.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(2)
-        dialog.setStyleSheet(
-            """
-            QDialog {
-                background: %(bg)s;
-                color: %(fg)s;
-            }
-            QLabel {
-                color: %(muted)s;
-            }
-            QWidget#paletteDialogBar {
-                background: %(bg)s;
-            }
-            QLabel#paletteDialogTitle {
-                color: %(fg)s;
-                font-size: 10px;
-                font-weight: 700;
-            }
-            QTableWidget#paletteTable {
-                background: %(bg)s;
-                color: %(fg)s;
-                border: none;
-                gridline-color: %(border)s;
-                alternate-background-color: %(button)s;
-                selection-background-color: transparent;
-                selection-color: %(fg)s;
-                font-size: 11px;
-            }
-            QTableWidget#paletteTable::viewport {
-                background: %(bg)s;
-                border: none;
-            }
-            QTableWidget#paletteTable::item {
-                border: none;
-                padding: 1px 4px;
-            }
-            QTableWidget#paletteTable::item:selected {
-                background: transparent;
-            }
-            QToolButton#paletteColorButton {
-                background: transparent;
-                border: none;
-                padding: 0px;
-                min-height: 18px;
-                min-width: 112px;
-            }
-            QToolButton#paletteColorButton:hover {
-                border: 1px solid %(border_hover)s;
-            }
-            QToolButton#paletteRowActionButton {
-                background: transparent;
-                border: none;
-                padding: 0px;
-                min-width: 18px;
-                min-height: 18px;
-            }
-            QToolButton#paletteRowActionButton:hover {
-                background: rgba(127, 127, 127, 0.10);
-            }
-            QToolButton#paletteRowActionButton:pressed {
-                background: rgba(127, 127, 127, 0.18);
-            }
-            QHeaderView::section {
-                background: %(header)s;
-                color: %(fg)s;
-                border: none;
-                border-bottom: 1px solid %(border)s;
-                padding: 0px 2px;
-                font-size: 9px;
-            }
-            QToolButton#paletteDialogClose {
-                background: transparent;
-                border: none;
-                padding: 0px;
-                min-width: 18px;
-                min-height: 18px;
-                color: %(fg)s;
-            }
-            QToolButton#paletteDialogClose:hover {
-                background: rgba(127, 127, 127, 0.10);
-            }
-            QPushButton#paletteDialogAction {
-                background: %(button)s;
-                color: %(fg)s;
-                border: 1px solid %(border)s;
-                border-radius: 8px;
-                padding: 2px 8px;
-            }
-            QPushButton#paletteDialogAction:hover {
-                background: %(button_hover)s;
-                border-color: %(border_hover)s;
-            }
-            """ % self._theme_palette()
-        )
-
-        top_bar = QWidget(self)
-        top_bar.setObjectName("paletteDialogBar")
-        top_bar_layout = QHBoxLayout()
-        top_bar_layout.setContentsMargins(0, 0, 0, 0)
-        top_bar_layout.setSpacing(2)
-        title_label = QLabel("Color palette")
-        title_label.setObjectName("paletteDialogTitle")
-        title_label.setToolTip("Edit the palette used by the color dropdown. Save to CSV to share, or load a CSV to overwrite the current palette.")
-        close_button = QToolButton(dialog)
-        close_button.setObjectName("paletteDialogClose")
-        close_button.setAutoRaise(True)
-        close_button.setIcon(tint_tabler_icon(flow_tabler_icon("x"), QColor("#e6ebf1")))
-        close_button.setIconSize(QSize(14, 14))
-        close_button.setToolTip("Close")
-        close_button.clicked.connect(dialog.reject)
-        top_bar_layout.addWidget(title_label)
-        top_bar_layout.addStretch(1)
-        top_bar_layout.addWidget(close_button)
-        top_bar.setLayout(top_bar_layout)
-        layout.addWidget(top_bar)
-
-        table = PaletteTableWidget(0, 2, dialog)
-        table.setObjectName("paletteTable")
-        table.setHorizontalHeaderLabels(["Name", "Color"])
-        table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setStretchLastSection(True)
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        table.horizontalHeader().resizeSection(1, 124)
-        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        table.setEditTriggers(
-            QAbstractItemView.EditTrigger.DoubleClicked
-            | QAbstractItemView.EditTrigger.SelectedClicked
-            | QAbstractItemView.EditTrigger.EditKeyPressed
-        )
-        table.setAlternatingRowColors(True)
-        table.setShowGrid(True)
-        table.verticalHeader().setDefaultSectionSize(18)
-        table.horizontalHeader().setMinimumHeight(18)
-        table.horizontalHeader().setMaximumHeight(18)
-        table.setTabKeyNavigation(True)
-        table.setFixedHeight(table.horizontalHeader().height() + table.verticalHeader().defaultSectionSize() * 12 + 4)
-        self._populate_color_palette_table(table, self._color_palette_entries)
-        layout.addWidget(table)
-
-        button_row = QHBoxLayout()
-        button_row.setContentsMargins(0, 0, 0, 0)
-        button_row.setSpacing(4)
-        add_button = QToolButton(dialog)
-        add_button.setObjectName("paletteRowActionButton")
-        add_button.setAutoRaise(True)
-        add_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        add_button.setIcon(tint_tabler_icon(flow_tabler_icon("plus"), QColor("#47a861")))
-        add_button.setIconSize(QSize(14, 14))
-        add_button.setToolTip("Add a palette row")
-        remove_button = QToolButton(dialog)
-        remove_button.setObjectName("paletteRowActionButton")
-        remove_button.setAutoRaise(True)
-        remove_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        remove_button.setIcon(tint_tabler_icon(flow_tabler_icon("x"), QColor("#b44a4a")))
-        remove_button.setIconSize(QSize(14, 14))
-        remove_button.setToolTip("Remove the selected palette row")
-        move_up_button = QToolButton(dialog)
-        move_up_button.setObjectName("paletteRowActionButton")
-        move_up_button.setAutoRaise(True)
-        move_up_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        move_up_button.setIcon(tint_tabler_icon(flow_tabler_icon("chevron_up"), QColor("#e6ebf1")))
-        move_up_button.setIconSize(QSize(14, 14))
-        move_up_button.setToolTip("Move selected row up (Page Up)")
-        move_down_button = QToolButton(dialog)
-        move_down_button.setObjectName("paletteRowActionButton")
-        move_down_button.setAutoRaise(True)
-        move_down_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        move_down_button.setIcon(tint_tabler_icon(flow_tabler_icon("chevron_down"), QColor("#e6ebf1")))
-        move_down_button.setIconSize(QSize(14, 14))
-        move_down_button.setToolTip("Move selected row down (Page Down)")
-        load_button = QPushButton("Load CSV", dialog)
-        save_button = QPushButton("Save CSV", dialog)
-        apply_button = QPushButton("Apply", dialog)
-        cancel_button = QPushButton("Cancel", dialog)
-        for button in (load_button, save_button, apply_button, cancel_button):
-            button.setObjectName("paletteDialogAction")
-        button_row.addWidget(add_button)
-        button_row.addWidget(remove_button)
-        button_row.addWidget(move_up_button)
-        button_row.addWidget(move_down_button)
-        button_row.addStretch(1)
-        button_row.addWidget(load_button)
-        button_row.addWidget(save_button)
-        button_row.addWidget(cancel_button)
-        button_row.addWidget(apply_button)
-        layout.addLayout(button_row)
-        dialog.adjustSize()
-
-        def _add_row() -> None:
-            row = table.rowCount()
-            table.insertRow(row)
-            self._set_palette_table_row(table, row, f"Custom {row + 1}", "#4E79A7")
-            table.setCurrentCell(row, 0)
-
-        def _remove_row() -> None:
-            row = table.currentRow()
-            if row < 0:
-                return
-            table.removeRow(row)
-            if table.rowCount() > 0:
-                table.setCurrentCell(min(row, table.rowCount() - 1), 0)
-
-        def _move_row(delta: int) -> None:
-            row = table.currentRow()
-            if row < 0:
-                return
-            next_row = row + delta
-            if next_row < 0 or next_row >= table.rowCount():
-                return
-            entries = self._read_color_palette_table(table)
-            if row >= len(entries) or next_row >= len(entries):
-                return
-            entries[row], entries[next_row] = entries[next_row], entries[row]
-            self._populate_color_palette_table(table, entries)
-            table.setCurrentCell(next_row, 0)
-
-        def _load_csv() -> None:
-            file_path, _filter = QFileDialog.getOpenFileName(
-                self,
-                "Load color palette",
-                str(Path.home()),
-                "Palette files (*.csv *.tsv);;CSV files (*.csv);;TSV files (*.tsv);;All files (*)",
-            )
-            if not file_path:
-                return
-            try:
-                entries = self._read_color_palette_file(Path(file_path))
-            except Exception as exc:
-                QMessageBox.critical(self, "Load color palette", f"Could not load palette:\n{exc}")
-                return
-            self._populate_color_palette_table(table, entries)
-
-        def _save_csv() -> None:
-            file_path, _filter = QFileDialog.getSaveFileName(
-                self,
-                "Save color palette",
-                str(Path.home() / "color_palette.csv"),
-                "Palette files (*.csv *.tsv);;CSV files (*.csv);;TSV files (*.tsv);;All files (*)",
-            )
-            if not file_path:
-                return
-            try:
-                entries = self._read_color_palette_table(table)
-                self._write_color_palette_file(Path(file_path), entries)
-            except Exception as exc:
-                QMessageBox.critical(self, "Save color palette", f"Could not save palette:\n{exc}")
-
-        def _apply() -> None:
-            entries = self._read_color_palette_table(table)
-            if not entries:
-                QMessageBox.warning(self, "Color palette", "Palette is empty. Add at least one color entry.")
-                return
-            self._color_palette_entries = entries
-            self._sync_custom_plan_colors_from_palette()
-            dialog.accept()
-
-        add_button.clicked.connect(_add_row)
-        remove_button.clicked.connect(_remove_row)
-        move_up_button.clicked.connect(lambda: _move_row(-1))
-        move_down_button.clicked.connect(lambda: _move_row(1))
-        load_button.clicked.connect(_load_csv)
-        save_button.clicked.connect(_save_csv)
-        apply_button.clicked.connect(_apply)
-        cancel_button.clicked.connect(dialog.reject)
-        table._move_selected_row = _move_row  # type: ignore[attr-defined]
-
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        self._save_color_palette_entries()
-        self._refresh_experiment_control_view()
-        self._update_timeline_selection()
-
-    def _set_palette_table_row(self, table: QTableWidget, row: int, name: str, color: str) -> None:
-        name_item = QTableWidgetItem(name)
-        name_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsEditable)
-        table.setItem(row, 0, name_item)
-        color_button = QToolButton(table)
-        color_button.setObjectName("paletteColorButton")
-        color_button.setAutoRaise(True)
-        color_button.setToolTip("Click to change the color.")
-        color_button.setProperty("palette_row", row)
-        color_button.setProperty("palette_color", color)
-        color_button.clicked.connect(lambda _checked=False, btn=color_button, tbl=table: self._choose_palette_row_color(tbl, btn))
-        self._style_palette_color_button(color_button, color)
-        table.setCellWidget(row, 1, color_button)
-
-    def _style_palette_color_button(self, button: QToolButton, color: str) -> None:
-        qcolor = QColor(color)
-        if not qcolor.isValid():
-            qcolor = QColor("#4E79A7")
-        text_color = self._contrast_text_color(qcolor.name())
-        button.setText(qcolor.name().upper())
-        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        button.setIcon(QIcon())
-        button.setIconSize(QSize(0, 0))
-        button.setStyleSheet(
-            f"QToolButton#paletteColorButton {{"
-            f" background: {qcolor.name().upper()};"
-            f" color: {text_color};"
-            " border: none;"
-            " border-radius: 4px;"
-            " padding: 0px 6px;"
-            "}}"
-            "QToolButton#paletteColorButton:hover {"
-            " border: 1px solid rgba(255,255,255,0.22);"
-            "}"
-        )
-
-    def _choose_palette_row_color(self, table: QTableWidget, button: QToolButton) -> None:
-        row = int(button.property("palette_row") or -1)
-        if row < 0 or row >= table.rowCount():
-            return
-        current = str(button.property("palette_color") or "#4E79A7")
-        chosen = QColorDialog.getColor(QColor(current), self, "Pick palette color")
-        if not chosen.isValid():
-            return
-        color = chosen.name().upper()
-        button.setProperty("palette_color", color)
-        self._style_palette_color_button(button, color)
-
-    def _populate_color_palette_table(self, table: QTableWidget, entries: list[tuple[str, str]]) -> None:
-        table.setRowCount(0)
-        for row, (name, color) in enumerate(entries):
-            table.insertRow(row)
-            self._set_palette_table_row(table, row, name, color)
-        if table.rowCount() > 0:
-            table.setCurrentCell(0, 0)
-
-    def _read_color_palette_table(self, table: QTableWidget) -> list[tuple[str, str]]:
-        entries: list[tuple[str, str]] = []
-        for row in range(table.rowCount()):
-            name_item = table.item(row, 0)
-            color_widget = table.cellWidget(row, 1)
-            name = name_item.text().strip() if name_item is not None else ""
-            color_text = ""
-            if isinstance(color_widget, QToolButton):
-                color_text = str(color_widget.property("palette_color") or "").strip()
-            entry = self._normalize_color_entry(name, color_text, row)
-            if entry is not None:
-                entries.append(entry)
-        return entries
-
-    def _write_color_palette_file(self, path: Path, entries: list[tuple[str, str]]) -> None:
-        delimiter = "\t" if path.suffix.lower() in {".tsv", ".tab"} else ","
-        with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle, delimiter=delimiter)
-            writer.writerow(["name", "color"])
-            for name, color in entries:
-                writer.writerow([name, color])
-
-    def _read_color_palette_file(self, path: Path) -> list[tuple[str, str]]:
-        delimiter = "\t" if path.suffix.lower() in {".tsv", ".tab"} else ","
-        entries: list[tuple[str, str]] = []
-        with path.open("r", newline="", encoding="utf-8") as handle:
-            reader = csv.reader(handle, delimiter=delimiter)
-            rows = list(reader)
-        if not rows:
-            return entries
-        start_index = 1 if rows[0] and [cell.strip().lower() for cell in rows[0][:2]] == ["name", "color"] else 0
-        for index, row in enumerate(rows[start_index:]):
-            if not row:
-                continue
-            name = row[0] if len(row) > 0 else ""
-            color = row[1] if len(row) > 1 else ""
-            entry = self._normalize_color_entry(name, color, index)
-            if entry is not None:
-                entries.append(entry)
-        return entries
-
     def _set_step_valve_button_state(self, valve: str) -> None:
         set_step_valve_button_state_for_button(self, self.step_valve_button, valve)
 
@@ -2648,164 +2245,6 @@ class ExperimentControlWindow(QWidget):
         self._refresh_experiment_control_view()
         self.save_ui_state()
         return
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Valve labels")
-        dialog.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
-        dialog.resize(220, 126)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(2)
-        dialog.setStyleSheet(
-            """
-            QDialog {
-                background: %(bg)s;
-                color: %(fg)s;
-            }
-            QLabel#valveDialogTitle {
-                color: %(fg)s;
-                font-size: 10px;
-                font-weight: 700;
-            }
-            QTableWidget#valveTable {
-                background: %(bg)s;
-                color: %(fg)s;
-                border: none;
-                gridline-color: %(border)s;
-                alternate-background-color: %(button)s;
-                selection-background-color: %(selection)s;
-                selection-color: %(fg)s;
-                font-size: 10px;
-            }
-            QTableWidget#valveTable::viewport {
-                background: %(bg)s;
-                border: none;
-            }
-            QTableWidget#valveTable::item {
-                border: none;
-                padding: 0px 2px;
-            }
-            QTableWidget#valveTable::item:selected {
-                background: transparent;
-            }
-            QHeaderView::section {
-                background: %(header)s;
-                color: %(fg)s;
-                border: none;
-                border-bottom: 1px solid %(border)s;
-                padding: 0px 1px;
-                font-size: 8px;
-            }
-            QPushButton#valveDialogAction {
-                background: %(button)s;
-                color: %(fg)s;
-                border: 1px solid %(border)s;
-                border-radius: 7px;
-                padding: 1px 7px;
-            }
-            QPushButton#valveDialogAction:hover {
-                background: %(button_hover)s;
-                border-color: %(border_hover)s;
-            }
-            """ % self._theme_palette()
-        )
-        top_label = QLabel("Valve labels")
-        top_label.setObjectName("valveDialogTitle")
-        top_label.setToolTip("Define the display labels for Open and Close valve states.")
-        layout.addWidget(top_label)
-
-        table = QTableWidget(2, 2, dialog)
-        table.setObjectName("valveTable")
-        table.setHorizontalHeaderLabels(["Value", "Label"])
-        table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setStretchLastSection(True)
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        table.setAlternatingRowColors(True)
-        table.setShowGrid(True)
-        table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        table.verticalHeader().setDefaultSectionSize(17)
-        table.horizontalHeader().setMinimumHeight(16)
-        table.horizontalHeader().setMaximumHeight(16)
-        entries = [("Open", self._valve_state_labels.get("Open", "Open")), ("Close", self._valve_state_labels.get("Close", "Close"))]
-        table.setRowCount(0)
-        for row, (value, label) in enumerate(entries):
-            table.insertRow(row)
-            value_item = QTableWidgetItem(value)
-            value_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
-            table.setItem(row, 0, value_item)
-            label_edit = ValveLabelEdit(lambda step, r=row: _move_focus(r, step), table)
-            label_edit.setText(label)
-            label_edit.setFrame(False)
-            label_edit.setPlaceholderText("Label")
-            label_edit.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            label_edit.setStyleSheet(
-                "QLineEdit {"
-                " background: transparent;"
-                " border: none;"
-                " padding: 0px 2px;"
-                " margin: 0px;"
-                " }"
-            )
-            label_edit.textEdited.connect(lambda _text: self._handle_experiment_control_table_change(None))
-            table.setCellWidget(row, 1, label_edit)
-        table.setFixedHeight(table.horizontalHeader().height() + table.verticalHeader().defaultSectionSize() * 2 + 3)
-        layout.addWidget(table, 1)
-
-        button_row = QHBoxLayout()
-        button_row.setContentsMargins(0, 0, 0, 0)
-        button_row.addStretch(1)
-        apply_button = QPushButton("Apply", dialog)
-        apply_button.setObjectName("valveDialogAction")
-        button_row.addWidget(apply_button)
-        layout.addLayout(button_row)
-
-        def _apply() -> None:
-            open_widget = table.cellWidget(0, 1)
-            close_widget = table.cellWidget(1, 1)
-            open_label = (open_widget.text().strip() if isinstance(open_widget, QLineEdit) else "") or "Open"
-            close_label = (close_widget.text().strip() if isinstance(close_widget, QLineEdit) else "") or "Close"
-            self._valve_state_labels = {"Open": open_label, "Close": close_label}
-            set_step_valve_button_state_for_button(
-                self,
-                self.step_valve_button,
-                str(self.step_valve_button.property("valve") or "Open"),
-            )
-            self._refresh_experiment_control_view()
-            self.save_ui_state()
-            dialog.accept()
-
-        apply_button.clicked.connect(_apply)
-        def _move_focus(row: int, step: int) -> None:
-            next_row = (row + step) % 2
-            table.setCurrentCell(next_row, 1)
-            widget = table.cellWidget(next_row, 1)
-            if isinstance(widget, QLineEdit):
-                widget.setFocus()
-                widget.selectAll()
-
-        def _focus_label_cell(row: int, column: int, previous_row: int, previous_column: int) -> None:
-            if row < 0:
-                return
-            target_row = row
-            if column != 1:
-                table.blockSignals(True)
-                table.setCurrentCell(target_row, 1)
-                table.blockSignals(False)
-            widget = table.cellWidget(target_row, 1)
-            if isinstance(widget, QLineEdit):
-                QTimer.singleShot(0, lambda w=widget: (w.setFocus(), w.selectAll()))
-
-        table.currentCellChanged.connect(_focus_label_cell)
-        table.setCurrentCell(0, 1)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        self.save_ui_state()
 
     def _set_direction_button(self, button: QToolButton, direction: str) -> None:
         normalized = "CCW" if str(direction or "").upper() == "CCW" else "CW"
@@ -4174,7 +3613,6 @@ class ExperimentControlWindow(QWidget):
 
         likely_indices.sort(key=lambda item: item[0], reverse=True)
         best_likely_index = likely_indices[0][1] if likely_indices else None
-        best_likely_priority = likely_indices[0][0] if likely_indices else 0
 
         target = self._last_selected_valve_port or current
         if target is not None and best_likely_index is None:
@@ -5827,7 +5265,11 @@ class ExperimentControlWindow(QWidget):
             return True
         if event.type() == QEvent.Type.KeyPress and getattr(obj, "property", None) is not None:
             if bool(obj.property("flow_navigation")):
-                key = event.key()
+                # FIXME: flagged during a pyflakes/ruff sweep - this reads the key but never
+                # acts on it, unlike the flow_wheel_scroll handling right below (which is fully
+                # implemented). Looks like keyboard-based flow-table navigation was started and
+                # never finished. Needs a maintainer decision on intended behavior, not a guess.
+                key = event.key()  # noqa: F841
         if event.type() == QEvent.Type.Wheel and getattr(obj, "property", None) is not None:
             if bool(obj.property("flow_wheel_scroll")):
                 if isinstance(obj, QDoubleSpinBox):
@@ -6210,7 +5652,12 @@ class ExperimentControlWindow(QWidget):
 
     def _apply_step_to_pump_async(self, step: PumpPlanStep, *, start: bool) -> None:
         """Dispatch device commands for a step transition to a QRunnable (main-thread safe entry point)."""
-        previous = self._applied_plan_step
+        # FIXME: flagged during a pyflakes/ruff sweep - captured but never used. The actual
+        # command diffing reads self._applied_plan_step inside _plan_step_commands below, so
+        # this was likely meant for the log line right after (no "previous step" context is
+        # logged today). Not changed here since this is hardware step-transition logging -
+        # a maintainer should confirm before altering it.
+        previous = self._applied_plan_step  # noqa: F841
         _LOGGER.info(
             "Experiment control step apply (async) | step=%s pump_connected=%s valve_connected=%s switch_connected=%s",
             step.step,
@@ -7024,7 +6471,8 @@ class ExperimentControlWindow(QWidget):
                 screen_geometry = app.primaryScreen().availableGeometry()
                 window_width = width if isinstance(width, int) and width > 0 else self.width()
                 window_height = height if isinstance(height, int) and height > 0 else self.height()
-                if not screen_geometry.contains(x_pos, y_pos):
+                window_rect = QRect(x_pos, y_pos, window_width, window_height)
+                if not screen_geometry.contains(x_pos, y_pos) or not screen_geometry.intersects(window_rect):
                     # Position is off-screen, use default position
                     x_pos = max(100, screen_geometry.left())
                     y_pos = max(100, screen_geometry.top())
@@ -7141,8 +6589,3 @@ class ExperimentControlWindow(QWidget):
 
 FlowControlTableView = ExperimentControlTableView
 FlowControlWindow = ExperimentControlWindow
-
-
-
-
-

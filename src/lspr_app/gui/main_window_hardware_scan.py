@@ -86,7 +86,6 @@ def _spectrometer_init_step() -> HardwareInitStepResult:
     the GUI thread can swap ``window._spectrometer`` without any additional init.
     """
     try:
-        from lspr_app.device.base import SpectrometerError
         from lspr_app.device.ocean import OceanSpectrometer
         spec = OceanSpectrometer()
         return HardwareInitStepResult(
@@ -97,7 +96,7 @@ def _spectrometer_init_step() -> HardwareInitStepResult:
             connected=True,
             payload=spec,
         )
-    except (ImportError, Exception):
+    except Exception:
         return HardwareInitStepResult(
             key="spectrometer",
             label="Spectrometer",

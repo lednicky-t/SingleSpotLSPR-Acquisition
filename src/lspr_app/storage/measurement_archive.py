@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-import inspect
 
 import h5py
 import numpy as np
@@ -59,7 +58,6 @@ def ensure_session_writer(window: Any, spectrum: Any = None) -> Any:
 
     try:
         from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter
-        from lspr_app.domain.models import ProcessingSettings
     except Exception:
         return None
 

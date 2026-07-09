@@ -271,4 +271,3 @@ If re-initialization causes problems:
 - [`src/lspr_app/device/valve_controllers.py`](../../src/lspr_app/device/valve_controllers.py)
 - [`src/lspr_app/gui/experiment_control_window.py`](../../src/lspr_app/gui/experiment_control_window.py)
 - [`src/lspr_app/gui/main_window.py`](../../src/lspr_app/gui/main_window.py)
-

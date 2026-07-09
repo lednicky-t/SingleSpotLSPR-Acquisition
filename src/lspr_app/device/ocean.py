@@ -7,11 +7,11 @@ import numpy as np
 
 import seabreeze
 seabreeze.use("cseabreeze")
-from seabreeze.spectrometers import Spectrometer as SeaBreezeSpectrometer
-from seabreeze.spectrometers import list_devices
+from seabreeze.spectrometers import Spectrometer as SeaBreezeSpectrometer  # noqa: E402 - must follow seabreeze.use()
+from seabreeze.spectrometers import list_devices  # noqa: E402 - must follow seabreeze.use()
 
-from lspr_app.device.base import Spectrometer, SpectrometerCapabilities, SpectrometerError
-from lspr_app.domain.models import AcquisitionSettings, Spectrum
+from lspr_app.device.base import Spectrometer, SpectrometerCapabilities, SpectrometerError  # noqa: E402 - must follow seabreeze.use()
+from lspr_app.domain.models import AcquisitionSettings, Spectrum  # noqa: E402 - must follow seabreeze.use()
 
 
 class OceanSpectrometer(Spectrometer):

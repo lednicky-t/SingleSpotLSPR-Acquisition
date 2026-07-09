@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import math
 from time import perf_counter
-from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QPainter, QPixmap

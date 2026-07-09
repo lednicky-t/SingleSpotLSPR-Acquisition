@@ -7,6 +7,10 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import QTextEdit, QToolButton
 
+from lspr_app.diagnostics import DiagnosticsConfig
+from lspr_app.gui.logging_utils import GuiLogBridge, GuiLogHandler, SUCCESS_LOG_LEVEL
+from lspr_ui import flow_tabler_icon, tint_tabler_icon
+
 
 def apply_text_widget_font_size_for(
     window,
@@ -53,10 +57,6 @@ def adjust_text_widget_font_size_for(
         if current_size <= 0:
             current_size = 9.0
     apply_text_widget_font_size_for(window, widget, float(current_size) + float(delta_points), minimum=minimum, maximum=maximum)
-
-from lspr_app.diagnostics import DiagnosticsConfig
-from lspr_app.gui.logging_utils import GuiLogBridge, GuiLogHandler, SUCCESS_LOG_LEVEL
-from lspr_ui import flow_tabler_icon, tint_tabler_icon
 
 
 class LogTerminalTextEdit(QTextEdit):

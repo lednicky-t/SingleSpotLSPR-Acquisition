@@ -5,17 +5,11 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtGui import QColor
-from pyqtgraph import exporters as pg_exporters
 
 from lspr_app.gui.workers import (
     MetricArchiveReloadRequest,
     MetricArchiveReloadResult,
     MetricArchiveReloadTask,
-)
-from lspr_app.gui.sensorgram_control_step_overlay import (
-    normalize_sensorgram_control_step_overlay_color,
-    normalize_sensorgram_control_step_overlay_label,
-    resolve_sensorgram_control_step_overlay_palette_label,
 )
 
 

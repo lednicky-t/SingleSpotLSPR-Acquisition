@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, replace
 from collections import deque
 from time import perf_counter
 
-from lspr_app.device.amf_mswitch import AMFSwitchController, amf_tools_available, detect_amf_mswitch_devices, detect_amf_selector_devices
+from lspr_app.device.amf_mswitch import AMFSwitchController, amf_tools_available, detect_amf_selector_devices
 from lspr_app.device.device_driver import DeviceDriver
 from lspr_app.device.communication_models import (
     DeviceCommand,
@@ -723,4 +723,3 @@ class DeviceCommunicationService:
 
     def probe_pump_port(self, port: str):
         return RegloICCClient.probe_port(port)
-

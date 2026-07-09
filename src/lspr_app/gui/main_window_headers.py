@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QIcon
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QTabBar, QWidget, QToolButton
 from lspr_app.gui.icon_helpers import math_function_tab_icon, prism_tab_icon, tabler_icon, tint_tabler_icon
 from lspr_app.gui.main_window_state import apply_source_mode_for

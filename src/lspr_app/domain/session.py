@@ -84,8 +84,6 @@ class MeasurementSession:
             self.state = replace(self.state, absorbance=None)
             return
 
-        dark = self.state.dark
-        reference = self.state.reference
         sample = self.state.sample
 
         self.state = replace(

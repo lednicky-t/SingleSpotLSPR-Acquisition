@@ -101,6 +101,7 @@ def _metric_absolute_cache_modes_text(window: Any) -> str:
         f"assemble={_float_text(latest_entry, 'display_assembly_ms')}",
         f"rebuild={_float_text(latest_entry, 'full_rebuild_ms')}",
     ]
+    active_view_mode = str(getattr(window, "_sensorgram_metric_y_axis_mode", "-") or "-")
     return f"mode={active_view_mode} hit={total_hit} incremental={total_incremental} rebuild={total_rebuild} | latest " + " ".join(latest_parts)
 
 

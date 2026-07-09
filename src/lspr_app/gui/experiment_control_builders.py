@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QColor, QIcon
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QComboBox, QDoubleSpinBox, QLineEdit, QToolButton, QSizePolicy
 
 
@@ -254,4 +254,3 @@ def create_table_comment_edit(
     if install_filters:
         window._install_table_wheel_scroll_filter(edit)
     return edit
-

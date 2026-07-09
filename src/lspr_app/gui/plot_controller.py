@@ -775,6 +775,7 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
         cache = getattr(window, "_plot_view_cache", None)
         if cache is not None:
             target_points = _metric_display_target_points(window)
+            recent_tail_points = max(int(getattr(window, "_sensorgram_compression_recent_tail_points", 300)), 0)
             trace_view_locked = bool(getattr(window, "_trace_view_locked", False))
             live_active = bool(getattr(window, "_live_active", False))
             for metric_name in series.keys():
@@ -1192,7 +1193,6 @@ def render_metric_series(
         display_x = x
         display_y = y
         overlay_data = None
-        clock_offset_s = None
         view_started = perf_counter()
         view_mode = "absolute"
         if cache is not None and view_mode == "absolute" and not trace_view_locked and bool(getattr(window, "_live_active", False)):

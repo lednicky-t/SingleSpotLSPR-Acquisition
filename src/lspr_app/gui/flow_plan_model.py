@@ -8,7 +8,6 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QLineEdit,
-    QToolButton,
     QStyledItemDelegate,
     QStyle,
     QStyleOptionViewItem,

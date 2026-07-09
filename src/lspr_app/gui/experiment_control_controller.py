@@ -56,4 +56,3 @@ class ExperimentControlController(QObject):
     def shutdown_devices(self, *_args) -> None:
         if hasattr(self.window, "shutdown_devices"):
             self.window.shutdown_devices()
-

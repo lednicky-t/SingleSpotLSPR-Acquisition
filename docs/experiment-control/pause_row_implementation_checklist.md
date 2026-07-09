@@ -66,4 +66,3 @@ Items that do not need separate pause-row storage:
 - Verify session restore brings back the pause row independently of the imported plan.
 - Verify basic mode does not show the pause row.
 - Verify advanced mode does show it.
-

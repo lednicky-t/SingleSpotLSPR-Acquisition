@@ -36,7 +36,6 @@ from lspr_app.gui.main_window_logging import build_recording_experiment_log_path
 from lspr_core import (
     DEFAULT_LAUNCH_PROFILE,
     LAUNCH_PROFILE_ENV_VAR,
-    launch_profile_spec,
     normalize_launch_profile,
 )
 
@@ -475,7 +474,6 @@ class StartupLoader(QObject):
 
     def run(self) -> None:
         try:
-            profile = launch_profile_spec(self._launch_profile_key)
             self.progress.emit(4, "Checking for an already running instance...")
             lock = QLockFile(str(_lock_file_path()))
             self.progress.emit(6, "Waiting for previous instance to close...")

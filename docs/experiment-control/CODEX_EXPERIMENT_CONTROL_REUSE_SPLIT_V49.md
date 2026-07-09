@@ -189,4 +189,3 @@ This proposal is versioned as `V49`.
 
 Use the next codex task file version for the implementation phase after this
 document is committed.
-

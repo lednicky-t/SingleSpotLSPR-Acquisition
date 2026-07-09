@@ -7,7 +7,6 @@ from lspr_app.domain.models import ProcessingSettings
 from lspr_app.storage.app_config import (
     DEFAULT_CONFIG_PATH,
     load_processing_settings,
-    load_processing_settings_from_hdf5,
     save_processing_settings,
     save_processing_settings_to_hdf5,
 )

@@ -36,4 +36,3 @@ class ExperimentControlCapabilities:
             show_device_status_strip=False,
             show_step_navigation_controls=False,
         )
-
