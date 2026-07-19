@@ -543,8 +543,15 @@ class SessionDiagnosticsSnapshot:
                 ]
                 if display_counts:
                     trace_buffer_points_text = str(max(display_counts))
+                source_counts = [
+                    int(entry.get("source_points", 0))
+                    for entry in cache_snapshot.values()
+                ]
+                if source_counts:
+                    trace_points_text = str(max(source_counts))
             except Exception:
                 trace_buffer_points_text = "-"
+                trace_points_text = "-"
         trace_raw_points_text = "-"
         trace_display_points_text = "-"
         trace_throttle_text = "-"

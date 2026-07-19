@@ -1413,15 +1413,10 @@ def render_metric_series(
 
 
 def _show_metric_plot_unavailable(window, clock_mode: bool) -> None:
-    _show_trace_plot_unavailable(
-        window,
-        "Metric plot unavailable",
-        "Enable it in Help > Performance switches.",
-        clock_mode=clock_mode,
-    )
+    _show_trace_plot_unavailable(window, clock_mode=clock_mode)
 
 
-def _show_trace_plot_unavailable(window, title: str, detail: str, *, clock_mode: bool) -> None:
+def _show_trace_plot_unavailable(window, *, clock_mode: bool) -> None:
     _set_trace_time_axis_mode(window, axis_mode="clock" if clock_mode else "elapsed")
     for curve in window.trace_curves.values():
         _set_visible_if_changed(curve, False)
