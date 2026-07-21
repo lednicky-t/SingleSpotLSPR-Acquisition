@@ -852,6 +852,18 @@ def load_processed_metric_history(
         if time_ds is None:
             return {}
         times_s = np.asarray(time_ds[...], dtype=float) / 1000.0
+        # Defensive: rows are written append-only and should already be in
+        # timestamp order, but a stale/reused timestamp anchor upstream could
+        # still produce a non-monotonic t_ms column. time_range_s slicing below
+        # uses searchsorted, which silently misbehaves on unsorted input, and
+        # an unsorted x-array makes pyqtgraph draw the line backward over
+        # already-drawn history. Sort here so callers never see either failure
+        # mode - see docs/sensorgram_improvements.md.
+        sort_order = np.argsort(times_s, kind="stable")
+        needs_reorder = not np.array_equal(sort_order, np.arange(len(times_s)))
+        if needs_reorder:
+            times_s = times_s[sort_order]
+
         start_index = 0
         end_index = len(times_s)
         if time_range_s is not None:
@@ -873,7 +885,13 @@ def load_processed_metric_history(
                 continue
             if metric_names is not None and metric_name not in metric_names:
                 continue
-            if time_range_s is not None:
+            if needs_reorder:
+                # Full read required once reordering is needed - can't do a
+                # partial HDF5 read against indices that predate the sort.
+                values = np.asarray(dataset[...], dtype=float)[sort_order]
+                if time_range_s is not None:
+                    values = values[start_index:end_index]
+            elif time_range_s is not None:
                 values = np.asarray(dataset[start_index:end_index], dtype=float)
             else:
                 values = np.asarray(dataset[...], dtype=float)

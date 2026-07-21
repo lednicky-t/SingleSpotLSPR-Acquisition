@@ -4,6 +4,74 @@ Analysis date: 2026-06-26
 Source files analysed: `plot_controller.py`, `plot_view_cache.py`, `main_window_plotting.py`,
 `main_window_sensorgram_archive.py`, `main_window_runtime.py`, `update_scheduler.py`
 
+**2026-07-21 update:** a full audit of the live-plotting/storage pipeline (prompted by "the
+sensorgram redraws over already-drawn points when a measurement stops") found and fixed the root
+cause — see "Correctness fixes" below. That audit also clarified the app's actual view-mode
+architecture, which wasn't documented anywhere: `window._sensorgram_display_mode`
+(`"session"` / `"measurement"`, in `main_window.py`) is the real, already-implemented view-mode
+concept — not the `view_mode` local variable in `plot_controller.py`'s `render_metric_series`
+(that one is an unrelated, unused literal, already fixed as a separate `UnboundLocalError` bug).
+`"session"` mode reads from the always-on session file (`storage/measurement_archive.py`,
+`ensure_session_writer`/`close_session_writer` — a single HDF5 file spanning the whole app
+session, closed only at app close); `"measurement"` mode shows only the currently-recording
+file. It auto-switches on measurement start/stop and can be changed manually in Sensorgram
+Settings. There is no dedicated `SensorgramDisplayState`-style object unifying this with the
+other five loosely-related display flags (`_trace_view_locked`, `_live_active`,
+`_sensorgram_frozen`, `_plots_frozen`, `_sensorgram_metric_archive_reload_loading`) — flagged as
+a separate, larger consolidation task, not done here.
+
+---
+
+## Correctness fixes
+
+### C1 — Session file's timeline went non-monotonic across a measurement, corrupting the reload-on-stop plot
+**Files:** `gui/acquisition_controller.py`, `storage/measurement_archive.py`, `gui/main_window.py`
+**Symptom:** while a measurement recorded, the sensorgram correctly showed only the recording
+(measurement mode). When the measurement stopped, the plot reloaded the full session and visibly
+redrew a line backward over history it had already drawn.
+**Root cause:** every processed point writes to two files at once — the per-measurement file
+(measurement-relative `t_ms`) and the always-on session file (session-relative `t_ms`). The
+session file's `t_ms` anchor was `window._live_trace_started_at`, which both
+`start_measurement_run` and `stop_measurement_run` unconditionally set to `None`, only restored
+by `_start_live_acquisition()` — which runs `if not window._live_active`, i.e. never, if live
+preview was already active before Record was pressed (the normal workflow). While the anchor was
+`None`, the session-file write silently fell back to the *measurement's own* elapsed time,
+splicing a near-zero-restarting range into the middle of an otherwise-increasing `t_ms` column.
+Reading that column back (on stop, or on manual session/measurement mode switch) via
+`np.searchsorted`-based range slicing on unsorted data, then handing the result straight to
+`curve.setData()`, is what produced the visible backward redraw — pyqtgraph draws points in
+array order, not sorted by x.
+**Fix:** introduced a dedicated, session-file-lifecycle-scoped anchor
+(`window._metric_archive_started_at`, an existing but previously write-only/dead attribute,
+repurposed) — set once when the session writer is created (`ensure_session_writer`) and cleared
+only when it closes (`close_session_writer`). Not touched by live-acquisition or measurement
+start/stop at all, so the session file's timeline now stays stable regardless of how many
+measurements start and stop within one session. Verified with an isolated script: the anchor
+stays identical across a simulated measurement start → append → stop cycle, and the resulting
+elapsed-time values stay strictly increasing.
+**Effort:** Small (~15 lines changed across 3 files)
+**Risk:** Low — the new anchor is set/read through the same `getattr`/`setattr` pattern already
+used throughout this code; no schema or file-format change.
+
+### C2 — Defensive: sort by timestamp wherever plot data gets loaded from file or merged
+**Files:** `storage/hdf5_export.py` (`load_processed_metric_history`), `storage/metric_archive.py`
+(`load_metric_archive_history`, both `.h5` and `.jsonl` branches), `gui/plot_view_cache.py`
+(`seed_live_absolute_metric_cache`)
+**Rationale:** C1 was the actual bug, but nothing prevented a *future* timestamp anomaly from
+producing the same silent visual corruption — none of these functions verified their input was
+monotonic before slicing (`np.searchsorted` silently misbehaves on unsorted input) or handing
+arrays to pyqtgraph. Since the maintainer's stated requirement is "all data should have to have
+correct timestamp, and sensorgram should distinguish when data was obtained," these are now
+guaranteed to return/consume monotonic arrays regardless of what produced the input, with values
+reordered by the same permutation as their timestamps (never independently re-sorted, which would
+scramble the pairing). `seed_live_absolute_metric_cache` in particular is the single point every
+reload-seed call goes through, including the file-portion + live-tail concatenation in
+`main_window_sensorgram_archive.py`, so sorting there is the most robust single guarantee point.
+**Effort:** Small
+**Risk:** Low — sorting an already-sorted array is a cheap no-op (`np.argsort` returns the
+identity permutation, detected and skipped); only pays extra cost (a full read instead of a
+partial HDF5 read) in the rare case where reordering is actually needed.
+
 ---
 
 ## Performance fixes

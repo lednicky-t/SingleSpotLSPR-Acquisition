@@ -988,6 +988,21 @@ class PlotViewCache:
         target_points: int,
         recent_tail_points: int | None = None,
     ) -> None:
+        # Defensive: callers reload-from-file data with a live tail
+        # concatenated onto the end (main_window_sensorgram_archive.py) - even
+        # if the file portion is sorted, the concatenation itself isn't
+        # guaranteed monotonic. This is the single point every seed goes
+        # through, so it's the most robust place to guarantee the compression
+        # pyramid is always built from a monotonic x-array - an unsorted one
+        # makes pyqtgraph draw the line backward over already-drawn history.
+        # See docs/sensorgram_improvements.md.
+        x = np.asarray(x, dtype=np.float64)
+        y = np.asarray(y, dtype=np.float64)
+        if len(x) > 1:
+            sort_order = np.argsort(x, kind="stable")
+            if not np.array_equal(sort_order, np.arange(len(x))):
+                x = x[sort_order]
+                y = y[sort_order]
         cache = self._live_absolute_metric_cache.get(metric_name)
         if not isinstance(cache, MetricDisplayCache):
             cache = MetricDisplayCache(target_points=int(target_points))

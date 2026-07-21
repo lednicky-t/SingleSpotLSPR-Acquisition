@@ -504,6 +504,12 @@ class MainWindow(QMainWindow):
         self._session_writer_path: Path | None = None
         self._metric_archive_writer: AsyncHDF5MeasurementWriter | None = None
         self._metric_archive_path: Path | None = None
+        # Anchor for the session file's t_ms column (append_processed_trace_history's
+        # sess_elapsed_s) - set once when the session writer is first created
+        # (ensure_session_writer) and cleared when it closes (close_session_writer).
+        # Deliberately NOT touched by live-acquisition start/stop or measurement
+        # start/stop - the session file's timeline must stay stable across both,
+        # or its t_ms column stops being monotonic. See docs/sensorgram_improvements.md.
         self._metric_archive_started_at: datetime | None = None
         self._plot_view_cache = PlotViewCache()
         self._metric_reference_processed: Spectrum | None = None

@@ -235,6 +235,11 @@ def load_metric_archive_history(
         for metric_name, points in series.items():
             if not points:
                 continue
+            # Defensive: sort by timestamp - rows should already be in file
+            # order, but an unsorted x-array makes pyqtgraph draw the line
+            # backward over already-drawn history. See
+            # docs/sensorgram_improvements.md.
+            points.sort(key=lambda p: p[0])
             times_s = np.asarray([p[0] for p in points], dtype=float)
             values = np.asarray([p[1] for p in points], dtype=float)
             result[metric_name] = (times_s, values)
@@ -255,6 +260,15 @@ def load_metric_archive_history(
         if time_ds is None:
             return {}
         times_s = np.asarray(time_ds[...], dtype=float) / 1000.0
+        # Defensive: see the matching comment in
+        # storage/hdf5_export.py:load_processed_metric_history - same fix,
+        # same reason (a non-monotonic t_ms column breaks the searchsorted
+        # slicing below and makes pyqtgraph draw backward over history).
+        sort_order = np.argsort(times_s, kind="stable")
+        needs_reorder = not np.array_equal(sort_order, np.arange(len(times_s)))
+        if needs_reorder:
+            times_s = times_s[sort_order]
+
         start_index = 0
         end_index = len(times_s)
         if time_range_s is not None:
@@ -275,7 +289,11 @@ def load_metric_archive_history(
                 continue
             if metric_names is not None and metric_name not in metric_names:
                 continue
-            if time_range_s is not None:
+            if needs_reorder:
+                values = np.asarray(dataset[...], dtype=float)[sort_order]
+                if time_range_s is not None:
+                    values = values[start_index:end_index]
+            elif time_range_s is not None:
                 values = np.asarray(dataset[start_index:end_index], dtype=float)
             else:
                 values = np.asarray(dataset[...], dtype=float)
