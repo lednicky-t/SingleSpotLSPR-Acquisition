@@ -28,7 +28,11 @@ from PyQt6.QtWidgets import (
 
 from lspr_ui import app_icon, apply_base_app_theme
 from lspr_app.resources import app_icon_path
-from lspr_app.storage.app_config import load_app_setting, save_app_setting
+from lspr_app.storage.app_config import (
+    get_and_clear_settings_corruption_notice,
+    load_app_setting,
+    save_app_setting,
+)
 
 from lspr_app import __version__
 from lspr_app.diagnostics import DiagnosticsConfig, apply_diagnostic_info_filter
@@ -584,6 +588,9 @@ def main() -> None:
     app.setApplicationVersion(__version__)
     apply_base_app_theme(app)
     save_app_setting("theme_mode", "dark")
+    corruption_notice = get_and_clear_settings_corruption_notice()
+    if corruption_notice:
+        QMessageBox.warning(None, "Settings reset", corruption_notice)
     app.setWindowIcon(app_icon())
     splash = StartupSplash()
     splash.show_centered()
