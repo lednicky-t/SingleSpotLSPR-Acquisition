@@ -468,9 +468,9 @@ class PumpPlanTimelineWidget(QWidget):
                     painter.setPen(QPen(QColor(255, 255, 255, 255), 2.2))
                     painter.drawRoundedRect(rect.adjusted(1, 1, -2, -2), 4, 4)
                 # Step label (elided to fit the segment width)
-                if step.description and width >= 32:
+                label_value = self._step_label_text(step)
+                if label_value and label_value != "-" and width >= 32:
                     text_rect = rect.adjusted(3, 3, -3, -3)
-                    label_value = self._step_label_text(step)
                     label_text = painter.fontMetrics().elidedText(
                         label_value,
                         Qt.TextElideMode.ElideRight,
