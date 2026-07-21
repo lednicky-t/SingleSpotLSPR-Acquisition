@@ -107,7 +107,7 @@ class AcquisitionExperimentControlBackend:
 
     def connect_device(self, device_key: str) -> bool:
         _ = device_key
-        return False  # connection flow goes through the window's port-scan UI
+        return False  # connection flow goes through Device Manager / DeviceLifecycleController
 
     def disconnect_device(self, device_key: str) -> bool:
         _ = device_key

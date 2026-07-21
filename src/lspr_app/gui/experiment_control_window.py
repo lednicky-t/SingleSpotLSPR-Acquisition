@@ -36,7 +36,6 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QFileDialog,
-    QPushButton,
     QScrollArea,
     QSplitter,
     QSizePolicy,
@@ -48,12 +47,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from lspr_app.device.device_lifecycle import DeviceLifecycleController, device_label_for
 from lspr_app.device.device_manager import DeviceCommunicationService
 from lspr_app.device.device_types import PUMP, SWITCH, SELECTOR
-from lspr_app.device.communication_models import DeviceCommand, DeviceStatus, PortRefreshData
-from lspr_app.device.port_assignments import get_port_assignment
-from lspr_app.device.serial_controllers import ControllerProbe, SerialController, controller_port_priority
-from lspr_app.device.reglo_icc import PumpProbe, RegloICCClient, is_probable_reglo_port
+from lspr_app.device.communication_models import DeviceCommand
+from lspr_app.device.serial_controllers import ControllerProbe
+from lspr_app.device.reglo_icc import PumpProbe
 from lspr_app import __version__
 from lspr_app.gui.experiment_control_runtime import ExperimentRuntimeSnapshot, experiment_runtime_snapshot
 from lspr_app.resources import app_icon_path
@@ -97,11 +96,7 @@ from lspr_app.gui.experiment_control_export import (
     ExperimentPlanExportData,
     ExperimentPlanExportTask,
 )
-from lspr_app.gui.experiment_control_connection import (
-    DeviceConnectTask,
-    PortRefreshTask,
-    PumpConnectTask,
-)
+from lspr_app.gui.device_lifecycle_task import DevicePortRefreshTask, device_io_pool
 from lspr_app.gui.experiment_control_widgets import (
     ExperimentControlTableView,
     _NoFocusItemDelegate,
@@ -141,8 +136,6 @@ class ExperimentControlWindow(QWidget):
         ("Gold", "#EDC948"),
         ("Gray", "#9C9DA1"),
     ]
-    STARTUP_DEVICE_ORDER = (PUMP, SWITCH, SELECTOR)
-
     PLAN_COLUMNS = [
         "step",
         "duration_s",
@@ -189,27 +182,11 @@ class ExperimentControlWindow(QWidget):
         self._plan_table_active_editor: tuple[int, int] | None = None
         self._client = None
         self._probe: PumpProbe | None = known_probe
-        self._last_selected_port: str | None = None
-        self._last_selected_valve_port: str | None = None
-        self._last_selected_mswitch_port: str | None = None
         self._thread_pool = QThreadPool.globalInstance()
-        self._connect_generation = 0
-        self._connect_in_progress = False
-        self._connect_task: PumpConnectTask | None = None
         self._valve_probe: ControllerProbe | None = None
-        self._valve_connect_in_progress = False
-        self._valve_connect_task: DeviceConnectTask | None = None
         self._mswitch_probe: ControllerProbe | None = None
         self._mswitch_probe_cache: list[ControllerProbe] | None = list(initial_mswitch_devices or [])
-        self._mswitch_connect_in_progress = False
-        self._mswitch_connect_task: DeviceConnectTask | None = None
-        self._connection_sync_in_progress = False
         self._auto_connect_devices = bool(auto_connect_devices)
-        self._startup_auto_connect_enabled = False
-        self._startup_auto_connect_scheduled = False
-        self._startup_auto_connect_active = False
-        self._startup_auto_connect_stage: str | None = None
-        self._startup_auto_connect_queue: list[str] = []
         self._show_runtime_controls = bool(show_runtime_controls and self._capabilities.show_runtime_buttons)
         self._ui_startup_ready = False
         self._plan_running = False
@@ -258,9 +235,6 @@ class ExperimentControlWindow(QWidget):
         self._experiment_plan_export_generation = 0
         self._experiment_plan_export_task: ExperimentPlanExportTask | None = None
         self._experiment_plan_export_in_progress = False
-        self._port_refresh_generation = 0
-        self._port_refresh_task: PortRefreshTask | None = None
-        self._port_refresh_in_progress = False
         self._experiment_control_bootstrap_in_progress = False
         self._experiment_control_bootstrap_started = False
         self._experiment_control_bootstrap_pending_steps: list[PumpPlanStep] = []
@@ -328,49 +302,11 @@ class ExperimentControlWindow(QWidget):
         self.resize(1220, 860)
         self._apply_style()
 
-        self.port_combo = QComboBox(self)
-        self.port_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self.refresh_ports_button = QPushButton("Refresh", self)
-        self.connection_toggle_button = QPushButton("Connect", self)
-        self.connection_toggle_button.setObjectName("accentButton")
-        self.pump_info_button = QToolButton(self)
-        self.pump_info_button.setText("i")
-        self.pump_info_button.setToolTip("Pump details")
-        self.connection_dot = QLabel(self)
-        self.connection_dot.setFixedSize(10, 10)
+        # Shared status line for the whole panel (plan run/pause/stop feedback,
+        # import/export progress, etc.) - also carries pump connection messages
+        # from sync_from_lifecycle_controller(). See _set_status_message/_refresh_status_line.
         self.connection_status_label = QLabel("Pump not connected.", self)
         self.connection_status_label.setWordWrap(True)
-        self.protocol_value = QLabel("-", self)
-        self.model_value = QLabel("-", self)
-        self.serial_value = QLabel("-", self)
-        self.channels_value = QLabel("-", self)
-
-        self.valve_connection_dot = QLabel(self)
-        self.valve_connection_dot.setFixedSize(10, 10)
-        self.valve_connection_status_label = QLabel("Switch controller offline.", self)
-        self.valve_port_combo = QComboBox(self)
-        self.valve_port_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self.valve_refresh_ports_button = QPushButton("Refresh", self)
-        self.valve_connection_toggle_button = QPushButton("Connect", self)
-        self.valve_connection_toggle_button.setObjectName("accentButton")
-
-        self.mswitch_connection_dot = QLabel(self)
-        self.mswitch_connection_dot.setFixedSize(10, 10)
-        self.mswitch_connection_status_label = QLabel("Selector offline.", self)
-        self.mswitch_connection_status_label.setWordWrap(True)
-        self.mswitch_port_combo = QComboBox(self)
-        self.mswitch_port_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self.mswitch_refresh_ports_button = QPushButton("Refresh", self)
-        self.mswitch_connection_toggle_button = QPushButton("Connect", self)
-        self.mswitch_connection_toggle_button.setObjectName("accentButton")
-        self.mswitch_home_button = QPushButton("Home", self)
-        self.mswitch_move_button = QPushButton("Move", self)
-        self.mswitch_target_spin = QSpinBox(self)
-        make_compact_spinbox(self.mswitch_target_spin)
-        self.mswitch_target_spin.setRange(1, 12)
-        self.mswitch_target_spin.setValue(1)
-        self.mswitch_target_spin.setSuffix("")
-        self.mswitch_current_value = QLabel("-", self)
 
         self.manual_flow_spins: list[QDoubleSpinBox] = []
         self.manual_direction_buttons: list[QToolButton] = []
@@ -654,11 +590,12 @@ class ExperimentControlWindow(QWidget):
         self._restore_experiment_control_state()
         _LOGGER.info("Experiment control bootstrap +%.1f ms: state restore queued", (perf_counter() - self._bootstrap_t0) * 1000.0)
         self._set_manual_uniform_mode(self.manual_uniform_button.isChecked())
-        if self._probe is not None:
-            self._apply_probe(self._probe)
         self._set_connection_visual(False, "Pump not connected.")
         self._suppress_plan_table_layout_save = False
-        self._schedule_startup_device_auto_connect()
+        # Mirror whatever DeviceLifecycleController has already connected by
+        # this point (harmless/idempotent if the startup cycle hasn't reached
+        # here yet - every device just shows not-connected, which is true).
+        self.sync_from_lifecycle_controller()
         self._startup_ui_pending = False
         self._set_switch_solution_mode(self._switch_solution_mode)
         _LOGGER.info("Experiment control bootstrap +%.1f ms: constructor finished", (perf_counter() - self._bootstrap_t0) * 1000.0)
@@ -964,24 +901,12 @@ class ExperimentControlWindow(QWidget):
         self.setLayout(outer_layout)
 
     def _connect_signals(self) -> None:
-        self.refresh_ports_button.clicked.connect(self._refresh_ports)
-        self.connection_toggle_button.clicked.connect(self._toggle_connection)
         self.plan_toggle_button.clicked.connect(self._experiment_control_controller.toggle_run_hold)
         self.hold_plan_button.clicked.connect(self._experiment_control_controller.toggle_hold)
         self.pause_plan_button.clicked.connect(self._experiment_control_controller.toggle_pause)
         self.stop_plan_button.clicked.connect(self._experiment_control_controller.stop)
         self.previous_step_button.clicked.connect(lambda _checked=False: self._experiment_control_controller.move_relative(-1))
         self.next_step_button.clicked.connect(lambda _checked=False: self._experiment_control_controller.move_relative(1))
-        self.port_combo.currentTextChanged.connect(self._remember_selected_port)
-        self.pump_info_button.clicked.connect(self._show_pump_info)
-        self.valve_refresh_ports_button.clicked.connect(self._refresh_valve_ports)
-        self.valve_connection_toggle_button.clicked.connect(self._toggle_valve_connection)
-        self.valve_port_combo.currentTextChanged.connect(self._remember_selected_valve_port)
-        self.mswitch_refresh_ports_button.clicked.connect(self._refresh_mswitch_ports)
-        self.mswitch_connection_toggle_button.clicked.connect(self._toggle_mswitch_connection)
-        self.mswitch_home_button.clicked.connect(self._home_mswitch)
-        self.mswitch_move_button.clicked.connect(self._move_mswitch_to_target)
-        self.mswitch_port_combo.currentTextChanged.connect(self._remember_selected_mswitch_port)
         self.manual_uniform_button.toggled.connect(self._set_manual_uniform_mode)
         self.shared_direction_button.clicked.connect(
             lambda: self._toggle_direction_button(self.shared_direction_button, self._apply_shared_manual_settings)
@@ -1053,33 +978,6 @@ class ExperimentControlWindow(QWidget):
         self.import_plan_button.setVisible(bool(capabilities.plan_import_export_enabled))
         self.export_plan_button.setVisible(bool(capabilities.plan_import_export_enabled))
         self.import_plan_busy_label.setVisible(bool(capabilities.plan_import_export_enabled))
-        device_visible = bool(capabilities.devices_enabled)
-        for widget in (
-            self.refresh_ports_button,
-            self.connection_toggle_button,
-            self.pump_info_button,
-            self.port_combo,
-            self.connection_dot,
-            self.connection_status_label,
-            self.protocol_value,
-            self.model_value,
-            self.serial_value,
-            self.channels_value,
-            self.valve_refresh_ports_button,
-            self.valve_connection_toggle_button,
-            self.valve_port_combo,
-            self.valve_connection_dot,
-            self.valve_connection_status_label,
-            self.mswitch_refresh_ports_button,
-            self.mswitch_connection_toggle_button,
-            self.mswitch_home_button,
-            self.mswitch_move_button,
-            self.mswitch_port_combo,
-            self.mswitch_connection_dot,
-            self.mswitch_connection_status_label,
-            self.mswitch_current_value,
-        ):
-            widget.setVisible(device_visible)
 
     def _make_icon_button(self, icon: QIcon, tooltip: str) -> QToolButton:
         button = QToolButton(self)
@@ -1321,7 +1219,7 @@ class ExperimentControlWindow(QWidget):
         self._update_experiment_control_busy_indicator()
 
     def _update_experiment_control_busy_indicator(self) -> None:
-        busy = self._experiment_plan_import_in_progress or self._experiment_control_bootstrap_in_progress or self._port_refresh_in_progress
+        busy = self._experiment_plan_import_in_progress or self._experiment_control_bootstrap_in_progress
         self.import_plan_busy_label.setVisible(busy)
         if busy:
             self._import_plan_busy_frame_index = 0
@@ -1677,8 +1575,8 @@ class ExperimentControlWindow(QWidget):
     def _build_native_experiment_plan_document(self) -> dict[str, object]:
         steps = recompute_plan_timing(self._read_experiment_control_steps())
         tube_mm_by_channel = self._tube_mm_values()
-        pump_label = self.model_value.text().strip()
-        if not pump_label or pump_label == "-":
+        pump_label = str(getattr(self._probe, "model", "") or "").strip()
+        if not pump_label:
             pump_label = "Pump 1"
         return {
             "format": {
@@ -3546,214 +3444,65 @@ class ExperimentControlWindow(QWidget):
     def _description_column(self) -> int:
         return self._valve_column() + 3
 
-    def _populate_ports(self, ports: list[object]) -> None:
-        _LOGGER.debug("Pump port scan | %d port(s)", len(ports))
-        current = self.port_combo.currentData()
-        likely_indices: list[tuple[int, int]] = []
-        manual_indices: list[int] = []
-        self.port_combo.blockSignals(True)
-        self.port_combo.clear()
-        for index, port in enumerate(ports):
-            label = f"{port.device}  |  {port.description}"
-            self.port_combo.addItem(label, port.device)
-            if get_port_assignment(port.device) == "pump":
-                manual_indices.append(index)
-            if is_probable_reglo_port(port):
-                likely_indices.append(index)
-        self.port_combo.blockSignals(False)
-
-        target = self._last_selected_port or current
-        if target is not None:
-            index = self.port_combo.findData(target)
-            if index >= 0:
-                target_port = ports[index] if 0 <= index < len(ports) else None
-                if target_port is not None and get_port_assignment(target_port.device) == "pump":
-                    self.port_combo.setCurrentIndex(index)
-                    return
-
-        if manual_indices:
-            self.port_combo.setCurrentIndex(manual_indices[0])
-            return
-
-        if target is not None:
-            index = self.port_combo.findData(target)
-            if index >= 0:
-                self.port_combo.setCurrentIndex(index)
-                return
-
-        if likely_indices:
-            self.port_combo.setCurrentIndex(likely_indices[0])
-            return
-
-        if self.port_combo.count() == 0:
-            self._set_connection_visual(False, "Pump offline. No serial ports found.")
-            self.availability_changed.emit(None)
-            _LOGGER.warning("Pump port scan found no serial ports.")
-        else:
-            self.port_combo.setCurrentIndex(-1)
-            self._set_connection_visual(False, "Pump offline. Select a port to connect manually.")
-            self.availability_changed.emit(None)
-
-    def _populate_valve_ports(self, ports: list[object]) -> None:
-        _LOGGER.debug("Valve port scan | %d port(s)", len(ports))
-        current = self.valve_port_combo.currentData()
-        likely_indices: list[tuple[int, int]] = []
-        manual_indices: list[int] = []
-        self.valve_port_combo.blockSignals(True)
-        self.valve_port_combo.clear()
-        for index, port in enumerate(ports):
-            label = f"{port.device}  |  {port.description}"
-            self.valve_port_combo.addItem(label, port.device)
-            if get_port_assignment(port.device) == "switch":
-                manual_indices.append(index)
-            priority = controller_port_priority(port)
-            if priority > 0:
-                likely_indices.append((priority, index))
-        self.valve_port_combo.blockSignals(False)
-
-        likely_indices.sort(key=lambda item: item[0], reverse=True)
-        best_likely_index = likely_indices[0][1] if likely_indices else None
-
-        target = self._last_selected_valve_port or current
-        if target is not None and best_likely_index is None:
-            index = self.valve_port_combo.findData(target)
-            if index >= 0:
-                self.valve_port_combo.setCurrentIndex(index)
-                return
-        if target is not None and best_likely_index is not None:
-            index = self.valve_port_combo.findData(target)
-            if index >= 0:
-                target_port = ports[index] if 0 <= index < len(ports) else None
-                if target_port is not None and get_port_assignment(target_port.device) == "valve":
-                    self.valve_port_combo.setCurrentIndex(index)
-                    return
-
-        if manual_indices:
-            self.valve_port_combo.setCurrentIndex(manual_indices[0])
-            return
-
-        if target is not None:
-            index = self.valve_port_combo.findData(target)
-            if index >= 0:
-                self.valve_port_combo.setCurrentIndex(index)
-                return
-
-        if best_likely_index is not None:
-            self.valve_port_combo.setCurrentIndex(best_likely_index)
-            return
-
-        if self.valve_port_combo.count() == 0:
-            self._set_valve_connection_visual(False, "Switch controller offline. No serial ports found.")
-            _LOGGER.warning("Valve port scan found no serial ports.")
-        else:
-            self.valve_port_combo.setCurrentIndex(-1)
-            self._set_valve_connection_visual(False, "Switch controller offline. Select a port to connect manually.")
-
-    def _populate_mswitch_ports(self, devices: list[object], *, amf_available: bool) -> None:
-        current = self.mswitch_port_combo.currentData()
-        if not amf_available:
-            self.mswitch_port_combo.blockSignals(True)
-            self.mswitch_port_combo.clear()
-            self.mswitch_port_combo.addItem("AMFTools not installed", None)
-            self.mswitch_port_combo.blockSignals(False)
-            self._set_mswitch_connection_visual(False, "AMFTools is not installed. Selector unavailable.")
-            self.mswitch_connection_toggle_button.setEnabled(False)
-            self.mswitch_home_button.setEnabled(False)
-            self.mswitch_move_button.setEnabled(False)
-            return
-
-        _LOGGER.debug("M-Switch probe scan | %d device(s)", len(devices))
-        self.mswitch_port_combo.blockSignals(True)
-        self.mswitch_port_combo.clear()
-        for index, probe in enumerate(devices):
-            label_parts = [probe.port, probe.model]
-            if getattr(probe, "serial_number", None):
-                label_parts.append(str(probe.serial_number))
-            self.mswitch_port_combo.addItem("  |  ".join(label_parts), probe.port)
-        self.mswitch_port_combo.blockSignals(False)
-
-        target = self._last_selected_mswitch_port or current
-        if target is not None:
-            index = self.mswitch_port_combo.findData(target)
-            if index >= 0:
-                self.mswitch_port_combo.setCurrentIndex(index)
-                return
-        if self.mswitch_port_combo.count() > 0:
-            self.mswitch_port_combo.setCurrentIndex(0)
-        else:
-            self._set_mswitch_connection_visual(False, "Selector offline. No AMF switch discovered.")
-
-    def _start_port_refresh(self) -> None:
-        if self._port_refresh_in_progress:
-            return
-        self._port_refresh_generation += 1
-        generation = self._port_refresh_generation
-        self._port_refresh_in_progress = True
-        _LOGGER.info("Experiment control bootstrap +%.1f ms: port refresh started", (perf_counter() - self._bootstrap_t0) * 1000.0)
-        self._update_experiment_control_busy_indicator()
-        task = PortRefreshTask(generation)
-        self._port_refresh_task = task
-        task.signals.finished.connect(self._handle_port_refresh_finished)
-        task.signals.failed.connect(self._handle_port_refresh_failed)
-        self._thread_pool.start(task)
-
-    def _handle_port_refresh_finished(self, generation: int, payload: object) -> None:
-        if generation != self._port_refresh_generation:
-            return
-        self._port_refresh_task = None
-        self._port_refresh_in_progress = False
-        _LOGGER.info("Experiment control bootstrap +%.1f ms: port refresh finished", (perf_counter() - self._bootstrap_t0) * 1000.0)
-        if not isinstance(payload, PortRefreshData):
-            self._update_experiment_control_busy_indicator()
-            return
-        try:
-            self._populate_ports(payload.pump_ports)
-            self._populate_valve_ports(payload.valve_ports)
-            self._populate_mswitch_ports(payload.selector_devices, amf_available=payload.amf_tools_available)
-        finally:
-            self._update_experiment_control_busy_indicator()
-        if self._experiment_control_bootstrap_in_progress:
-            return
-        self._schedule_startup_device_auto_connect()
-
-    def _handle_port_refresh_failed(self, generation: int, message: str) -> None:
-        if generation != self._port_refresh_generation:
-            return
-        self._port_refresh_task = None
-        self._port_refresh_in_progress = False
-        self._update_experiment_control_busy_indicator()
-        _LOGGER.warning("Experiment control port refresh failed: %s", message)
-
-    def _refresh_ports(self) -> None:
-        self._start_port_refresh()
-
     def _device_label_for(self, device_key: str) -> str:
-        return {
-            PUMP: "pump_1",
-            SWITCH: "switch_1",
-            SELECTOR: "selector_1",
-        }.get(device_key, f"{device_key}_main")
-
-    def _ensure_device_profile(self, device_key: str, port: str, *, driver: str) -> str:
-        label = self._device_label_for(device_key)
-        role = {
-            PUMP: "sample_pump",
-            SWITCH: "inlet_switch",
-            SELECTOR: "main_selector",
-        }.get(device_key)
-        device_type = device_key
-        self._device_comm_service.register_endpoint_assignment(
-            label,
-            port,
-            device_type=device_type,
-            driver=driver,
-            role=role,
-        )
-        return label
+        return device_label_for(device_key)
 
     def _sync_device_connections_from_service(self) -> None:
         pump = self._device_comm_service.connection(self._device_label_for("pump"))
         self._client = pump if pump is not None else None
+
+    def sync_from_lifecycle_controller(self) -> None:
+        """Mirror DeviceLifecycleController's already-finished state into this
+        panel's internal probe/client state, the shared status line, and the
+        availability_changed/valve_availability_changed/mswitch_availability_changed
+        signals MainWindow listens to.
+
+        Pure UI/state sync - the controller has already discovered, connected, and
+        (for the selector) homed every device by the time this is called; this
+        method does no device I/O and never triggers a connect/disconnect of
+        its own. Called after startup finishes and after a full shutdown, so
+        it must correctly reflect *either* a connected or a not-connected
+        state, not just paper over one of them.
+        """
+        controller = DeviceLifecycleController.shared()
+        self._sync_pump_from_controller(controller)
+        self._sync_valve_from_controller(controller)
+        self._sync_mswitch_from_controller(controller)
+
+    def _sync_pump_from_controller(self, controller: DeviceLifecycleController) -> None:
+        if controller.is_connected(PUMP):
+            probe = controller.probe_for(PUMP)
+            port = str(getattr(probe, "port", "") or "")
+            self._probe = probe
+            self._client = self._device_comm_service.connection(self._device_label_for(PUMP))
+            model = getattr(probe, "model", "") or "pump"
+            self._set_connection_visual(True, f"Connected to {model} on {port or 'unknown port'}.")
+            self.availability_changed.emit(probe)
+        else:
+            self._probe = None
+            self._client = None
+            event = controller.last_event(PUMP)
+            message = event.message if event is not None and event.message else "Pump offline."
+            self._set_connection_visual(False, message)
+            self.availability_changed.emit(None)
+
+    def _sync_valve_from_controller(self, controller: DeviceLifecycleController) -> None:
+        if controller.is_connected(SWITCH):
+            probe = controller.probe_for(SWITCH)
+            self._valve_probe = probe
+            self.valve_availability_changed.emit(probe)
+        else:
+            self._valve_probe = None
+            self.valve_availability_changed.emit(None)
+
+    def _sync_mswitch_from_controller(self, controller: DeviceLifecycleController) -> None:
+        if controller.is_connected(SELECTOR):
+            probe = controller.probe_for(SELECTOR)
+            self._mswitch_probe = probe
+            self.mswitch_availability_changed.emit(probe)
+        else:
+            self._mswitch_probe = None
+            self.mswitch_availability_changed.emit(None)
 
     def _service_device_connected(self, device_key: str) -> bool:
         label = self._device_label_for(device_key)
@@ -3788,635 +3537,40 @@ class ExperimentControlWindow(QWidget):
         return False
 
     def refresh_device_ports(self) -> bool:
-        if self._port_refresh_in_progress:
-            return False
-        self._start_port_refresh()
+        """Trigger a background port rescan on the single-lane device I/O pool
+        (ExperimentControlBackend.refresh_devices() protocol conformance; not
+        currently wired to any UI trigger)."""
+        device_io_pool().start(DevicePortRefreshTask())
         return True
 
-    def enable_startup_device_auto_connect(self) -> None:
-        if self._startup_auto_connect_enabled:
-            return
-        self._startup_auto_connect_enabled = True
-        self._schedule_startup_device_auto_connect()
-
-    def _schedule_startup_device_auto_connect(self) -> bool:
-        if not self._auto_connect_devices:
-            return False
-        if not self._startup_auto_connect_enabled:
-            return False
-        if self._port_refresh_in_progress or self._experiment_control_bootstrap_in_progress:
-            return False
-        if self._startup_auto_connect_scheduled:
-            return False
-        if not self._startup_auto_connect_active:
-            self._startup_auto_connect_active = True
-            self._startup_auto_connect_queue = list(self.STARTUP_DEVICE_ORDER)
-            _LOGGER.info("Startup auto-connect queue initialized: %s", ", ".join(self._startup_auto_connect_queue))
-        self._startup_auto_connect_scheduled = True
-        QTimer.singleShot(0, self._run_startup_device_auto_connect)
-        return True
-
-    def _run_startup_device_auto_connect(self) -> None:
-        if not self._startup_auto_connect_scheduled:
-            return
-        self._startup_auto_connect_scheduled = False
-        if not self._auto_connect_devices or not self._startup_auto_connect_enabled:
-            self._startup_auto_connect_active = False
-            self._startup_auto_connect_stage = None
-            self._startup_auto_connect_queue = []
-            return
-        if self._port_refresh_in_progress or self._experiment_control_bootstrap_in_progress:
-            self._schedule_startup_device_auto_connect()
-            return
-        if self._startup_auto_connect_stage is not None:
-            return
-        if not self._startup_auto_connect_queue:
-            self._startup_auto_connect_active = False
-            return
-        _LOGGER.info("Startup auto-connect stage starting: %s", self._startup_auto_connect_queue[0])
-        self._advance_startup_device_auto_connect()
-
-    def _advance_startup_device_auto_connect(self) -> None:
-        if not self._startup_auto_connect_active:
-            return
-        if self._startup_auto_connect_stage is not None:
-            return
-        if self._port_refresh_in_progress or self._experiment_control_bootstrap_in_progress:
-            self._schedule_startup_device_auto_connect()
-            return
-        if not self._startup_auto_connect_queue:
-            self._startup_auto_connect_active = False
-            self._startup_auto_connect_stage = None
-            return
-        device_key = self._startup_auto_connect_queue[0]
-        _LOGGER.info("Startup auto-connect evaluating: %s", device_key)
-        if not self._startup_device_ready(device_key):
-            _LOGGER.info("Startup auto-connect skipping %s (not ready).", device_key)
-            self._finish_startup_device_auto_connect_stage(device_key)
-            return
-        if self._startup_attempt_device_connect(device_key):
-            self._startup_auto_connect_stage = device_key
-            _LOGGER.info("Startup auto-connect requested connect for %s.", device_key)
-        else:
-            _LOGGER.info("Startup auto-connect could not request connect for %s.", device_key)
-            self._finish_startup_device_auto_connect_stage(device_key)
-
-    def _finish_startup_device_auto_connect_stage(self, device_key: str) -> None:
-        if not self._startup_auto_connect_active:
-            return
-        if self._startup_auto_connect_queue and self._startup_auto_connect_queue[0] == device_key:
-            self._startup_auto_connect_queue.pop(0)
-        elif self._startup_auto_connect_stage != device_key:
-            return
-        self._startup_auto_connect_stage = None
-        _LOGGER.info(
-            "Startup auto-connect stage finished: %s | remaining=%s",
-            device_key,
-            ", ".join(self._startup_auto_connect_queue) if self._startup_auto_connect_queue else "none",
-        )
-        if not self._startup_auto_connect_queue:
-            self._startup_auto_connect_active = False
-            _LOGGER.info("Startup auto-connect sequence complete.")
-            return
-        self._schedule_startup_device_auto_connect()
-
-    def _startup_pump_ready(self) -> bool:
-        if self._service_device_connected("pump") or self._connect_in_progress:
-            return False
-        selected_port = self.selected_port()
-        return bool(selected_port is not None and self.port_combo.findData(selected_port) >= 0)
-
-    def _startup_valve_ready(self) -> bool:
-        if self._service_device_connected(SWITCH):
-            return False
-        if self._valve_connect_in_progress or self._valve_connect_task is not None:
-            return False
-        selected_port = self._selected_valve_port()
-        return bool(selected_port is not None and self.valve_port_combo.findData(selected_port) >= 0)
-
-    def _startup_mswitch_ready(self) -> bool:
-        if self._service_device_connected(SELECTOR):
-            return False
-        if self._mswitch_connect_in_progress or self._mswitch_connect_task is not None:
-            return False
-        selected_port = self._selected_mswitch_port()
-        return bool(selected_port is not None and self.mswitch_port_combo.findData(selected_port) >= 0)
-
-    def _startup_device_ready(self, device_key: str) -> bool:
-        if device_key == "pump":
-            return self._startup_pump_ready()
-        if device_key == SWITCH:
-            return self._startup_valve_ready()
-        if device_key == SELECTOR:
-            return self._startup_mswitch_ready()
-        return False
-
-    def _startup_attempt_device_connect(self, device_key: str) -> bool:
-        if device_key == "pump":
-            return self.connect_best_pump_controller()
-        if device_key == SWITCH:
-            return self.connect_best_valve_controller()
-        if device_key == SELECTOR:
-            return self.connect_best_mswitch_controller()
-        return False
-
-    def _remember_selected_port(self, _: str) -> None:
-        self._last_selected_port = self.selected_port()
-
-    def _remember_selected_valve_port(self, _: str) -> None:
-        self._last_selected_valve_port = self._selected_valve_port()
-
-    def _selected_valve_port(self) -> str | None:
-        data = self.valve_port_combo.currentData()
-        return str(data) if data else None
-
-    def _toggle_valve_connection(self) -> None:
-        if self._service_device_connected(SWITCH):
-            self._disconnect_valve_controller()
-        else:
-            self._connect_selected_valve_port()
-
-    def _connect_selected_valve_port(self) -> None:
-        port = self._selected_valve_port()
-        if not port:
-            self._show_info("Select a serial port first.")
-            return
-        if self._valve_connect_task is not None:
-            return
-        self._valve_connect_in_progress = True
-        self._set_valve_connection_visual(False, f"Connecting switch controller on {port}...")
-        _LOGGER.info("Connecting switch controller on %s", port)
-        label = self._ensure_device_profile(SWITCH, port, driver="auto")
-        task = DeviceConnectTask(label, port)
-        task.signals.finished.connect(self._handle_valve_connect_finished)
-        self._valve_connect_task = task
-        self._thread_pool.start(task)
-
-    def _handle_valve_connect_finished(self, payload: object) -> None:
-        self._valve_connect_in_progress = False
-        self._valve_connect_task = None
-        if not isinstance(payload, tuple) or len(payload) != 3:
-            self._set_valve_connection_visual(False, "Switch connect failed.")
-            self.valve_availability_changed.emit(None)
-            _LOGGER.warning("Switch connect finished with unexpected payload.")
-            return
-        port, status, error = payload
-        if not isinstance(status, DeviceStatus):
-            self._device_comm_service.disconnect_device(self._device_label_for(SWITCH))
-            self._valve_probe = None
-            self._set_valve_connection_visual(False, f"Switch connect failed on {port}: {error}")
-            self.valve_availability_changed.emit(None)
-            _LOGGER.warning("Switch connect failed on %s: %s", port, error)
-            self._finish_startup_device_auto_connect_stage(SWITCH)
-            return
-        probe = ControllerProbe(
-            port=status.endpoint or port,
-            controller_type=status.identity.get("controller_type", ""),
-            model=status.identity.get("model", "valve controller"),
-            serial_number=status.identity.get("serial_number") or None,
-            protocol_version=status.identity.get("protocol_version") or None,
-        )
-        self._valve_probe = probe
-        self._set_valve_connection_visual(True, f"Connected to {probe.model} [{probe.controller_type}] on {probe.port}.")
-        self.valve_availability_changed.emit(probe)
-        _LOGGER.info("Switch controller connected | model=%s type=%s port=%s", probe.model, probe.controller_type, probe.port)
-        self._finish_startup_device_auto_connect_stage(SWITCH)
-
-    def connect_best_valve_controller(self) -> bool:
-        if self._port_refresh_in_progress:
-            return False
-        if self._service_device_connected(SWITCH):
-            return False
-        if self._valve_connect_in_progress or self._valve_connect_task is not None:
-            return False
-        selected = self._selected_valve_port()
-        if not selected:
-            return False
-        if self.valve_port_combo.findData(selected) < 0:
-            return False
-        self._connect_selected_valve_port()
-        return True
-
-    def _disconnect_valve_controller(self) -> None:
-        self._device_comm_service.disconnect_device(self._device_label_for(SWITCH))
-        self._valve_probe = None
-        self._set_valve_connection_visual(False, "Switch controller disconnected.")
-        self.valve_availability_changed.emit(None)
-        _LOGGER.info("Switch controller disconnected.")
-
-    def _set_valve_connection_visual(self, connected: bool, text: str) -> None:
-        color = "#2e7d32" if connected else "#9aa8b6"
-        self.valve_connection_dot.setStyleSheet(
-            f"background:{color}; border-radius:5px; min-width:10px; min-height:10px;"
-        )
-        self.valve_connection_status_label.setText(text)
-        self.valve_connection_toggle_button.setText("Disconnect" if connected else "Connect")
-        self.valve_connection_toggle_button.setEnabled(True)
-
-    def _auto_connect_valve(self) -> None:
-        if not self._auto_connect_devices:
-            return
-        if not self._startup_auto_connect_enabled:
-            return
-        if self._port_refresh_in_progress:
-            return
-        if self._service_device_connected(SWITCH):
-            return
-        if self._valve_connect_task is not None:
-            return
-        selected = self._selected_valve_port()
-        if selected is not None and self.valve_port_combo.findData(selected) >= 0:
-            _LOGGER.debug("Auto-connecting valve controller on %s", selected)
-            self._connect_selected_valve_port()
-
-    def _refresh_valve_ports(self) -> None:
-        self._start_port_refresh()
-
-    def _refresh_mswitch_ports(self) -> None:
-        self._start_port_refresh()
-
-    def _remember_selected_mswitch_port(self, _: str) -> None:
-        self._last_selected_mswitch_port = self._selected_mswitch_port()
-
-    def _selected_mswitch_port(self) -> str | None:
-        data = self.mswitch_port_combo.currentData()
-        return str(data) if data else None
-
-    def _toggle_mswitch_connection(self) -> None:
-        if self._service_device_connected(SELECTOR):
-            self._disconnect_mswitch_controller()
-        else:
-            self._connect_selected_mswitch_port()
-
-    def _connect_selected_mswitch_port(self) -> None:
-        port = self._selected_mswitch_port()
-        if not port:
-            self._show_info("Select an AMF switch port first.")
-            return
-        if self._mswitch_connect_in_progress or self._mswitch_connect_task is not None:
-            return
-        self._mswitch_connect_in_progress = True
-        self._set_mswitch_connection_visual(False, f"Connecting selector on {port}...")
-        _LOGGER.info("Connecting selector on %s", port)
-        label = self._ensure_device_profile(SELECTOR, port, driver="amf-mswitch")
-        task = DeviceConnectTask(label, port)
-        task.signals.finished.connect(self._handle_mswitch_connect_finished)
-        self._mswitch_connect_task = task
-        self._thread_pool.start(task)
-
-    def _handle_mswitch_connect_finished(self, payload: object) -> None:
-        self._mswitch_connect_in_progress = False
-        self._mswitch_connect_task = None
-        if not isinstance(payload, tuple) or len(payload) != 3:
-            self._set_mswitch_connection_visual(False, "Selector connect failed.")
-            self.mswitch_availability_changed.emit(None)
-            _LOGGER.warning("Selector connect finished with unexpected payload.")
-            return
-        port, status, error = payload
-        if not isinstance(status, DeviceStatus):
-            self._device_comm_service.disconnect_device(self._device_label_for(SELECTOR))
-            self._mswitch_probe = None
-            self._set_mswitch_connection_visual(False, f"Selector connect failed on {port}: {error}")
-            self.mswitch_availability_changed.emit(None)
-            _LOGGER.error("Selector connect failed on %s: %s", port, error)
-            self._finish_startup_device_auto_connect_stage(SELECTOR)
-            return
-        probe = ControllerProbe(
-            port=status.endpoint or port,
-            controller_type=status.identity.get("controller_type", "amf-mswitch"),
-            model=status.identity.get("model", "AMF switch"),
-            serial_number=status.identity.get("serial_number") or None,
-            protocol_version=status.identity.get("protocol_version") or None,
-        )
-        self._mswitch_probe = probe
-        self.mswitch_availability_changed.emit(probe)
-        self._set_mswitch_connection_visual(True, f"Connected to {probe.model} on {probe.port}.")
-        self._update_mswitch_state_from_probe()
-        self._ensure_mswitch_homed()
-        _LOGGER.info("Selector connected | model=%s port=%s", probe.model, probe.port)
-        self._finish_startup_device_auto_connect_stage(SELECTOR)
-
-    def _disconnect_mswitch_controller(self) -> None:
-        self._device_comm_service.disconnect_device(self._device_label_for(SELECTOR))
-        self._mswitch_probe = None
-        self._mswitch_connect_in_progress = False
-        self._mswitch_connect_task = None
-        self._set_mswitch_connection_visual(False, "Selector disconnected.")
-        self.mswitch_availability_changed.emit(None)
-        _LOGGER.info("Selector disconnected.")
-
-    def _set_mswitch_connection_visual(self, connected: bool, text: str) -> None:
-        color = "#2e7d32" if connected else "#9aa8b6"
-        self.mswitch_connection_dot.setStyleSheet(
-            f"background:{color}; border-radius:5px; min-width:10px; min-height:10px;"
-        )
-        self.mswitch_connection_status_label.setText(text)
-        self.mswitch_connection_toggle_button.setText("Disconnect" if connected else "Connect")
-        self.mswitch_connection_toggle_button.setEnabled(True)
-        self.mswitch_home_button.setEnabled(connected)
-        self.mswitch_move_button.setEnabled(connected)
-        self.mswitch_target_spin.setEnabled(connected)
-
-    def _auto_connect_mswitch(self) -> None:
-        if not self._auto_connect_devices:
-            return
-        if not self._startup_auto_connect_enabled:
-            return
-        if self._port_refresh_in_progress:
-            return
-        if self._service_device_connected(SELECTOR):
-            return
-        selected = self._selected_mswitch_port()
-        if selected is not None:
-            _LOGGER.debug("Auto-connecting M-Switch on %s", selected)
-            self._connect_selected_mswitch_port()
-
-    def connect_best_mswitch_controller(self) -> bool:
-        if self._port_refresh_in_progress:
-            return False
-        if self._service_device_connected(SELECTOR):
-            return False
-        if self._mswitch_connect_in_progress:
-            return False
-        selected = self._selected_mswitch_port()
-        if selected is None:
-            return False
-        if self.mswitch_port_combo.findData(selected) < 0:
-            return False
-        self._connect_selected_mswitch_port()
-        return True
 
     def _update_mswitch_state_from_probe(self) -> None:
+        """Query the selector's live position after a switch-move plan-step
+        command, so a failed/unexpected move is at least logged. Called from
+        _apply_step_to_pump/_on_step_apply_async_done during real plan
+        execution - not part of the dead manual-connect UI."""
         if not self._service_device_connected(SELECTOR):
             return
         try:
-            current_position = self._device_comm_service.send_command(
+            self._device_comm_service.send_command(
                 self._device_label_for(SELECTOR),
                 DeviceCommand("switch.get_position", {}),
-            ).response
-            connection = self._device_comm_service.connection(self._device_label_for(SELECTOR))
-            port_count = connection.get_port_count() if connection is not None and hasattr(connection, "get_port_count") else 12
-            current_position = int(current_position)
-            self.mswitch_target_spin.setRange(1, max(port_count, 1))
-            self.mswitch_target_spin.setValue(max(1, min(current_position, max(port_count, 1))))
-            self.mswitch_current_value.setText(f"Port {current_position} / {port_count}")
+            )
         except Exception as exc:
             _LOGGER.warning("Could not refresh M-Switch state: %s", exc)
 
-    def _ensure_mswitch_homed(self) -> bool:
-        if not self._service_device_connected(SELECTOR):
-            return False
-        try:
-            connection = self._device_comm_service.connection(self._device_label_for(SELECTOR))
-            if connection is not None and hasattr(connection, "is_homed") and connection.is_homed():
-                return True
-        except Exception as exc:
-            _LOGGER.warning("Could not read M-Switch homing state: %s", exc)
-            return False
-        try:
-            _LOGGER.info("Homing M-Switch before use.")
-            self._set_mswitch_connection_visual(True, "Homing M-Switch...")
-            self._send_device_command(SELECTOR, "switch.home", {"block": True})
-            self._update_mswitch_state_from_probe()
-            self._set_mswitch_connection_visual(True, f"M-Switch homed on {self._selected_mswitch_port() or 'current port'}.")
-            _LOGGER.info("M-Switch homed.")
-            return True
-        except Exception as exc:
-            self._set_mswitch_connection_visual(True, f"M-Switch home failed: {exc}")
-            _LOGGER.error("M-Switch home failed: %s", exc)
-            return False
-
-    def _home_mswitch(self) -> None:
-        if not self._service_device_connected(SELECTOR):
-            return
-        self._ensure_mswitch_homed()
-
-    def _move_mswitch_to_target(self) -> None:
-        if not self._service_device_connected(SELECTOR):
-            return
-        target = int(self.mswitch_target_spin.value())
-        try:
-            self._set_mswitch_connection_visual(True, f"Moving M-Switch to port {target}...")
-            self._send_device_command(SELECTOR, "switch.move_to", {"position": target, "block": True})
-            self._update_mswitch_state_from_probe()
-            _LOGGER.info("M-Switch moved to port %s", target)
-        except Exception as exc:
-            self._set_mswitch_connection_visual(True, f"M-Switch move failed: {exc}")
-            _LOGGER.error("M-Switch move failed: %s", exc)
-
-    def _move_mswitch_and_verify(self, target: int) -> bool:
-        if not self._service_device_connected(SELECTOR):
-            return False
-        target = max(min(int(target), 12), 1)
-        self._send_device_command(SELECTOR, "switch.move_to", {"position": target, "block": True})
-        self._update_mswitch_state_from_probe()
-        try:
-            current = int(
-                self._device_comm_service.send_command(
-                    self._device_label_for(SELECTOR),
-                    DeviceCommand("switch.get_position", {}),
-                ).response
-            )
-        except Exception as exc:
-            _LOGGER.warning("Could not verify M-Switch position after move | target=%s error=%s", target, exc)
-            self._set_mswitch_connection_visual(True, f"M-Switch moved to port {target}.")
-            return True
-        if current != target:
-            _LOGGER.warning("M-Switch position mismatch | target=%s actual=%s", target, current)
-            self._set_mswitch_connection_visual(True, f"M-Switch at port {current} (requested {target}).")
-        else:
-            self._set_mswitch_connection_visual(True, f"M-Switch moved to port {target}.")
-        return True
-
-    def selected_port(self) -> str | None:
-        data = self.port_combo.currentData()
-        return str(data) if data else None
-
-    def _probe_selected_port(self) -> None:
-        port = self.selected_port()
-        if not port:
-            self._show_info("Select a serial port first.")
-            return
-        try:
-            probe = self._device_comm_service.probe_pump_port(port)
-        except Exception as exc:
-            self._probe = None
-            self._clear_probe_labels()
-            self._set_connection_visual(False, f"Probe failed on {port}: {exc}")
-            _LOGGER.error("Pump probe failed on %s: %s", port, exc)
-            return
-
-        self._probe = probe
-        self._apply_probe(probe)
-        self._set_connection_visual(False, f"Pump discovered on {probe.port}.")
-        _LOGGER.info("Pump probe discovered | model=%s port=%s", probe.model, probe.port)
-
-    def _connect_selected_port(self) -> None:
-        port = self.selected_port()
-        if not port:
-            self._show_info("Select a serial port first.")
-            return
-        if self._connect_in_progress:
-            return
-        self._connect_generation += 1
-        generation = self._connect_generation
-        self._connect_in_progress = True
-        self._set_connection_visual(False, f"Connecting pump on {port}...")
-        _LOGGER.info("Connecting pump on %s", port)
-        task = PumpConnectTask(generation, port)
-        task.signals.finished.connect(self._handle_connect_probe_success)
-        task.signals.failed.connect(self._handle_connect_probe_failure)
-        self._connect_task = task
-        self._thread_pool.start(task)
-
-    def _disconnect_pump(self) -> None:
-        self._connect_generation += 1
-        self._connect_in_progress = False
-        self._device_comm_service.disconnect_device(self._device_label_for("pump"))
-        self._client: RegloICCClient | None = None
-        self._probe = None
-        self._set_connection_visual(False, "Pump disconnected.")
-        self.availability_changed.emit(None)
-        _LOGGER.info("Pump disconnected.")
-
-    def _toggle_connection(self) -> None:
-        if self._connect_in_progress:
-            return
-        if self._service_device_connected("pump"):
-            self._disconnect_pump()
-        else:
-            self._connect_selected_port()
-
-    def _handle_connect_probe_success(self, generation: int, probe: object) -> None:
-        if generation != self._connect_generation:
-            return
-        self._connect_task = None
-        self._connect_in_progress = False
-        if not isinstance(probe, PumpProbe):
-            self._set_connection_visual(False, "Pump probe returned unexpected data.")
-            return
-        try:
-            label = self._ensure_device_profile("pump", probe.port, driver="reglo_icc")
-            self._device_comm_service.connect(label, cached_pump_probe=probe)
-        except Exception as exc:
-            self._device_comm_service.disconnect_device(self._device_label_for("pump"))
-            self._set_connection_visual(False, f"Connect failed on {probe.port}: {exc}")
-            _LOGGER.error("Pump connect failed on %s: %s", probe.port, exc)
-            self._finish_startup_device_auto_connect_stage("pump")
-            return
-        self._client = self._device_comm_service.connection(self._device_label_for("pump"))
-        self._probe = probe
-        self._apply_probe(probe)
-        self._set_connection_visual(True, f"Connected to {probe.model} on {probe.port}.")
-        self.availability_changed.emit(probe)
-        _LOGGER.info("Pump connected | model=%s port=%s", probe.model, probe.port)
-        self._finish_startup_device_auto_connect_stage("pump")
-
-    def _handle_connect_probe_failure(self, generation: int, message: str) -> None:
-        if generation != self._connect_generation:
-            return
-        self._connect_task = None
-        self._connect_in_progress = False
-        self._probe = None
-        self._clear_probe_labels()
-        port = self.selected_port() or "selected port"
-        self._set_connection_visual(False, f"Connect failed on {port}: {message}")
-        self.availability_changed.emit(None)
-        _LOGGER.error("Pump connect failed on %s: %s", port, message)
-        self._finish_startup_device_auto_connect_stage("pump")
-
-    def _apply_probe(self, probe: PumpProbe) -> None:
-        self.protocol_value.setText(probe.protocol_version)
-        self.model_value.setText(probe.model)
-        self.serial_value.setText(probe.serial_number)
-        self.channels_value.setText(str(probe.channel_count))
-
-    def _clear_probe_labels(self) -> None:
-        for label in (self.protocol_value, self.model_value, self.serial_value, self.channels_value):
-            label.setText("-")
-
     def _set_connection_visual(self, connected: bool, text: str) -> None:
-        color = "#2e7d32" if connected else "#9aa8b6"
-        self.connection_dot.setStyleSheet(
-            f"background:{color}; border-radius:5px; min-width:10px; min-height:10px;"
-        )
+        """Pump connection message, surfaced through the panel's shared status
+        line (see _set_status_message/_refresh_status_line). *connected* is
+        unused now that this no longer drives a per-device indicator widget;
+        kept in the signature since callers pass it for readability."""
+        _ = connected
         self._status_message_base = text
         self._refresh_status_line()
-        self.connection_toggle_button.setText("Disconnect" if connected else "Connect")
-        self.connection_toggle_button.setEnabled(not self._connect_in_progress or connected)
-
-    def synchronize_device_connections(self) -> None:
-        if self._connection_sync_in_progress:
-            return
-        if self._connect_in_progress or self._valve_connect_in_progress or self._mswitch_connect_in_progress:
-            return
-        self._connection_sync_in_progress = True
-        try:
-            available_ports = {
-                str(port.device).strip()
-                for port in SerialController.list_ports()
-                if str(getattr(port, "device", "") or "").strip()
-            }
-
-            pump_port = str(getattr(self._probe, "port", "") or "").strip()
-            if self._service_device_connected("pump"):
-                if not pump_port or pump_port not in available_ports:
-                    _LOGGER.warning("Pump controller failed health check; disconnecting stale connection on %s.", pump_port or "unknown")
-                    self._disconnect_pump()
-
-            valve_port = str(getattr(self._valve_probe, "port", "") or "").strip()
-            if self._service_device_connected(SWITCH):
-                if not valve_port or valve_port not in available_ports:
-                    _LOGGER.warning("Switch controller failed health check; disconnecting stale connection on %s.", valve_port or "unknown")
-                    self._disconnect_valve_controller()
-
-            mswitch_port = str(getattr(self._mswitch_probe, "port", "") or "").strip()
-            if self._service_device_connected(SELECTOR):
-                if not mswitch_port or mswitch_port not in available_ports:
-                    _LOGGER.warning("Selector failed health check; disconnecting stale connection on %s.", mswitch_port or "unknown")
-                    self._disconnect_mswitch_controller()
-        finally:
-            self._connection_sync_in_progress = False
 
     def _show_info(self, message: str) -> None:
         _LOGGER.info("%s", message)
         self._set_status_message(message)
-
-    def _show_pump_info(self) -> None:
-        details = (
-            f"Model: {self.model_value.text()}\n"
-            f"Serial: {self.serial_value.text()}\n"
-            f"Channels: {self.channels_value.text()}\n"
-            f"Protocol: {self.protocol_value.text()}"
-        )
-        self._show_info(details)
-
-    def _auto_connect_pump(self) -> None:
-        if not self._auto_connect_devices:
-            return
-        if not self._startup_auto_connect_enabled:
-            return
-        if self._port_refresh_in_progress:
-            return
-        if self._probe is not None:
-            self._set_connection_visual(False, "Connecting pump...")
-            self._connect_selected_port()
-            return
-        selected = self.selected_port()
-        if selected and self.port_combo.findData(selected) >= 0:
-            self._set_connection_visual(False, "Connecting pump...")
-            self._connect_selected_port()
-
-    def connect_best_pump_controller(self) -> bool:
-        if self._port_refresh_in_progress:
-            return False
-        if self._service_device_connected("pump") or self._connect_in_progress:
-            return False
-        selected = self.selected_port()
-        if selected is None or self.port_combo.findData(selected) < 0:
-            return False
-        self._connect_selected_port()
-        return True
 
     def _set_manual_uniform_mode(self, enabled: bool) -> None:
         self.manual_uniform_button.setText("=" if enabled else "≠")
@@ -6051,8 +5205,6 @@ class ExperimentControlWindow(QWidget):
             self.mswitch_availability_changed.emit(None)
             self.availability_changed.emit(None)
             self._set_connection_visual(False, "Pump disconnected.")
-            self._set_valve_connection_visual(False, "Switch controller disconnected.")
-            self._set_mswitch_connection_visual(False, "Selector disconnected.")
 
     def _read_live_status(self) -> None:
         if not self._service_device_connected("pump"):
@@ -6295,9 +5447,6 @@ class ExperimentControlWindow(QWidget):
         try:
             self._experiment_control_bootstrap_in_progress = True
             self._set_experiment_control_bootstrap_busy(True)
-            self._refresh_ports()
-            self._refresh_valve_ports()
-            self._refresh_mswitch_ports()
             state = self._experiment_control_bootstrap_pending_state or self._ui_state
             saved_steps = list(self._experiment_control_bootstrap_pending_steps)
             if not saved_steps:
@@ -6390,7 +5539,7 @@ class ExperimentControlWindow(QWidget):
             self._experiment_control_bootstrap_in_progress = False
             self._experiment_control_bootstrap_started = False
             self._set_experiment_control_bootstrap_busy(False)
-            self._schedule_startup_device_auto_connect()
+            self.sync_from_lifecycle_controller()
 
     def _abort_experiment_control_bootstrap_population(self, message: str) -> None:
         self._experiment_plan_import_fill_timer.stop()
@@ -6458,9 +5607,6 @@ class ExperimentControlWindow(QWidget):
         x_pos = state.get("x")
         y_pos = state.get("y")
         maximized = state.get("maximized")
-        selected_port = state.get("selected_port")
-        selected_valve_port = state.get("selected_valve_port")
-        selected_mswitch_port = state.get("selected_mswitch_port")
 
         if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
             self.resize(width, height)
@@ -6477,12 +5623,6 @@ class ExperimentControlWindow(QWidget):
                     x_pos = max(100, screen_geometry.left())
                     y_pos = max(100, screen_geometry.top())
             self.move(x_pos, y_pos)
-        if isinstance(selected_port, str) and selected_port:
-            self._last_selected_port = selected_port
-        if isinstance(selected_valve_port, str) and selected_valve_port:
-            self._last_selected_valve_port = selected_valve_port
-        if isinstance(selected_mswitch_port, str) and selected_mswitch_port:
-            self._last_selected_mswitch_port = selected_mswitch_port
         self._start_maximized = bool(maximized)
 
     def save_ui_state(self) -> None:
@@ -6510,7 +5650,6 @@ class ExperimentControlWindow(QWidget):
                     "width": int(width),
                     "height": int(height),
                     "maximized": bool(self.isMaximized()),
-                    "selected_port": self.selected_port(),
                     "time_unit_mode": self._time_unit_mode,
                     "selected_plan_row": self._selected_experiment_control_row(),
                     "plan_steps": self._serialize_experiment_control_steps(self._read_experiment_control_steps()),
@@ -6549,8 +5688,6 @@ class ExperimentControlWindow(QWidget):
                         }
                         for index in range(ACTIVE_PUMP_CHANNELS)
                     ],
-                    "selected_valve_port": self._selected_valve_port(),
-                    "selected_mswitch_port": self._selected_mswitch_port(),
                 },
             )
 

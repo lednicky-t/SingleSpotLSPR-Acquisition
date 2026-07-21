@@ -6,8 +6,10 @@ from time import perf_counter
 
 from PyQt6.QtCore import QEvent, Qt, QTimer
 
+from lspr_app.device.device_lifecycle import DeviceLifecycleController, DeviceLifecycleEvent, DeviceLifecycleReport
+from lspr_app.device.device_types import PUMP, SELECTOR, SWITCH
 from lspr_app.device.simulated import SimulatedSpectrometer
-from lspr_app.gui.hardware_initializer import HardwareInitResult, HardwareInitStepResult, HardwareInitTask
+from lspr_app.gui.device_lifecycle_task import DeviceLifecycleCycleTask, device_io_pool
 from lspr_app.gui.main_window_state import (
     acquisition_state_payload,
     collapsible_section_state,
@@ -200,6 +202,17 @@ def ensure_flow_panel_for(window) -> None:
 
 
 def sync_experiment_control_startup_ports_for(window) -> None:
+    """Mirror DeviceLifecycleController's already-finished connection state
+    into the experiment-control panel's internal probe/client state and its
+    availability_changed signals.
+
+    Pure UI/state sync - by the time this runs (after _hardware_init_ready_emitted
+    is set), the controller has already discovered/connected/homed every
+    device; this does no device I/O of its own and never re-triggers a
+    connect. Called both from handle_hardware_init_finished_for (the normal
+    startup path) and from ensure_experiment_control_panel_for (in case the
+    panel is constructed after hardware-init has already finished).
+    """
     try:
         hardware_init_ready = bool(object.__getattribute__(window, "_hardware_init_ready_emitted"))
     except Exception:
@@ -212,33 +225,27 @@ def sync_experiment_control_startup_ports_for(window) -> None:
     experiment_control_window = getattr(window, "_experiment_control_window", None)
     if experiment_control_window is None:
         return
-    if hasattr(experiment_control_window, "enable_startup_device_auto_connect"):
-        try:
-            experiment_control_window.enable_startup_device_auto_connect()
-        except Exception as exc:
-            window._log_warning(f"Could not enable experiment-control startup auto-connect: {exc}")
-    if not hasattr(experiment_control_window, "refresh_device_ports"):
+    if not hasattr(experiment_control_window, "sync_from_lifecycle_controller"):
         return
     try:
-        refreshed = bool(experiment_control_window.refresh_device_ports())
+        experiment_control_window.sync_from_lifecycle_controller()
     except Exception as exc:
-        window._log_warning(f"Could not refresh experiment-control ports after initialization: {exc}")
-    else:
-        if refreshed:
-            window._log_info("Refreshing experiment-control ports after initialization.")
+        window._log_warning(f"Could not sync experiment-control panel from device lifecycle state: {exc}")
 
 
 def disconnect_all_devices_for(window) -> None:
-    experiment_control_window = getattr(window, "_experiment_control_window", None)
-    if experiment_control_window is None or not hasattr(experiment_control_window, "shutdown_devices"):
-        window._log_info("No hardware controller window is available to disconnect.")
-        return
     window._log_info("Disconnecting all hardware devices.")
     try:
-        experiment_control_window.shutdown_devices()
+        DeviceLifecycleController.shared().shutdown_all()
     except Exception as exc:
         window._log_warning(f"Disconnect all devices failed: {exc}")
         return
+    experiment_control_window = getattr(window, "_experiment_control_window", None)
+    if experiment_control_window is not None and hasattr(experiment_control_window, "sync_from_lifecycle_controller"):
+        try:
+            experiment_control_window.sync_from_lifecycle_controller()
+        except Exception as exc:
+            window._log_warning(f"Could not sync experiment-control panel after disconnect: {exc}")
     refresh_hw_device_status_strip(window)
     window._log_info("All hardware devices disconnected.")
 
@@ -255,7 +262,6 @@ def finish_hardware_initialization_for(window, text: str = "Hardware initializat
     if window._hardware_init_ready_emitted:
         return
     window._hardware_init_ready_emitted = True
-    window._hardware_status_overrides.clear()
     refresh_hw_device_status_strip(window)
     window._sync_hardware_menu_actions()
     window._emit_hardware_init_progress(100, text)
@@ -266,91 +272,127 @@ def finish_hardware_initialization_for(window, text: str = "Hardware initializat
 def start_hardware_initialization_for(window) -> None:
     if window._hardware_init_task is not None:
         return
-    experiment_control_window = getattr(window, "_experiment_control_window", None)
-    if experiment_control_window is not None and hasattr(experiment_control_window, "shutdown_devices"):
-        window._log_info("Resetting live hardware connections before reinitialization.")
-        try:
-            experiment_control_window.shutdown_devices()
-        except Exception as exc:
-            window._log_warning(f"Could not fully reset live hardware connections: {exc}")
+    window._log_info("Resetting live hardware connections before reinitialization.")
+    try:
+        DeviceLifecycleController.shared().shutdown_all()
+    except Exception as exc:
+        window._log_warning(f"Could not fully reset live hardware connections: {exc}")
     window._emit_hardware_init_progress(12, "Scanning connected devices...")
     window._sync_hardware_menu_actions()
-    task = HardwareInitTask(window._hardware_init_steps())
-    task.signals.progress.connect(window._emit_hardware_init_progress)
-    task.signals.step.connect(window._handle_hardware_init_step)
-    task.signals.finished.connect(window._handle_hardware_init_finished)
+    task = DeviceLifecycleCycleTask(DeviceLifecycleController.shared)
+    task.signals.device_event.connect(window._handle_hardware_init_step)
+    task.signals.cycle_finished.connect(window._handle_hardware_init_finished)
     window._hardware_init_task = task
-    window._thread_pool.start(task)
+    device_io_pool().start(task)
 
 
-def handle_hardware_init_step_for(window, result: object) -> None:
-    if not isinstance(result, HardwareInitStepResult):
+def handle_hardware_init_step_for(window, event: object) -> None:
+    if not isinstance(event, DeviceLifecycleEvent):
         return
-    window._hardware_status_overrides[result.key] = (bool(result.connected), result.message)
-    window.status_label.setText(result.message)
-    key = result.key
+    window.status_label.setText(event.message)
+    if not event.terminal:
+        # Non-terminal stages ("connecting on COM4...", "homing...") only
+        # update the status text - final state (probes, status overrides)
+        # is applied once the terminal event for this device arrives. Also
+        # record it as this device's "what's happening right now" text so
+        # the titlebar status strip can show it next to the relevant dot.
+        window._device_activity_text[event.device_key] = event.message
+        refresh_hw_device_status_strip(window)
+        return
+    window._device_activity_text.pop(event.device_key, None)
+    key = event.device_key
     if key == "spectrometer":
-        payload = result.payload
+        # .probe carries the live instance here (see device_lifecycle.py's
+        # run_spectrometer_stage), not an identity dataclass like the other
+        # devices - swap it in now, before live acquisition starts, so no
+        # restart is needed.
+        payload = event.probe
         if payload is not None and not isinstance(payload, SimulatedSpectrometer):
-            # Real spectrometer discovered on background thread — swap it in now,
-            # before live acquisition starts, so no restart is needed.
             window._spectrometer = payload
             window._capabilities = payload.capabilities()
         window._hardware_available = not isinstance(window._spectrometer, SimulatedSpectrometer)
-    elif key.startswith("pump"):
-        if result.probe is not None:
-            window._discovered_pump_probe = result.probe
-            window._update_pump_status(result.probe)
-    elif key.startswith("selector") or key == "mswitch":
-        window._initial_mswitch_devices = list(result.payload or [])
-        window._mswitch_probe = result.probe if result.probe is not None else None
-    elif key.startswith("valve"):
-        if result.probe is not None:
-            window._discovered_valve_probe = result.probe
+    elif key == PUMP:
+        if event.probe is not None:
+            window._discovered_pump_probe = event.probe
+            window._update_pump_status(event.probe)
+    elif key == SELECTOR:
+        window._initial_mswitch_devices = [event.probe] if event.probe is not None else []
+        window._mswitch_probe = event.probe
+    elif key == SWITCH:
+        if event.probe is not None:
+            window._discovered_valve_probe = event.probe
     refresh_hw_device_status_strip(window)
 
 
-def handle_hardware_init_finished_for(window, result: object) -> None:
+def handle_hardware_init_finished_for(window, report: object) -> None:
     window._hardware_init_task = None
     if getattr(window, "_closing", False):
         return
-    if not isinstance(result, HardwareInitResult):
+    if not isinstance(report, DeviceLifecycleReport):
         window._log_warning("Hardware initialization finished with an unexpected result payload.")
         finish_hardware_initialization_for(window, "Hardware initialization finished.")
         return
-    if result.pump_probe is not None:
-        window._discovered_pump_probe = result.pump_probe
-        window._update_pump_status(result.pump_probe)
-        window._log_info(f"Pump controller discovered on {result.pump_probe.port}.")
-    elif result.pump_error:
-        window._log_warning(f"Pump controller scan completed with no usable device ({result.pump_error}).")
+
+    pump_event = report.by_device.get(PUMP)
+    if pump_event is not None and pump_event.connected and pump_event.probe is not None:
+        window._discovered_pump_probe = pump_event.probe
+        window._update_pump_status(pump_event.probe)
+        window._log_info(f"Pump controller discovered on {pump_event.probe.port}.")
+    elif pump_event is not None and pump_event.error:
+        window._log_warning(f"Pump controller scan completed with no usable device ({pump_event.error}).")
     else:
         window._log_warning("No pump controller discovered.")
 
-    if result.spectrometer_name:
+    spectrometer_event = report.by_device.get("spectrometer")
+    if spectrometer_event is not None:
         if isinstance(window._spectrometer, SimulatedSpectrometer):
-            window._log_info(result.spectrometer_name)
+            window._log_info(spectrometer_event.message)
         else:
-            window._log_success(result.spectrometer_name)
+            window._log_success(spectrometer_event.message)
     else:
-        window._log_warning("Spectrometer initialization produced no name.")
+        window._log_warning("Spectrometer initialization produced no result.")
 
-    window._initial_mswitch_devices = list(result.selector_devices)
-    window._mswitch_probe = result.selector_devices[0] if result.selector_devices else None
+    selector_event = report.by_device.get(SELECTOR)
+    if selector_event is not None and selector_event.connected and selector_event.probe is not None:
+        window._initial_mswitch_devices = [selector_event.probe]
+        window._mswitch_probe = selector_event.probe
+    else:
+        window._initial_mswitch_devices = []
+        window._mswitch_probe = None
     refresh_hw_device_status_strip(window)
     if window._mswitch_probe is not None:
         window._log_info(f"Selector discovered on {window._mswitch_probe.port}.")
-    elif result.selector_error:
-        window._log_warning(f"Selector scan failed: {result.selector_error}")
+    elif selector_event is not None and selector_event.error:
+        window._log_warning(f"Selector scan failed: {selector_event.error}")
     else:
         window._log_warning("Selector not discovered at startup.")
 
-    if result.valve_probe is not None:
-        window._log_info(f"Valve controller discovered on {result.valve_probe.port}.")
-    elif result.valve_error:
-        window._log_warning(f"Valve controller scan failed: {result.valve_error}")
+    valve_event = report.by_device.get(SWITCH)
+    if valve_event is not None and valve_event.connected and valve_event.probe is not None:
+        window._log_info(f"Valve controller discovered on {valve_event.probe.port}.")
+    elif valve_event is not None and valve_event.error:
+        window._log_warning(f"Valve controller scan failed: {valve_event.error}")
     else:
         window._log_warning("No valve controller discovered.")
+
+    # Mirror the panel's connection state directly, here, before calling
+    # finish_hardware_initialization_for below. Historically (before the full
+    # device lifecycle rewrite) this ordering avoided a stale-read health
+    # check (synchronize_device_connections, since deleted) that keyed off the
+    # panel's own _probe/_valve_probe/_mswitch_probe attributes. That specific
+    # failure mode is gone now that refresh_hw_device_status_strip reads
+    # DeviceLifecycleController directly - but the panel's own state
+    # (self._probe, availability_changed signals) still needs this call to be
+    # current before anything downstream reacts to hardware-init finishing, so
+    # the ordering is kept. sync_experiment_control_startup_ports_for (below)
+    # redundantly re-syncs once the ready flag is set - harmless (idempotent),
+    # not yet worth removing.
+    experiment_control_window = getattr(window, "_experiment_control_window", None)
+    if experiment_control_window is not None and hasattr(experiment_control_window, "sync_from_lifecycle_controller"):
+        try:
+            experiment_control_window.sync_from_lifecycle_controller()
+        except Exception as exc:
+            window._log_warning(f"Could not sync experiment-control panel from device lifecycle state: {exc}")
 
     window._emit_hardware_init_progress(100, "Hardware initialization complete.")
     finish_hardware_initialization_for(window, "Hardware initialization complete.")
@@ -393,11 +435,11 @@ def close_event_for(window, event) -> None:  # pragma: no cover - GUI runtime pa
     window._ui_state_timer.stop()
     window._persist_acquisition_state()
     window._save_ui_state()
+    try:
+        DeviceLifecycleController.shared().shutdown_all()
+    except Exception as exc:
+        window._log_warning(f"Experimental control device shutdown failed: {exc}")
     if window._experiment_control_window is not None:
-        try:
-            window._experiment_control_window.shutdown_devices()
-        except Exception as exc:
-            window._log_warning(f"Experimental control device shutdown failed: {exc}")
         window._experiment_control_window.save_ui_state()
         ecw = window._experiment_control_window
         try:

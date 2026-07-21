@@ -1,8 +1,16 @@
 # Device Layer Audit — singleLSPR Acquisition
 
-**Date:** 2026-06-25
+**Date:** 2026-06-25 (follow-up pass: 2026-07-20; full rewrite: 2026-07-20; Device Manager
+migration + simulated-device discussion + orphaned-widget deletion: 2026-07-21)
 **Scope:** `apps/sLSPR/acq/src/lspr_app/device/` and related GUI initializer
-**Status:** Fixes in progress
+**Status:** Discovery/connect architecture rewritten — see "2026-07-20: full device
+lifecycle rewrite" below. `DeviceManagerDialog`'s manual Connect/Disconnect for the
+canonical pump/valve/selector now also routes through the same owner (2026-07-21).
+The orphaned, never-laid-out connect widgets in `experiment_control_window.py` have been
+deleted (2026-07-21) — see below. Remaining open items: `DeviceManagerDialog`'s
+"Scan && connect" button (still a separate discovery/connect path), B2 (standalone device
+window), B3 (fast reconnect, low priority). Simulated pump/valve/selector devices ("Part B")
+were discussed and explicitly dropped — see below.
 
 ---
 
@@ -12,6 +20,157 @@ The device layer was audited after reports of intermittent discovery failures �
 being found or connected properly on startup. The layer has a solid structural foundation
 (connection registry, serial controller abstraction, profile persistence, V51 numbered labels)
 but contains several concrete bugs that directly cause the failures.
+
+**2026-07-20 follow-up:** a real startup log showed pump and valve failing to connect
+("Port COM12 is busy.", a PermissionError on the wrong port) while spectrometer and selector
+connected fine, plus a multi-second GUI freeze at startup. See R5, R6, O4 below — root-caused
+from that log and fixed the same day.
+
+**2026-07-20, later the same day:** R5/R6/R7/R8/O4 were each individually real fixes, but they
+were all symptoms of one underlying structural problem — see the rewrite summary below, which
+replaced the two-system architecture these items were built around.
+
+---
+
+## 2026-07-20: full device lifecycle rewrite
+
+Every fix in this document up to R8 was a patch on a seam between **two independent systems**
+that both touched the same physical devices without a shared model: a background discovery scan
+(`hardware_initializer.py` + `main_window_hardware_scan.py`) and `experiment_control_window.py`'s
+own port scan + startup auto-connect state machine + connect/disconnect handlers. That duplication
+was the actual root cause behind R5 (double-connect races), R7 (an AMF vendor-SDK thread-safety
+hang), and R8 (stale port pins) — and it caused a fourth incident the same day: the selector would
+connect and home successfully, then silently stop responding to move commands, because a proactive
+health check (`synchronize_device_connections`, gated only during the startup scan) kept running
+for the rest of the session and could silently disconnect a perfectly healthy selector on a flaky
+port-enumeration mismatch.
+
+Rather than patch a fifth instance of the same bug class, the discovery/connect architecture was
+rewritten so there is exactly one owner: **`device/device_lifecycle.py`'s `DeviceLifecycleController`**
+(pure Python, no Qt, fully unit-tested) plus a thin Qt wrapper (`gui/device_lifecycle_task.py`,
+a single-lane `QThreadPool` so no two device operations can ever run concurrently). It owns
+discovery, connect, disconnect, and post-connect setup (the selector's homing, now a pluggable
+hook rather than a hardcoded special case) for spectrometer/pump/valve/selector — for both the
+automatic startup cycle and the manual Connect/Disconnect/Home buttons, which now call the exact
+same code instead of three near-duplicated per-device implementations.
+
+**Deleted entirely** (their function is now owned by the controller): `gui/hardware_initializer.py`,
+`gui/main_window_hardware_scan.py`, `gui/experiment_control_connection.py`, the startup
+auto-connect state machine and three dead `_auto_connect_*` functions in
+`experiment_control_window.py`, and `synchronize_device_connections` (the selector-bug root cause
+— replaced with nothing, since the reactive behavior it existed for already happens for free when
+a real command to a genuinely-gone device fails).
+
+**Superseded-by-design** (the fix still stands, but the code it fixed no longer exists in its
+original form): R1, R5, R6, R7, R8, O4, B1. Their write-ups above are kept for incident history —
+each one is a real bug that really happened and explains *why* the rewrite has the shape it has
+(e.g. the single-lane thread pool exists specifically because of R7; the "connect attempts must
+not mark_manual" rule from R8 is now enforced structurally through `ensure_device_profile()`, the
+one function every connect path calls).
+
+**Also fixed as part of the rewrite, found by testing on real hardware, not by inspection:**
+`ExperimentControlWindow.__init__` (and one bootstrap-finalize method) still called the
+just-deleted state-machine entry point, which crashed panel construction on every launch until
+caught by actually running the app rather than trusting the test suite alone.
+
+Not fully re-verified against real hardware end-to-end (pump/valve connected correctly on this
+machine's real devices during testing; the selector's homing failure seen during testing was a
+genuine hardware "missing main reference" magnet/motor issue, unrelated to this rewrite) — real
+button clicks (Connect/Disconnect/Home) still need first-hand confirmation, since there's no way
+to drive a live Qt GUI from this environment.
+
+---
+
+## 2026-07-21: Device Manager migration, orphaned widgets found, simulated devices dropped
+
+**`experiment_control_window.py`'s own pump/valve/selector connect widgets were dead code —
+now deleted (2026-07-21).** While trying to point the maintainer at the Connect/Disconnect/Home
+buttons for real-hardware click-testing, a full grep of this file's entire git history turned up
+zero `addWidget`/`addRow` calls ever placing `port_combo`, `connection_toggle_button`,
+`mswitch_home_button`, etc. into a layout. They were constructed with `self` as parent and
+visibility-toggled by the `devices_enabled` capability, but never actually laid out — Qt just left
+them unpositioned and invisible behind other widgets. This predated the full rewrite (confirmed via
+`git log -S` across the file's whole history) — the rewrite touched connect *logic*, not
+`_build_ui`'s layout code, so nothing broke there. The maintainer asked for this dead code to be
+resolved; since `DeviceManagerDialog` now fully covers manual connect/disconnect (see below), it
+was deleted rather than wired up. See the "orphaned connect widgets deleted" entry below for what
+was actually removed and the two live pieces of logic that turned out to be tangled in with it.
+
+**The real manual-connect UI is `DeviceManagerDialog`** (Hardware menu → "Device Manager…",
+`device_console_dialog.py`), and until today it called `DeviceCommunicationService.connect`/
+`disconnect` directly — a *third* independent system touching the same devices, bypassing
+`DeviceLifecycleController` entirely (no post-connect hook, so selector homing wouldn't fire on a
+manual reconnect there; no single-lane pool protection, reopening the AMF thread-safety risk R7
+fixed, just via a different door). Fixed: `_connect_selected_profile`/`_disconnect_selected_profile`
+(Connected devices tab) and their Profiles-tab equivalents now check whether the selected label is
+one of the three canonical labels (`pump_1`/`switch_1`/`selector_1`, from `device_label_for()`); if
+so, they dispatch `DeviceConnectTask`/`DeviceDisconnectTask` on `device_io_pool()` — the same path
+the startup cycle uses — instead of calling the service directly. Non-canonical profiles (ad hoc
+ones from the Probe/assign tab) keep the old direct-service behavior unchanged; that generic
+multi-profile diagnostic tooling is legitimately outside the single-owner model. **Not migrated**:
+the same dialog's "Scan && connect" button (`_DiscoverTask`) still discovers and connects
+independently, and registers its own profile labels rather than the canonical ones — a real,
+still-open gap, just not tackled yet.
+
+**Simulated pump/valve/selector devices ("Part B") — discussed, dropped.** The original ask was to
+virtualize serial ports so device communication could be tested without real hardware. Ruled out:
+Windows has no built-in virtual COM-port pairing (`com0com` needs an unsigned kernel driver +
+admin rights), and the AMF selector bypasses pyserial entirely (talks straight to the vendor SDK),
+so no port-level virtualization could cover it anyway. The fallback design considered — object-level
+fake drivers mirroring `SimulatedSpectrometer`, implementing the same `DeviceDriver` ABC — was
+rejected once discussed: it would only exercise `DeviceLifecycleController`'s orchestration (already
+unit-tested), not the actual command-encoding/response-parsing code in `RegloICCClient`/
+`SerialController`, which is what the maintainer actually wanted verified. A narrower alternative
+(a `FakeSerial` test double at the `pyserial` boundary, so pytest could drive the *real* encode/parse
+code without a real port — still selector-incompatible, same SDK reason) was offered but also
+declined; the maintainer judged it unnecessary now that the actual selector bug turned out to be
+architectural (the deleted health-check race), not a protocol bug. No simulated-device work is
+planned; do not re-propose this without the maintainer raising it again.
+
+---
+
+## 2026-07-21: orphaned connect widgets deleted from experiment_control_window.py
+
+Deleted, since `DeviceManagerDialog` (see above) is now the only reachable manual connect UI:
+the pump/valve/selector port combo boxes, Connect/Disconnect/Refresh/Home/Move/"i" buttons and
+their status-dot/detail-label widgets; the generic `_toggle_device_connection`/`_connect_device`/
+`_handle_device_connect_finished`/`_disconnect_device` dispatch built in Phase 3 (never reachable
+from any of those widgets); the per-device `_toggle_*`/`_disconnect_*`/`_set_*_connection_visual`
+wrappers; `_populate_ports`/`_populate_valve_ports`/`_populate_mswitch_ports` and the port-refresh
+task machinery that fed them (`_start_port_refresh`, `_handle_port_refresh_finished/_failed`,
+`_refresh_ports`/`_refresh_valve_ports`/`_refresh_mswitch_ports` and the `_port_refresh_*` state);
+`_ensure_device_profile`'s window-level wrapper (the real implementation in `device_lifecycle.py`
+is untouched); `_apply_probe`/`_clear_probe_labels`; the "remember last selected port" persistence
+in `save_ui_state`/`_restore_ui_state` (meaningless without a combo to pre-select). Roughly 500
+lines removed. `tests/unit/test_device_connections.py` was cut down to just the two still-live
+helpers it covered (`_device_label_for`, `_service_device_connected`) — 15 tests that covered the
+deleted dispatch logic were removed with it, all now-redundant with `test_device_lifecycle.py` and
+`DeviceManagerDialog`'s own migration tests.
+
+**Two pieces of genuinely live logic were tangled in with the dead widgets and had to be
+untangled rather than deleted along with them** — both found only by grepping for every remaining
+reference after the first pass, not by inspection:
+1. `connection_status_label` is not a "pump status" label — reading `_set_status_message`'s ~40
+   call sites (plan run/pause/stop/step-select/import/export feedback, throughout the file) showed
+   it's the *entire panel's* shared status line, just never laid out either. Kept, along with
+   `_set_status_message`/`_refresh_status_line`/`_status_message_base`; only the truly pump-specific
+   half of `_set_connection_visual` (the dead status-dot and dead Connect/Disconnect button text)
+   was trimmed out — it still updates the real status line on every pump connect/disconnect.
+2. `_update_mswitch_state_from_probe` looked purely decorative (it fed the deleted
+   `mswitch_target_spin`/`mswitch_current_value` widgets) and was deleted in the first pass — but it
+   is also called from `_apply_step_to_pump`/`_on_step_apply_async_done`, the real experiment-plan
+   step-execution path, after every switch-move command during a running plan. Restored with the
+   widget-writes stripped, keeping the live `switch.get_position` verification query and its
+   warning-on-failure log. Caught by an exhaustive dangling-reference grep before running tests —
+   the unit test suite would not have caught this (it mocks `self`, so a real `AttributeError`
+   several calls deep in `_apply_step_to_pump` was invisible to it), same lesson as the Phase 3
+   `__init__` crash noted above. A real Qt construction + a real offscreen app launch
+   (`LSPR_ACQ_LAUNCH_PROFILE=control_editor`) were both run clean afterward as an additional check.
+
+Also fixed as part of the same pass: `_build_native_experiment_plan_document` read the pump's model
+name from `self.model_value.text()` (the now-deleted label) for the exported plan file's device
+metadata; repointed to `self._probe.model` directly, which is the actual live source that label was
+mirroring.
 
 ---
 
@@ -105,6 +264,123 @@ def is_probable_port(cls, port: ControllerPort) -> bool:
 
 ---
 
+### R5 — Discovery scan connects pump/valve and leaves them claimed, colliding with the real connect
+**Files:** `main_window_hardware_scan.py` (`_pump_scan_step`, `_valve_scan_step`, `_profile_device_init_step`)
+**Status:** ✅ fixed
+
+`hardware_initializer`'s startup scan is a *discovery* pass — it exists to identify what's
+plugged in. But `_pump_scan_step` and `_valve_scan_step` both called `service.connect(...)`
+after identifying a device and left it connected under an auto-resolved profile label.
+`_profile_device_init_step` (used once a profile is already saved+enabled, i.e. every run
+after the first) did the same. Meanwhile `experiment_control_window.py` runs its own
+*separate* connect pass for the same physical devices (it owns the real "connect for use").
+The second connect attempt collides with the first via the in-process port-claim registry
+(`connection_registry.py`), producing exactly `Port COM12 is busy.` — a real, reproducible
+error message despite there being no actual OS-level conflict.
+
+`_selector_scan_step` never had this bug — it only identifies the device and reports
+`connected=False`, leaving the one real connect to `experiment_control_window`. That's why
+the selector connected reliably while pump and valve did not: the difference wasn't the
+protocol, it was that only pump/valve scan steps eagerly connected-and-held.
+
+**Fix:** Made `_pump_scan_step` and `_valve_scan_step` probe/register only (`connected=False`,
+`state="discovered"`), matching `_selector_scan_step`. Made `_profile_device_init_step`
+disconnect after reading identity instead of leaving the connection open. Discovery no longer
+holds any device open; `experiment_control_window` is the sole "connect for use" owner.
+
+---
+
+### R6 — Valve/pump port auto-selection could pick a stale remembered port over the live scan result
+**File:** `experiment_control_window.py` (`_populate_ports`, `_populate_valve_ports`)
+**Status:** ✅ fixed
+
+Both port-selection functions checked `self._last_selected_port`/`self._last_selected_valve_port`
+(a value persisted from a previous session in `lspr_settings.json`) *before* considering the
+freshly-ranked "most likely" port from the live scan. In one real case this meant a valve
+controller freshly discovered on COM11 was ignored in favor of a stale remembered COM4 (which
+no longer had anything valid on it), producing a `PermissionError`. There was also a dead
+comparison (`get_port_assignment(...) == "valve"`) that could never be true, since that
+function only ever returns `"auto"`, `"pump"`, or `"switch"`.
+
+**Fix:** Re-ordered both functions to a consistent priority: explicit manual port assignment
+first, then the freshly-ranked/likely live-scan result, and only as a last resort — when the
+scan is inconclusive — the remembered port from a previous session. A stale remembered port
+can no longer outrank a live result. `_populate_mswitch_ports` (selector) was checked too and
+does not have this bug: its candidate list is already fully-identified AMF devices (not raw
+serial ports that merely *might* be something), so reusing a remembered selection among them
+is safe as-is.
+
+The original intent behind `_last_selected_*_port` was reportedly a "fast reconnect" idea —
+skip the full scan on session restore and go straight to the last-known-good port. That
+feature was never actually implemented (the scan always runs today; the stale value just won
+the selection race), so this fix keeps the always-scan behavior and does not attempt the fast
+path. See B3 below.
+
+---
+
+### R7 — Health-check sync could race hardware_init's own connect/disconnect on the same device
+**File:** `main_window_titlebar.py` (`refresh_hw_device_status_strip`)
+**Status:** ✅ fixed (found the same day, caused by the R5 fix above)
+
+After the R5 fix, `_profile_device_init_step` briefly connects then disconnects a device to
+verify it (e.g. the selector) instead of leaving it connected. That created a new window where
+`experiment_control_window.synchronize_device_connections()` — which runs on every hardware-init
+step callback via `refresh_hw_device_status_strip` and can call `disconnect_device(...)` on a
+device it thinks is "stale" — could run **concurrently** with hardware_init's own worker-thread
+touch of the *same physical device*. Observed symptom: startup hung indefinitely after
+"Selector failed health check; disconnecting stale connection" / "Selector disconnected." with
+no further log output and no exception — consistent with the AMF vendor SDK (not guaranteed
+thread-safe) blocking forever when hit from two threads at once, while the GUI thread itself
+stayed responsive (the busy spinner kept animating) because the hang was confined to whichever
+background thread got stuck holding the shared device lock.
+
+**Fix:** `refresh_hw_device_status_strip` already computed `init_active` (hardware-init running)
+for display purposes but didn't use it to gate the sync call. Now `synchronize_device_connections()`
+is skipped entirely while `init_active` is true — hardware_init owns device connect/disconnect
+during its own scan; the health-check sync only runs once the scan has finished.
+
+Could not be verified against real AMF hardware in this environment (no devices attached) — if
+a similar stall recurs, check whether it's specifically the AMF/selector step, since that vendor
+SDK is the one un-auditable black box in this chain.
+
+---
+
+### R8 — Every connect attempt permanently pinned the port as a manual assignment
+**Files:** `device_manager.py` (`register_endpoint_assignment`), `experiment_control_window.py`
+(`_ensure_device_profile`), `main_window_hardware_scan.py` (`_valve_scan_step`)
+**Status:** ✅ fixed
+
+The R6 fix (above) made port auto-selection correctly prefer manual assignment > live scan
+ranking > remembered port. That surfaced a deeper, pre-existing bug: `register_endpoint_assignment`
+unconditionally called `set_port_assignment(...)`, permanently pinning whatever port was passed
+as a "manual" assignment - on **every** call, not just genuine user pins. `_ensure_device_profile`
+(the single choke point behind both the automatic startup auto-connect sequence and the regular
+"Connect" button) calls this on every attempt, success or failure, before the connect even runs.
+
+Since Windows COM port numbers shift over sessions as USB devices get replugged, this had
+silently accumulated **five stale, partly-conflicting pins** in this installation's settings:
+`COM10→switch`, `COM4→switch`, `COM6→switch`, `COM8→pump`, `COM12→pump`. Only one "switch" pin
+can ever be current; the rest were leftovers outranking live discovery, which is exactly why the
+valve kept connecting on a dead COM4 even after R6 fixed the ranking logic itself - the "manual"
+tier that R6 correctly prioritizes was poisoned with stale data.
+
+Also fixed a related dead comparison in `_valve_scan_step`'s `preferred_ports` filter: it checked
+`get_port_assignment(port.device) == "valve"`, a value `get_port_assignment` can never return
+(only `"auto"` / `"pump"` / `"switch"` - see `port_assignments.py:DeviceAssignment`), so that
+filter was always empty. Changed to `"switch"`, matching the constant used everywhere else.
+
+**Fix:** `register_endpoint_assignment` gained a `mark_manual: bool = True` parameter.
+`_ensure_device_profile` now passes `mark_manual=False` - connect attempts (automatic or manual
+button click) register/update the device profile so `connect()` knows the endpoint, but no
+longer pin a permanent assignment as a side effect. The dedicated, genuinely-manual "assign this
+port" action in `device_console_dialog.py` (`_assign_selected_endpoint`) is unaffected - it keeps
+the default `mark_manual=True` and also explicitly calls `set_port_assignment` itself. The five
+stale entries already in this installation's `lspr_settings.json` were cleared (backed up first
+to `lspr_settings.json.pre_assignment_cleanup_<timestamp>` in the same folder) so the fix takes
+effect immediately rather than only preventing new staleness.
+
+---
+
 ## Issues — Orange (fix soon, logic errors)
 
 ### O1 — `RegloICCClient.get_probe()` calls `int()` without error handling
@@ -152,6 +428,27 @@ same owner string, two distinct `RegloICCClient` instances can both claim the sa
 simultaneously — defeating the registry's exclusive-access guarantee.
 
 **Fix:** Instance-unique owner: `self._claim_owner = f"reglo-icc:{id(self)}"`.
+
+---
+
+### O4 — Startup step-list build ran synchronously on the GUI thread, freezing the app
+**Files:** `main_window_hardware_scan.py` (`hardware_init_steps_for`), `hardware_initializer.py`
+(`HardwareInitTask`), `main_window_lifecycle.py` (`start_hardware_initialization_for`)
+**Status:** ✅ fixed
+
+The per-device *probes* genuinely ran on a background `QThreadPool` worker (the "Hardware init
+worker" thread). But the list of steps handed to that worker was built by calling
+`hardware_init_steps_for(window)` **before** constructing `HardwareInitTask`, i.e. on the GUI
+thread. That function enumerates serial ports and also calls the AMF vendor SDK
+(`amfTools.util.getProductList()`) directly — a known multi-second blocking USB enumeration.
+So the "background" scan actually began with a synchronous multi-second block on the GUI
+thread, which is what produced the multi-second freeze at startup.
+
+**Fix:** `HardwareInitTask` now takes a `steps_factory` callable instead of a pre-built list,
+and calls it inside `run()` — which already executes on the worker thread. The call site
+changed from `HardwareInitTask(window._hardware_init_steps())` to
+`HardwareInitTask(window._hardware_init_steps)` (passing the method, not its result). Verified
+with a smoke test that the factory now runs on a worker thread, not `MainThread`.
 
 ---
 
@@ -263,6 +560,26 @@ commands without running an experiment.
 
 ---
 
+### B3 — Fast reconnect to last-known ports on session restore (low priority)
+**Status:** ⬜ pending (low priority, roadmap)
+
+Today every startup always runs a full device scan/re-rank (see R6 fix above — the
+alternative of trusting a remembered port without re-verifying it was removed as the source
+of a real bug, not replaced with a working fast path). A full scan is safe but not
+instant — the AMF/serial enumeration alone can take a few seconds even after the O4 threading
+fix moves it off the GUI thread.
+
+**Idea:** if the previous session's last-known port for a device is still present *and* a
+lightweight re-probe on that specific port confirms it's still the same device (matching
+fingerprint/identity), connect directly instead of waiting for the full ranked scan across
+all ports. This must re-verify the device on that port before trusting it — silently reusing
+a remembered port without re-checking is exactly what R6 just removed, and re-introducing that
+without verification would reintroduce the same bug.
+
+Deliberately deferred: the full-scan behavior is correct and not urgent to optimize.
+
+---
+
 ## ItsyBitsy firmware upgrade recommendations
 
 The ItsyBitsy 32u4 valve controller currently supports:
@@ -303,3 +620,19 @@ change: `serial_number` currently duplicates `protocol_version`, which wastes th
 11. Y2 — Default profile metadata flag
 12. B1 — Multi-device init result
 13. B2 — Standalone device window (feature sprint)
+14. R5 — Discovery scan no longer eagerly connects pump/valve (2026-07-20)
+15. R6 — Port auto-selection prefers live scan over stale remembered port (2026-07-20)
+16. O4 — Step-list build moved off the GUI thread (2026-07-20)
+17. R7 — Health-check sync no longer races hardware_init's own device touches (2026-07-20)
+18. R8 — Connect attempts no longer permanently pin ports as manual assignments (2026-07-20)
+19. Full device lifecycle rewrite — single owner (`DeviceLifecycleController`) replaces the
+    two-system architecture behind R1/R5/R6/R7/R8/O4/B1; `synchronize_device_connections`
+    (the selector mid-session disconnect bug) deleted; `hardware_initializer.py`/
+    `main_window_hardware_scan.py`/`experiment_control_connection.py` deleted (2026-07-20)
+20. B3 — Fast reconnect to last-known ports (low priority, not started)
+21. B2 — Standalone device test window (not started)
+22. `DeviceManagerDialog` Connect/Disconnect for canonical pump/valve/selector migrated to
+    `DeviceLifecycleController` (2026-07-21) — "Scan && connect" in the same dialog not migrated
+23. Orphaned, never-laid-out connect widgets found and deleted from `experiment_control_window.py`
+    (2026-07-21) — ~500 lines removed; DeviceManagerDialog is now the sole manual-connect UI
+24. Simulated pump/valve/selector devices ("Part B") — discussed and dropped (2026-07-21)

@@ -23,11 +23,22 @@ from PyQt6.QtWidgets import (
 
 from lspr_app.device.amf_mswitch import amf_tools_available, detect_amf_selector_devices
 from lspr_app.device.communication_models import DeviceCommand, DeviceEvent, DeviceProfile, next_device_label, new_device_profile
+from lspr_app.device.device_lifecycle import DeviceLifecycleController, DeviceLifecycleEvent, device_label_for
 from lspr_app.device.device_manager import DeviceCommunicationService, extract_usb_fingerprint
+from lspr_app.device.device_types import PUMP, SELECTOR, SWITCH
 from lspr_app.device.port_assignments import device_assignment_label, set_port_assignment
 from lspr_app.device.probe_diagnostics import snapshot_port_probe_events
 from lspr_app.device.reglo_icc import RegloICCClient, is_probable_reglo_port
 from lspr_app.device.serial_controllers import SerialController, controller_port_priority
+from lspr_app.gui.device_lifecycle_task import DeviceConnectTask, DeviceDisconnectTask, device_io_pool
+
+# Connect/Disconnect for these three labels must go through DeviceLifecycleController,
+# not DeviceCommunicationService directly - it is the single owner of connect/disconnect
+# for the app's canonical pump/valve/selector (post-connect hooks like selector homing,
+# and the single-lane device I/O pool, only run through it). Other, non-canonical
+# profiles (e.g. ones created ad hoc via Probe/assign) keep using the service directly -
+# this dialog's generic multi-profile management is legitimately out of that model's scope.
+_CANONICAL_LABEL_TO_DEVICE_KEY = {device_label_for(key): key for key in (PUMP, SWITCH, SELECTOR)}
 
 
 class _TaskSignals(QObject):
@@ -630,6 +641,10 @@ class DeviceManagerDialog(QDialog):
         if not label:
             QMessageBox.information(self, "Connect", "Select a profile first.")
             return
+        device_key = _CANONICAL_LABEL_TO_DEVICE_KEY.get(label)
+        if device_key is not None:
+            self._connect_canonical_device(device_key, label)
+            return
         try:
             self._service.connect(label)
         except Exception as exc:
@@ -641,6 +656,10 @@ class DeviceManagerDialog(QDialog):
         label = self._selected_profile_label()
         if not label:
             QMessageBox.information(self, "Disconnect", "Select a profile first.")
+            return
+        device_key = _CANONICAL_LABEL_TO_DEVICE_KEY.get(label)
+        if device_key is not None:
+            self._disconnect_canonical_device(device_key)
             return
         try:
             self._service.disconnect(label)
@@ -785,6 +804,10 @@ class DeviceManagerDialog(QDialog):
         if not label:
             QMessageBox.information(self, "Connect", "Select a device row first.")
             return
+        device_key = _CANONICAL_LABEL_TO_DEVICE_KEY.get(label)
+        if device_key is not None:
+            self._connect_canonical_device(device_key, label)
+            return
         try:
             self._service.connect(label)
         except Exception as exc:
@@ -797,8 +820,52 @@ class DeviceManagerDialog(QDialog):
         if not label:
             QMessageBox.information(self, "Disconnect", "Select a device row first.")
             return
+        device_key = _CANONICAL_LABEL_TO_DEVICE_KEY.get(label)
+        if device_key is not None:
+            self._disconnect_canonical_device(device_key)
+            return
         self._service.disconnect_device(label)
         self.refresh_connected_devices()
+
+    # -------------------------------------------------------------------------
+    # Canonical pump/valve/selector connect+disconnect - routed through
+    # DeviceLifecycleController so post-connect hooks (selector homing) and the
+    # single-lane device I/O pool apply to manual clicks here exactly like they
+    # do to the startup cycle and any other caller.
+    # -------------------------------------------------------------------------
+
+    def _connect_canonical_device(self, device_key: str, label: str) -> None:
+        controller = DeviceLifecycleController.shared()
+        if controller.is_busy(device_key):
+            QMessageBox.information(self, "Connect", "This device is already connecting or disconnecting. Please wait.")
+            return
+        profile = self._service.get_profile(label)
+        port = (profile.endpoint or "").strip() if profile is not None else ""
+        if not port:
+            QMessageBox.information(
+                self,
+                "Connect",
+                "No known port for this device yet. Use \"Scan && connect\" or the Probe / assign tab first.",
+            )
+            return
+        task = DeviceConnectTask(device_key, port)
+        task.signals.finished.connect(self._on_canonical_device_event)
+        device_io_pool().start(task)
+
+    def _disconnect_canonical_device(self, device_key: str) -> None:
+        controller = DeviceLifecycleController.shared()
+        if controller.is_busy(device_key):
+            QMessageBox.information(self, "Disconnect", "This device is already connecting or disconnecting. Please wait.")
+            return
+        task = DeviceDisconnectTask(device_key)
+        task.signals.finished.connect(self._on_canonical_device_event)
+        device_io_pool().start(task)
+
+    def _on_canonical_device_event(self, event: object) -> None:
+        self.refresh_connected_devices()
+        self.refresh_profiles()
+        if isinstance(event, DeviceLifecycleEvent) and event.error:
+            QMessageBox.warning(self, "Device connect/disconnect", event.message)
 
     def _test_selected_profile(self) -> None:
         label = self._selected_connected_label()

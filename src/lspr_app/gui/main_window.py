@@ -325,10 +325,7 @@ from lspr_app.gui.spectrum_plot_controller import (
     update_residual_axis_visibility,
     update_residual_view_geometry,
 )
-from lspr_app.gui.hardware_initializer import (
-    HardwareInitStep,
-    HardwareInitTask,
-)
+from lspr_app.gui.device_lifecycle_task import DeviceLifecycleCycleTask
 from lspr_app.gui.device_console_dialog import show_device_manager_dialog
 from lspr_app.gui.workers import (
     AcquisitionResult,
@@ -355,7 +352,6 @@ from lspr_app.gui.widgets import (
 from lspr_app.gui.main_window_plot_widgets import (
     TimedPlotWidget,
 )
-from lspr_app.gui.main_window_hardware_scan import hardware_init_steps_for
 from lspr_app.gui.main_window_style import apply_modern_style_for, style_plot_widgets_for
 from lspr_app.gui.main_window_startup_diagnostics import (
     close_startup_splash_for,
@@ -789,7 +785,7 @@ class MainWindow(QMainWindow):
         self._last_ui_state_delay_ms: float | None = None
         self._last_ui_state_save_ms: float | None = None
         self._last_ui_state_total_ms: float | None = None
-        self._hardware_init_task: HardwareInitTask | None = None
+        self._hardware_init_task: DeviceLifecycleCycleTask | None = None
         self._hardware_init_scheduled = False
         self._spectrum_cursor_text = "cursor: -"
         self._trace_cursor_text = "cursor: -"
@@ -802,7 +798,7 @@ class MainWindow(QMainWindow):
         self._mswitch_probe = None
         self._initial_mswitch_devices: list[object] = []
         self._hardware_init_ready_emitted = False
-        self._hardware_status_overrides: dict[str, tuple[bool, str]] = {}
+        self._device_activity_text: dict[str, str] = {}
         self.session_statistics_text: QTextEdit | None = None
         self.session_settings_text: QTextEdit | None = None
         self.session_summary: QTextEdit | None = None
@@ -2546,8 +2542,6 @@ class MainWindow(QMainWindow):
             button.setToolTip("Start session log recording and save the text log to the experiment folder.")
             button.setChecked(False)
 
-    def _hardware_init_steps(self) -> list[HardwareInitStep]:
-        return hardware_init_steps_for(self)
     def _emit_hardware_init_progress(self, percent: int, text: str) -> None:
         self.hardware_init_progress.emit(max(0, min(int(percent), 100)), str(text))
 

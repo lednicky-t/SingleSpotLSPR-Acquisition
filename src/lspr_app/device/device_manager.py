@@ -455,7 +455,29 @@ class DeviceCommunicationService:
                     self._profiles.setdefault(profile.label, profile)
             self.save_profiles()
 
-    def register_endpoint_assignment(self, label: str, endpoint: str, device_type: str = "auto", driver: str = "auto", role: str | None = None) -> DeviceProfile:
+    def register_endpoint_assignment(
+        self,
+        label: str,
+        endpoint: str,
+        device_type: str = "auto",
+        driver: str = "auto",
+        role: str | None = None,
+        *,
+        mark_manual: bool = True,
+    ) -> DeviceProfile:
+        """Register/update a device profile's endpoint.
+
+        *mark_manual* controls whether *endpoint* is also pinned in the
+        persistent port-assignment store (``set_port_assignment``), which
+        future scans treat as an explicit, permanent user override that
+        outranks live discovery. Callers that merely attempt a connect
+        (automatic startup auto-connect, or a user clicking "Connect" on
+        whatever the scan currently has selected) must pass
+        ``mark_manual=False`` - pinning on every attempt, success or
+        failure, is what let stale/wrong ports (from COM numbers shifting
+        across sessions) permanently outrank fresh scan results. Only a
+        deliberate, dedicated "assign this port" action should pin.
+        """
         with self._device_lock(f"register_endpoint:{label}"):
             normalized_label = str(label or "").strip()
             if not normalized_label:
@@ -465,7 +487,7 @@ class DeviceCommunicationService:
             normalized_endpoint = _normalize_endpoint_value(endpoint)
             profile = new_device_profile(label=normalized_label, type=normalized_type, driver=driver, endpoint=normalized_endpoint, role=role)
             self._profiles[normalized_label] = profile
-            if normalized_endpoint:
+            if normalized_endpoint and mark_manual:
                 set_port_assignment(normalized_endpoint, device_assignment_label(normalized_type))
             self.save_profiles()
             return profile
@@ -710,16 +732,22 @@ class DeviceCommunicationService:
         return controller, controller.get_probe()
 
     def refresh_device_ports(self, generation: int) -> object:
-        pump_ports = RegloICCClient.list_ports()
-        valve_ports = SerialController.list_ports()
-        selector_devices = detect_amf_selector_devices() if amf_tools_available() else []
-        return PortRefreshData(
-            generation=generation,
-            pump_ports=list(pump_ports),
-            valve_ports=list(valve_ports),
-            selector_devices=list(selector_devices),
-            amf_tools_available=amf_tools_available(),
-        )
+        # Locked like every other public mutator (connect/disconnect/send_command):
+        # the AMF vendor SDK enumeration here is not guaranteed thread-safe against
+        # a concurrent connect/command on the same physical device (see R7/R8 in
+        # docs/device-layer/DEVICE_LAYER_AUDIT_2026.md). This was the one method
+        # missing the lock.
+        with self._device_lock("refresh_device_ports"):
+            pump_ports = RegloICCClient.list_ports()
+            valve_ports = SerialController.list_ports()
+            selector_devices = detect_amf_selector_devices() if amf_tools_available() else []
+            return PortRefreshData(
+                generation=generation,
+                pump_ports=list(pump_ports),
+                valve_ports=list(valve_ports),
+                selector_devices=list(selector_devices),
+                amf_tools_available=amf_tools_available(),
+            )
 
     def probe_pump_port(self, port: str):
         return RegloICCClient.probe_port(port)
