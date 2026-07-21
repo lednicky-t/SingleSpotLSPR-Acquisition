@@ -13,7 +13,10 @@ unlocked-hardware-I/O gap in `probe_endpoint()` and a port-claim identity bug sh
 AMF and generic serial-controller drivers. A follow-up report ("selector homes but doesn't
 react during a running plan") traced to `_apply_step_to_pump_async` dispatching real device
 commands, including `switch.move_to`, on the general-purpose `QThreadPool` instead of
-`device_io_pool()` — fixed 2026-07-21, see below. Remaining open items: `DeviceManagerDialog`'s
+`device_io_pool()` — fixed 2026-07-21. A further report ("UI freezes during device
+initialization") traced to GUI-thread status-display code sharing a lock with the slow real
+connect/probe calls happening on `device_io_pool` — fixed 2026-07-21 with a non-blocking
+cached-status read, see below. Remaining open items: `DeviceManagerDialog`'s
 "Scan && connect" button (still a separate discovery/connect path), B2 (standalone device
 window - `hardware_inventory.py` appears to be pre-built, unwired scaffolding for this),
 B3 (fast reconnect, low priority). Simulated pump/valve/selector devices ("Part B")
@@ -290,6 +293,72 @@ without checking in first, since it touches core run/pause/resume control flow.
 
 Verified: full test suite (213 tests) green, pyflakes clean, panel constructs cleanly with the
 fix applied.
+
+---
+
+## 2026-07-21: UI freezes during device initialization
+
+Reported: the whole app UI freezes/stalls while devices are initializing at startup, and the
+request was to make the UI independent of device state - never wait, stay responsive.
+
+**Root cause: GUI-thread status-display code was calling the same locked, live
+`DeviceCommunicationService` methods the startup cycle uses for real hardware I/O.**
+`connect`/`disconnect`/`send_command`/`probe_endpoint`/`refresh_device_ports` all hold
+`self._lock` for their *entire* duration - correct and necessary, that's what serializes
+hardware access. But `is_connected`/`connection`/`status` etc. also acquire the *same* lock
+(`with self._lock: ...`), and several GUI-thread call sites invoke those during the startup
+window, once per device-lifecycle event:
+- `main_window_titlebar.py`'s `refresh_hw_device_status_strip` (fired on every `device_event`
+  during the cycle - "connecting", "post_connect", "ready", per device)
+- `experiment_control_window.py`'s `_sync_pump_from_controller`/`_sync_valve_from_controller`/
+  `_sync_mswitch_from_controller` (called from `sync_from_lifecycle_controller`, itself called
+  once during panel construction and again when bootstrap finishes - both of which can land
+  while the cycle is still running)
+
+`DeviceLifecycleController.run_full_cycle`'s `_emit` closure updates `self._last_event[device_key]`
+*before* emitting the Qt signal that triggers these GUI-thread handlers - so a "connecting..."
+event fires essentially the same moment `DeviceCommunicationService.connect()` starts and takes
+the lock for however long the real connect takes (multiple probe attempts at up to ~0.75 s each
+are realistic for the pump). The GUI-thread handler's `is_connected()` call then blocks trying to
+acquire that same lock - freezing the *entire* UI (single Qt event loop) for the duration of that
+device's connect, repeated for each of pump/valve/selector. Confirmed with a targeted script: a
+simulated slow connect holding the lock for 1.5 s made `is_connected()` take 1400 ms; the fix
+below took 0.0 ms under the same conditions.
+
+**Fix: added `DeviceLifecycleController.is_connected_cached()`**, which reads only
+`self._last_event` (no lock, never blocks) instead of querying the service live. Correct here
+because `_last_event` is written on the same thread as the emit, before the cross-thread signal
+that triggers the GUI-thread reader - it's never stale relative to what the UI is reacting to.
+Switched the GUI-thread display call sites above to use it. **Deliberately not changed**:
+`experiment_control_window._service_device_connected` and anything that gates a real device
+action (deciding whether to send a command, home, etc.) - those keep using the live, authoritative
+`is_connected()`/`DeviceCommunicationService.is_connected()` directly. Using stale cached data to
+decide whether to *act* on a device would be a real correctness bug, not just a UI polish issue;
+this fix only touches status *display*.
+
+Also found and fixed in the same pass: `_sync_pump_from_controller` and
+`ExperimentControlWindow._sync_device_connections_from_service` (called once during panel
+construction) both called `DeviceCommunicationService.connection()` - live, locked, same blocking
+risk - purely to set `self._client`, which turned out to be write-only: grepped the whole app,
+nothing ever reads it. Removed both the dead assignment and the now-pointless
+`_sync_device_connections_from_service` method entirely. Also removed `ExperimentControlWindow.
+__init__`'s own unconditional `sync_from_lifecycle_controller()` call - its signal emissions
+(`availability_changed` etc.) were provably discarded, since the caller (`ensure_experiment_control_
+panel_for`) only connects those signals *after* the constructor returns; the real sync already
+happens later, in `_finalize_experiment_control_bootstrap_population`, after signals are connected.
+
+**Deliberately not changed**: `DeviceCommunicationService`'s single-lock design itself. Splitting
+it into a fast state-lock (for reads) and a slow hardware-I/O lock (for real device operations)
+would be the more thorough fix, and would also help the `shutdown_all`/`rerun_post_connect`-style
+internal callers - but it means restructuring the locking inside `_connect_impl`/`_disconnect_impl`/
+`send_command`, the most safety-critical code in this file, with zero existing test coverage for
+`device_manager.py` itself. Per the engineering priority order (correctness/data integrity above
+GUI responsiveness), that's a larger, riskier change to make without discussing it first - this
+session's fix resolves the reported freeze without touching the hardware-serialization guarantee
+at all.
+
+Verified: full test suite (213 tests) green, pyflakes clean, and a standalone script proving the
+exact freeze mechanism and confirming the fix (see above).
 
 ---
 

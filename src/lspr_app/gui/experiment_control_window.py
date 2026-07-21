@@ -582,7 +582,6 @@ class ExperimentControlWindow(QWidget):
         self._set_switch_solution_mode(self._switch_solution_mode)
         self._connect_signals()
         self._apply_capabilities_to_ui()
-        self._sync_device_connections_from_service()
         self._update_time_unit_ui()
         self._experiment_control_edit_controller.set_edit_mode(False)
         self._update_experiment_control_toggle_button()
@@ -592,10 +591,12 @@ class ExperimentControlWindow(QWidget):
         self._set_manual_uniform_mode(self.manual_uniform_button.isChecked())
         self._set_connection_visual(False, "Pump not connected.")
         self._suppress_plan_table_layout_save = False
-        # Mirror whatever DeviceLifecycleController has already connected by
-        # this point (harmless/idempotent if the startup cycle hasn't reached
-        # here yet - every device just shows not-connected, which is true).
-        self.sync_from_lifecycle_controller()
+        # Not calling sync_from_lifecycle_controller() here: availability_changed
+        # and friends aren't connected to anything yet at this point in
+        # construction (the caller connects them right after this constructor
+        # returns), so any emission here would be discarded, and the real sync
+        # already happens in _finalize_experiment_control_bootstrap_population
+        # once bootstrap finishes - after signals are connected.
         self._startup_ui_pending = False
         self._set_switch_solution_mode(self._switch_solution_mode)
         _LOGGER.info("Experiment control bootstrap +%.1f ms: constructor finished", (perf_counter() - self._bootstrap_t0) * 1000.0)
@@ -3447,10 +3448,6 @@ class ExperimentControlWindow(QWidget):
     def _device_label_for(self, device_key: str) -> str:
         return device_label_for(device_key)
 
-    def _sync_device_connections_from_service(self) -> None:
-        pump = self._device_comm_service.connection(self._device_label_for("pump"))
-        self._client = pump if pump is not None else None
-
     def sync_from_lifecycle_controller(self) -> None:
         """Mirror DeviceLifecycleController's already-finished state into this
         panel's internal probe/client state, the shared status line, and the
@@ -3470,24 +3467,27 @@ class ExperimentControlWindow(QWidget):
         self._sync_mswitch_from_controller(controller)
 
     def _sync_pump_from_controller(self, controller: DeviceLifecycleController) -> None:
-        if controller.is_connected(PUMP):
+        # is_connected_cached(), not is_connected(): this can run while
+        # device_io_pool is still mid-cycle (see sync_from_lifecycle_controller's
+        # docstring and docs/device-layer/DEVICE_LAYER_AUDIT_2026.md, "UI
+        # freezes during device initialization") - the live call would block
+        # the GUI thread for as long as whatever's currently connecting.
+        if controller.is_connected_cached(PUMP):
             probe = controller.probe_for(PUMP)
             port = str(getattr(probe, "port", "") or "")
             self._probe = probe
-            self._client = self._device_comm_service.connection(self._device_label_for(PUMP))
             model = getattr(probe, "model", "") or "pump"
             self._set_connection_visual(True, f"Connected to {model} on {port or 'unknown port'}.")
             self.availability_changed.emit(probe)
         else:
             self._probe = None
-            self._client = None
             event = controller.last_event(PUMP)
             message = event.message if event is not None and event.message else "Pump offline."
             self._set_connection_visual(False, message)
             self.availability_changed.emit(None)
 
     def _sync_valve_from_controller(self, controller: DeviceLifecycleController) -> None:
-        if controller.is_connected(SWITCH):
+        if controller.is_connected_cached(SWITCH):
             probe = controller.probe_for(SWITCH)
             self._valve_probe = probe
             self.valve_availability_changed.emit(probe)
@@ -3496,7 +3496,7 @@ class ExperimentControlWindow(QWidget):
             self.valve_availability_changed.emit(None)
 
     def _sync_mswitch_from_controller(self, controller: DeviceLifecycleController) -> None:
-        if controller.is_connected(SELECTOR):
+        if controller.is_connected_cached(SELECTOR):
             probe = controller.probe_for(SELECTOR)
             self._mswitch_probe = probe
             self.mswitch_availability_changed.emit(probe)

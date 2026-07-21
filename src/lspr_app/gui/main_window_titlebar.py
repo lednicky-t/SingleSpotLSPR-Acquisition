@@ -153,6 +153,13 @@ def refresh_hw_device_status_strip(window) -> None:
     experiment_control_window's own attributes. This also means the strip
     stays accurate even when the panel hasn't been constructed yet (it used
     to show everything as disconnected in that case, even mid-cycle).
+
+    Uses is_connected_cached(), not is_connected(): this runs on the GUI
+    thread, triggered once per device_event during the startup cycle - the
+    live is_connected() would block the whole UI for as long as whatever
+    connect/probe/command is currently in progress on device_io_pool's
+    worker thread (see docs/device-layer/DEVICE_LAYER_AUDIT_2026.md, "UI
+    freezes during device initialization").
     """
     items = getattr(window, "_hw_status_items", None)
     if not items:
@@ -177,7 +184,7 @@ def refresh_hw_device_status_strip(window) -> None:
 
     devices = {"spectrometer": ("connected" if bool(window._hardware_available) else "disconnected", "")}
     for titlebar_key, device_key in _TITLEBAR_KEY_TO_DEVICE_KEY.items():
-        connected = controller.is_connected(device_key)
+        connected = controller.is_connected_cached(device_key)
         probe = controller.probe_for(device_key)
         state = device_status_state(connected, probe is not None)
         devices[titlebar_key] = (state, _port_name(probe))

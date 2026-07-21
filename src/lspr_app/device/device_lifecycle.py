@@ -285,6 +285,25 @@ class DeviceLifecycleController:
     def is_connected(self, device_key: str) -> bool:
         return bool(self._service.is_connected(device_label_for(device_key)))
 
+    def is_connected_cached(self, device_key: str) -> bool:
+        """Best-effort connection state from the last known lifecycle event,
+        for GUI-thread display code that must never block.
+
+        is_connected() queries DeviceCommunicationService live, which holds a
+        lock for the full duration of any in-progress connect/disconnect/
+        command/probe/discover - correct for anything gating a real device
+        action, but if called from the GUI thread while device_io_pool is
+        mid-operation (e.g. the startup cycle actively connecting a device),
+        it blocks the entire UI for however long that operation takes. This
+        reads only self._last_event (updated synchronously, before the
+        cross-thread signal that would trigger a GUI-thread caller in the
+        first place, so it's never stale relative to what the UI is
+        reacting to) - no lock, never blocks. Use this for status display;
+        keep using is_connected() wherever the answer gates a real action.
+        """
+        event = self._last_event.get(device_key)
+        return bool(event is not None and event.connected)
+
     def probe_for(self, device_key: str) -> object | None:
         event = self._last_event.get(device_key)
         return event.probe if event is not None else None
