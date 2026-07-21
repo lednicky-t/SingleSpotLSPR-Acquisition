@@ -1126,6 +1126,11 @@ def render_metric_series(
     recent_tail_points = max(int(getattr(window, "_sensorgram_compression_recent_tail_points", 300)), 0)
     envelope_bands = getattr(window, "trace_metric_envelope_bands", None)
     overlay_enabled = bool(getattr(window, "_sensorgram_metric_envelope_overlay_enabled", False))
+    # Was reassigned every loop iteration below despite always being this same
+    # literal - if every curve in a given refresh is empty/deselected (e.g.
+    # right at the start of live acquisition), the loop body that set it never
+    # ran, and the read after the loop raised UnboundLocalError.
+    view_mode = "absolute"
 
     def _update_metric_envelope_overlay(
         metric_name: str,
@@ -1194,7 +1199,6 @@ def render_metric_series(
         display_y = y
         overlay_data = None
         view_started = perf_counter()
-        view_mode = "absolute"
         if cache is not None and view_mode == "absolute" and not trace_view_locked and bool(getattr(window, "_live_active", False)):
             live_display = cache.live_absolute_metric_view(
                 metric_name,
