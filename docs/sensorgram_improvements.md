@@ -15,10 +15,22 @@ concept — not the `view_mode` local variable in `plot_controller.py`'s `render
 `ensure_session_writer`/`close_session_writer` — a single HDF5 file spanning the whole app
 session, closed only at app close); `"measurement"` mode shows only the currently-recording
 file. It auto-switches on measurement start/stop and can be changed manually in Sensorgram
-Settings. There is no dedicated `SensorgramDisplayState`-style object unifying this with the
+Settings. There was no dedicated `SensorgramDisplayState`-style object unifying this with the
 other five loosely-related display flags (`_trace_view_locked`, `_live_active`,
 `_sensorgram_frozen`, `_plots_frozen`, `_sensorgram_metric_archive_reload_loading`) — flagged as
-a separate, larger consolidation task, not done here.
+a separate, larger consolidation task at the time. Done as of the 2026-07-22 update below.
+
+**2026-07-22 update:** consolidated four of the six display flags flagged above into
+`gui/sensorgram_display_state.py`'s `SensorgramDisplayState` — see "Correctness fixes" C4 below
+for the real bug this uncovered and fixed along the way. `_sensorgram_display_mode`,
+`_trace_view_locked`, `_sensorgram_frozen`, and `_sensorgram_metric_archive_reload_loading` (plus
+its three sibling reload-bookkeeping fields) are now properties on `MainWindow` delegating to one
+`self._sensorgram_display` instance, so they can't drift out of sync with each other internally,
+while every existing call site keeps working unchanged (property shims are transparent to
+`getattr`/`setattr`/`hasattr`). `_live_active` stays external and untouched — it's fundamentally
+an acquisition-loop flag (40+ read sites in `acquisition_controller.py`), not a display flag; the
+consolidated object reads it as a dependency where needed rather than absorbing it.
+`_plots_frozen` also stays external — see C4, it turned out not to belong here at all.
 
 ---
 
@@ -99,6 +111,44 @@ nonsense epoch-scale axis). Fixed alongside this change — see `_score_time_can
 **Risk:** Medium — breaking schema change (major version bump 5.2 → 6.0); old files remain
 readable (readers only warn, not error, on an older major), but this session's own smoke tests
 plus the full test suite must confirm nothing else depended on the removed column.
+
+### C4 — 2026-07-22: "freeze sensorgram" didn't independently freeze anything; consolidated into `SensorgramDisplayState`
+**Files:** `gui/sensorgram_display_state.py` (new), `gui/main_window.py`, `gui/plot_controller.py`,
+`gui/acquisition_controller.py`
+**Symptom, found while designing the display-flag consolidation flagged in the 2026-07-21 update
+above:** "Freeze plots" (next to the spectrum controls) and "Freeze sensorgram" (next to the
+sensorgram's own controls) look like they should each freeze only their own plot, independently.
+They didn't: `refresh_metric_plot()` — the single low-level function that actually redraws the
+sensorgram, which every one of the ~13 call sites of `window._refresh_trace_plot(...)` funnels
+through — checked `_plots_frozen`, not `_sensorgram_frozen`. So freezing the spectrum plot also
+silently froze the sensorgram as a side effect, and "freeze sensorgram" alone didn't reliably
+freeze anything (`_sensorgram_frozen` only gated 3 minor "should I schedule a refresh" call
+sites, none of which is the actual draw function).
+**Fix:** `plot_controller.py:1007` now checks `_sensorgram_frozen` instead of `_plots_frozen` -
+this single-line change, at the one real chokepoint, fixes all ~13 call sites at once. Each
+freeze button now correctly and independently freezes only its own plot.
+**Consolidation:** `_sensorgram_display_mode`, `_trace_view_locked`, `_sensorgram_frozen` (now
+correct), and the archive-reload bookkeeping (`_sensorgram_metric_archive_reload_loading` + 3
+sibling fields) moved into one `SensorgramDisplayState` dataclass
+(`gui/sensorgram_display_state.py`), exposed on `MainWindow` as property shims under the old
+attribute names so every existing call site keeps working unchanged. `start_measurement_run()`/
+`stop_measurement_run()` now use its `begin_measurement()`/`end_measurement()` helpers, which also
+fixed a latent asymmetry: starting a measurement now releases a stale pan/zoom lock (matching what
+stopping already did), so the view correctly re-follows once a new recording starts instead of
+silently staying locked from a previous session-view interaction.
+**Explicitly NOT merged in:** `_plots_frozen` turned out to be a genuinely separate, spectrum-only
+concern (confirmed via `enqueue_plot_processing_for`/`refresh_spectrum_plot_for`/
+`_autoscale_spectrum_plot`, all spectrum-specific) and doesn't belong in a "sensorgram" state
+object at all — it stays a plain attribute, untouched. `_live_active` stays external too (an
+acquisition-loop flag, not a display flag).
+**Effort:** Small-Medium (~90 lines: one new file, one bug-fix line, ~70 lines of property shims,
+two call-site swaps to the atomic helpers)
+**Risk:** Low for the consolidation itself (property shims are transparent to every existing
+`getattr`/`setattr`/`hasattr` call site, confirmed via full test suite + an isolated verification
+script exercising the property descriptors directly). The freeze-bug fix and the view-lock
+asymmetry fix are both deliberate, user-confirmed behavior changes — verify by hand: toggle each
+freeze button independently and confirm only its own plot stops updating; pan/zoom the sensorgram,
+start a measurement, confirm the view re-follows instead of staying locked.
 
 ---
 

@@ -1252,8 +1252,10 @@ def start_measurement_run(window) -> None:
     window._trace_display_cursor_s = 0.0
     window._live_trace_started_at = None
     window._metric_reference_processed = None
-    # Auto-switch to measurement view so the plot shows only the current recording.
-    window._sensorgram_display_mode = "measurement"
+    # Auto-switch to measurement view so the plot shows only the current recording,
+    # and release any stale pan/zoom lock so the view re-follows once recording
+    # starts (see SensorgramDisplayState.begin_measurement).
+    window._sensorgram_display.begin_measurement()
     window._last_metric_autoscale_range = None
     window._refresh_session_statistics(force=True)
     window._refresh_trace_plot("Metric position (nm)")
@@ -1296,11 +1298,11 @@ def stop_measurement_run(window) -> None:
     if hasattr(window, "_set_recording_blink_indicator"):
         window._set_recording_blink_indicator(False)
     sync_simulation_backend_from_controls_for(window)
-    window._trace_view_locked = False
     window._live_trace_started_at = None
     window._metric_reference_processed = None
-    # Auto-switch back to session view so the full session history is visible again.
-    window._sensorgram_display_mode = "session"
+    # Auto-switch back to session view so the full session history is visible
+    # again, and clear any pan/zoom lock (see SensorgramDisplayState.end_measurement).
+    window._sensorgram_display.end_measurement()
     window._sensorgram_axis_started_at = None
     window._last_metric_autoscale_range = None
     # Reload session archive so the cache gets repopulated with the full session.

@@ -1004,7 +1004,13 @@ def request_metric_autoscale(window) -> None:
 
 
 def refresh_metric_plot(window, trace_label: str) -> None:
-    if window._plots_frozen:
+    # Sensorgram-only freeze - deliberately independent of _plots_frozen
+    # (the spectrum plot's own freeze). See gui/sensorgram_display_state.py
+    # and docs/sensorgram_improvements.md's "2026-07-21 update": this used to
+    # check _plots_frozen, which meant freezing the spectrum plot silently
+    # also froze the sensorgram, while "freeze sensorgram" alone didn't
+    # reliably freeze anything.
+    if window._sensorgram_frozen:
         return
     started = perf_counter()
     axis_mode = _sensorgram_time_axis_mode(window)

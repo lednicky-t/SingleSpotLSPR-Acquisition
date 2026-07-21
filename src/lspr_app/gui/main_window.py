@@ -78,6 +78,7 @@ from lspr_app.gui.main_window_headers import (
     update_source_tab_headers,
 )
 from lspr_app.gui.main_window_runtime_state import UiRefreshState
+from lspr_app.gui.sensorgram_display_state import SensorgramDisplayState
 from lspr_app.gui.ui_persistence import UIPersistenceBinder
 from lspr_app.gui.icon_helpers import (
     dark_icon,
@@ -331,7 +332,6 @@ from lspr_app.gui.workers import (
     AcquisitionResult,
     MeasurementCompressionTask,
     MetricArchiveReloadResult,
-    MetricArchiveReloadTask,
     LiveAcquisitionEvent,
     LiveAcquisitionWorker,
     LiveProcessedEvent,
@@ -687,7 +687,10 @@ class MainWindow(QMainWindow):
         # "session" shows the full session from the always-on session file.
         # "measurement" shows only the active recording window.
         # Auto-switches to "measurement" when a recording starts and back to "session" when it stops.
-        self._sensorgram_display_mode: str = "session"
+        # See gui/sensorgram_display_state.py - _sensorgram_display_mode, _trace_view_locked,
+        # _sensorgram_frozen, and the archive-reload bookkeeping below are all properties
+        # delegating to self._sensorgram_display, defined right after __init__.
+        self._sensorgram_display = SensorgramDisplayState()
         self._ui_binder.bind_custom(
             "sensorgram_display_mode",
             get=lambda: str(getattr(self, "_sensorgram_display_mode", "session")),
@@ -712,15 +715,10 @@ class MainWindow(QMainWindow):
         )
         self._sensorgram_control_step_events: list[dict[str, object]] = []
         self._sensorgram_control_step_overlay_items: list[object] = []
-        self._sensorgram_metric_archive_reload_task: MetricArchiveReloadTask | None = None
-        self._sensorgram_metric_archive_reload_loading = False
-        self._sensorgram_metric_archive_reload_request_token: tuple[object, ...] | None = None
-        self._sensorgram_metric_archive_reload_pending_token: tuple[object, ...] | None = None
         self._last_summary_text: str = ""
         self._last_summary_refresh_ts: float = 0.0
         self._last_summary_refresh_ms: float | None = None
         self._last_session_summary_refresh_total_ms: float | None = None
-        self._trace_view_locked = False
         self._trace_view_autoscaling = False
         self._ui_refresh_state = UiRefreshState(pending_metric_label="Metric position (nm)")
         self._visible_processed_plot: Spectrum | None = None
@@ -735,7 +733,6 @@ class MainWindow(QMainWindow):
         self._metric_render_display_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._metric_render_state_cache: dict[str, tuple[object, ...]] = {}
         self._plots_frozen = False
-        self._sensorgram_frozen = False
         self._measurement_compression_blink_visible = True
         self._measurement_compression_blink_timer = QTimer(self)
         self._measurement_compression_blink_timer.setInterval(650)
@@ -1566,6 +1563,71 @@ class MainWindow(QMainWindow):
         _startup_mark("startup wiring complete")
         if bool(getattr(self, "_startup_show_requested", False)):
             QTimer.singleShot(0, self._complete_startup_show)
+
+    # ------------------------------------------------------------------
+    # Sensorgram display state - thin property shims over self._sensorgram_display
+    # (gui/sensorgram_display_state.py). Keeping these old attribute names as
+    # properties lets every existing read/write site across the gui/ files
+    # keep working unchanged, while _sensorgram_display stays the single
+    # source of truth that can't drift out of sync internally. See
+    # docs/sensorgram_improvements.md, "2026-07-21 update", for background.
+    # ------------------------------------------------------------------
+
+    @property
+    def _sensorgram_display_mode(self) -> str:
+        return self._sensorgram_display.mode
+
+    @_sensorgram_display_mode.setter
+    def _sensorgram_display_mode(self, value: str) -> None:
+        self._sensorgram_display.mode = value
+
+    @property
+    def _trace_view_locked(self) -> bool:
+        return self._sensorgram_display.view_locked
+
+    @_trace_view_locked.setter
+    def _trace_view_locked(self, value: bool) -> None:
+        self._sensorgram_display.view_locked = bool(value)
+
+    @property
+    def _sensorgram_frozen(self) -> bool:
+        return self._sensorgram_display.frozen
+
+    @_sensorgram_frozen.setter
+    def _sensorgram_frozen(self, value: bool) -> None:
+        self._sensorgram_display.frozen = bool(value)
+
+    @property
+    def _sensorgram_metric_archive_reload_loading(self) -> bool:
+        return self._sensorgram_display.reload_loading
+
+    @_sensorgram_metric_archive_reload_loading.setter
+    def _sensorgram_metric_archive_reload_loading(self, value: bool) -> None:
+        self._sensorgram_display.reload_loading = bool(value)
+
+    @property
+    def _sensorgram_metric_archive_reload_task(self):
+        return self._sensorgram_display.reload_task
+
+    @_sensorgram_metric_archive_reload_task.setter
+    def _sensorgram_metric_archive_reload_task(self, value) -> None:
+        self._sensorgram_display.reload_task = value
+
+    @property
+    def _sensorgram_metric_archive_reload_request_token(self):
+        return self._sensorgram_display.reload_request_token
+
+    @_sensorgram_metric_archive_reload_request_token.setter
+    def _sensorgram_metric_archive_reload_request_token(self, value) -> None:
+        self._sensorgram_display.reload_request_token = value
+
+    @property
+    def _sensorgram_metric_archive_reload_pending_token(self):
+        return self._sensorgram_display.reload_pending_token
+
+    @_sensorgram_metric_archive_reload_pending_token.setter
+    def _sensorgram_metric_archive_reload_pending_token(self, value) -> None:
+        self._sensorgram_display.reload_pending_token = value
 
     def _initialize_logging_ui(self) -> None:
         initialize_logging_ui_for(self)
