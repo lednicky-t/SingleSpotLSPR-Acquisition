@@ -1,15 +1,19 @@
 # Device Layer Audit — singleLSPR Acquisition
 
 **Date:** 2026-06-25 (follow-up pass: 2026-07-20; full rewrite: 2026-07-20; Device Manager
-migration + simulated-device discussion + orphaned-widget deletion: 2026-07-21)
+migration + simulated-device discussion + orphaned-widget deletion: 2026-07-21; whole-subsystem
+audit: 2026-07-21)
 **Scope:** `apps/sLSPR/acq/src/lspr_app/device/` and related GUI initializer
 **Status:** Discovery/connect architecture rewritten — see "2026-07-20: full device
 lifecycle rewrite" below. `DeviceManagerDialog`'s manual Connect/Disconnect for the
 canonical pump/valve/selector now also routes through the same owner (2026-07-21).
 The orphaned, never-laid-out connect widgets in `experiment_control_window.py` have been
-deleted (2026-07-21) — see below. Remaining open items: `DeviceManagerDialog`'s
+deleted (2026-07-21). A whole-subsystem audit (2026-07-21, see below) found and fixed a real
+unlocked-hardware-I/O gap in `probe_endpoint()` and a port-claim identity bug shared by the
+AMF and generic serial-controller drivers. Remaining open items: `DeviceManagerDialog`'s
 "Scan && connect" button (still a separate discovery/connect path), B2 (standalone device
-window), B3 (fast reconnect, low priority). Simulated pump/valve/selector devices ("Part B")
+window - `hardware_inventory.py` appears to be pre-built, unwired scaffolding for this),
+B3 (fast reconnect, low priority). Simulated pump/valve/selector devices ("Part B")
 were discussed and explicitly dropped — see below.
 
 ---
@@ -171,6 +175,80 @@ Also fixed as part of the same pass: `_build_native_experiment_plan_document` re
 name from `self.model_value.text()` (the now-deleted label) for the exported plan file's device
 metadata; repointed to `self._probe.model` directly, which is the actual live source that label was
 mirroring.
+
+---
+
+## 2026-07-21: whole-subsystem audit (device/ package end to end)
+
+Requested explicitly: "check every device part as the whole" rather than just the day's diff.
+Went through every file in `device/`, tracing interactions between the port-claim registry,
+each driver, and `DeviceCommunicationService`. Two real, previously-unnoticed bugs found and
+fixed; two dead-code surfaces found and left alone (flagged, not deleted, since unlike the
+orphaned widgets these look like intentional unwired scaffolding, not abandoned work).
+
+**`probe_endpoint()` had no lock — a live, GUI-reachable instance of exactly the bug class this
+whole rewrite exists to prevent.** Every other public method that touches real hardware
+(`connect`, `disconnect`, `send_command`, `refresh_device_ports`) is wrapped in
+`self._device_lock(...)`; `probe_endpoint()` was not, despite doing real serial/AMF-SDK I/O
+(`RegloICCClient.probe_port`, `detect_valve_controller`, `AMFSwitchController.connect` via
+`_probe_selector`). It's called synchronously from the GUI thread by Device Manager's
+"Probe / assign" tab — so clicking "Probe" while `DeviceLifecycleController`'s startup cycle (or
+any device_io_pool task) is still running could touch the AMF SDK from two threads at once,
+unsynchronized. `refresh_device_ports`'s own R7/R8 fix comment (2026-07-20) claimed it was "the
+one method missing the lock" - that claim was incomplete. Fixed: renamed the body to
+`_probe_endpoint_impl`, added a `probe_endpoint` wrapper that acquires `self._device_lock`, same
+pattern as `connect`/`_connect_impl`. This also retroactively closes part of the "Scan && connect"
+gap (`_DiscoverTask` in `device_console_dialog.py`, still on the general-purpose thread pool, not
+`device_io_pool()`) — its `probe_endpoint` calls are now correctly serialized against everything
+else even though the task itself still isn't migrated.
+
+**Port-claim identity: `AMFSwitchController` and `SerialController` used a class-level owner
+string, not a per-instance one.** `RegloICCClient` correctly claims its port under
+`f"reglo-icc:{id(self)}"` (per instance). `AMFSwitchController`/`SerialController` (the shared
+base class behind every valve/switch driver) claimed under the bare `self.controller_type`
+string (e.g. `"amf-mswitch"`) - shared by *every instance* of the class. `connection_registry.
+try_claim_port` treats a second claim under an already-registered owner name as a no-op
+re-claim, not a conflict, so two different controller instances could both "successfully" claim
+the same port. Currently unexploitable through the app's real call paths (the single-lane
+`device_io_pool` plus the service's own lock mean connects never actually overlap in time) but a
+real defense-in-depth gap in the exact class of driver (AMF) this rewrite is built around, and
+inconsistent with the Reglo driver's pattern for no good reason.
+
+Tracing it further turned up a second, real (not just latent) consequence: `device_manager.py`'s
+`_connect_impl` keeps its own `_connection_owners[label]` string for use by `_disconnect_impl`'s
+`release_port(endpoint, owner)` call. For the pump this already read the driver's own
+`client._claim_owner` directly (correct). For the selector it independently *reconstructed* the
+same-looking string (`f"amf-mswitch:{id(controller)}"`) rather than reading it from the
+controller - which happened to produce an identical value only because both formulas used
+`controller.controller_type` and `id(controller)`. For switch/valve it stored the bare
+`controller.controller_type` (no id), which *did* match what the driver claimed under
+pre-fix. Fixed both drivers to claim under `self._claim_owner = f"{controller_type}:{id(self)}"`
+(mirroring Reglo), and updated `device_manager.py` to read `controller._claim_owner`/
+`client._claim_owner` directly in all three branches (pump/selector/switch) instead of
+re-deriving or using the bare class attribute, so there is one source of truth for what a driver
+claimed a port as, not two formulas that need to be kept in sync by hand.
+
+**Minor**: `device_lifecycle.py`'s `ranked_valve_ports` called
+`should_probe_port_for_role(p.device, "valve")` - but that function only recognizes `"pump"`/
+`"switch"` as role names (see `port_assignments.py`), so the call silently no-op'd (always
+returned `True`). Currently harmless (redundant with the `get_port_assignment(...) == "switch"`/
+`"auto"` check already applied in the same expression) but fixed to pass `"switch"` (the
+canonical name - `hardware_inventory.py` already gets this right) for correctness of intent.
+
+**Found, not touched — unreachable, no callers anywhere in `src/`:**
+- `hardware_inventory.py` (232 lines, `scan_connected_serial_devices` and helpers) - has its own
+  test file and looks like pre-built infrastructure for the already-documented, not-started
+  "B2 - standalone device test window" roadmap item, not abandoned work. Left as-is.
+- `DeviceCommunicationService.connect_enabled_profiles()`, `.safe_stop_all()`,
+  `.probe_pump_port()` - each iterates `self._profiles`/`self._connections` without the lock;
+  each individual hardware call inside the loop is still locked, so the only latent issue is the
+  dict iteration itself racing a concurrent profile mutation. Not exploitable today since nothing
+  calls these methods. Not fixed, since fixing dead code's locking would be busywork without a
+  caller to verify it against - worth a look if either ever gets wired up to something.
+
+Verified after every fix: full test suite (213 tests) green, pyflakes clean across `device/` and
+`gui/` (only pre-existing, unrelated warnings remain), and a real offscreen app launch with no
+tracebacks.
 
 ---
 
@@ -636,3 +714,13 @@ change: `serial_number` currently duplicates `protocol_version`, which wastes th
 23. Orphaned, never-laid-out connect widgets found and deleted from `experiment_control_window.py`
     (2026-07-21) — ~500 lines removed; DeviceManagerDialog is now the sole manual-connect UI
 24. Simulated pump/valve/selector devices ("Part B") — discussed and dropped (2026-07-21)
+25. `probe_endpoint()` given the service lock it was missing (2026-07-21) — was reachable
+    unsynchronized from the GUI thread (Device Manager's Probe/assign tab)
+26. `AMFSwitchController`/`SerialController` port-claim owner made per-instance instead of
+    class-level (2026-07-21), matching `RegloICCClient`; fixed the resulting release-mismatch in
+    `device_manager.py`'s connect bookkeeping for selector and switch/valve
+27. `ranked_valve_ports`'s `should_probe_port_for_role` call fixed to pass `"switch"` instead of
+    the unrecognized `"valve"` (2026-07-21) — was a silent no-op, currently-harmless
+28. Dead code found, not removed: `hardware_inventory.py` (unwired B2 scaffolding),
+    `connect_enabled_profiles`/`safe_stop_all`/`probe_pump_port` on `DeviceCommunicationService`
+    (no callers anywhere) (2026-07-21)

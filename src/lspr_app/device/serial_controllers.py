@@ -70,6 +70,13 @@ class SerialController(DeviceDriver):
     def __init__(self) -> None:
         self._serial: serial.Serial | None = None
         self.port: str | None = None
+        # Per-instance, not self.controller_type (shared by every instance of
+        # the same subclass) - matches RegloICCClient's pattern. A class-level
+        # claim owner would let two different instances of the same
+        # controller class both "successfully" claim the same port
+        # (try_claim_port treats a second claim under an already-registered
+        # owner name as a no-op re-claim, not a conflict).
+        self._claim_owner = f"{self.controller_type}:{id(self)}"
 
     @staticmethod
     def list_ports() -> list[ControllerPort]:
@@ -106,7 +113,7 @@ class SerialController(DeviceDriver):
 
     def connect(self, port: str) -> None:
         self.close()
-        if not try_claim_port(port, self.controller_type):
+        if not try_claim_port(port, self._claim_owner):
             raise ControllerError(f"Port {port} is busy.")
         try:
             self._serial = serial.Serial(
@@ -119,7 +126,7 @@ class SerialController(DeviceDriver):
                 write_timeout=self._TIMEOUT,
             )
         except Exception:
-            release_port(port, self.controller_type)
+            release_port(port, self._claim_owner)
             raise
         self.port = port
         if self._BOOTLOADER_WAIT_S:
@@ -139,7 +146,7 @@ class SerialController(DeviceDriver):
                 self._serial.close()
             finally:
                 if self.port is not None:
-                    release_port(self.port, self.controller_type)
+                    release_port(self.port, self._claim_owner)
                 self._serial = None
                 self.port = None
 

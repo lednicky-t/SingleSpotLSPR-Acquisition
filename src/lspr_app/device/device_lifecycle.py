@@ -162,14 +162,14 @@ def ranked_valve_ports(ports: Sequence[object]) -> list[object]:
     first). Empty if none."""
     preferred = [
         p for p in ports
-        if get_port_assignment(p.device) == "switch" and should_probe_port_for_role(p.device, "valve")
+        if get_port_assignment(p.device) == "switch" and should_probe_port_for_role(p.device, "switch")
     ]
     likely = sorted(
         (
             p for p in ports
             if get_port_assignment(p.device) == "auto"
             and controller_port_priority(p) > 0
-            and should_probe_port_for_role(p.device, "valve")
+            and should_probe_port_for_role(p.device, "switch")
         ),
         key=controller_port_priority,
         reverse=True,

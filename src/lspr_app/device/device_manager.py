@@ -212,6 +212,20 @@ class DeviceCommunicationService:
         ]
 
     def probe_endpoint(self, endpoint: str, expected_type: str | None = None) -> ProbeResult:
+        # Locked like every other public method that touches real hardware
+        # (connect/disconnect/send_command/refresh_device_ports): this is
+        # reachable synchronously from the GUI thread (Device Manager's
+        # Probe/assign tab) and does real serial/AMF-SDK I/O, so it must not
+        # be allowed to run concurrently with a connect/command/discover
+        # happening on the device I/O pool's worker thread. Previously
+        # unlocked - found during the 2026-07-21 device-layer audit (see
+        # docs/device-layer/DEVICE_LAYER_AUDIT_2026.md); refresh_device_ports'
+        # R7/R8 fix comment claimed it was "the one method missing the lock",
+        # which turned out to be incomplete.
+        with self._device_lock(f"probe_endpoint:{endpoint}"):
+            return self._probe_endpoint_impl(endpoint, expected_type)
+
+    def _probe_endpoint_impl(self, endpoint: str, expected_type: str | None = None) -> ProbeResult:
         started = perf_counter()
         endpoint = str(endpoint or "").strip()
         if not endpoint:
@@ -314,7 +328,7 @@ class DeviceCommunicationService:
                 controller.connect(endpoint)
                 probe = controller.get_probe()
                 self._connections[profile.label] = controller
-                self._connection_owners[profile.label] = f"amf-mswitch:{id(controller)}"
+                self._connection_owners[profile.label] = controller._claim_owner
                 self._last_errors.pop(profile.label, None)
                 status = self._make_status(profile.label, profile, True, None, {
                     "model": probe.model,
@@ -328,7 +342,7 @@ class DeviceCommunicationService:
             if profile.type in {"switch", "valve"} or profile.driver not in {"auto", "unknown", ""}:
                 controller, probe = detect_valve_controller(endpoint)
                 self._connections[profile.label] = controller
-                self._connection_owners[profile.label] = controller.controller_type
+                self._connection_owners[profile.label] = controller._claim_owner
                 self._last_errors.pop(profile.label, None)
                 status = self._make_status(profile.label, profile, True, None, {
                     "model": probe.model,
@@ -336,7 +350,7 @@ class DeviceCommunicationService:
                     "protocol_version": probe.protocol_version or "",
                     "controller_type": probe.controller_type,
                 })
-                self._record_event(label=profile.label, endpoint=endpoint, owner=controller.controller_type, action="connect", command=None, result="success", duration_ms=0.0, message=probe.model)
+                self._record_event(label=profile.label, endpoint=endpoint, owner=controller._claim_owner, action="connect", command=None, result="success", duration_ms=0.0, message=probe.model)
                 return status
 
             raise ControllerError(

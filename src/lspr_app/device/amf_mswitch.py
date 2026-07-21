@@ -76,12 +76,19 @@ class AMFSwitchController(DeviceDriver):
     def __init__(self) -> None:
         self._amf = None
         self.port: str | None = None
+        # Per-instance, not self.controller_type (shared by every instance of
+        # this class) - matches RegloICCClient's pattern. A class-level claim
+        # owner would let two different AMFSwitchController instances both
+        # "successfully" claim the same port (try_claim_port treats a second
+        # claim under an already-registered owner name as a no-op re-claim,
+        # not a conflict), silently defeating the busy-port check.
+        self._claim_owner = f"{self.controller_type}:{id(self)}"
 
     def connect(self, port: str) -> None:
         if amfTools is None:
             raise ControllerError("AMFTools library is not installed.")
         self.close()
-        if not try_claim_port(port, self.controller_type):
+        if not try_claim_port(port, self._claim_owner):
             raise ControllerError(f"Port {port} is busy.")
         try:
             self._amf = amfTools.AMF(port)
@@ -89,12 +96,12 @@ class AMFSwitchController(DeviceDriver):
         except Exception as exc:
             self._amf = None
             self.port = None
-            release_port(port, self.controller_type)
+            release_port(port, self._claim_owner)
             raise ControllerError(str(exc)) from exc
         if canonical and canonical != port:
             # AMF normalized the port name — swap the claim to the canonical form.
-            release_port(port, self.controller_type)
-            claim_port(canonical, self.controller_type)
+            release_port(port, self._claim_owner)
+            claim_port(canonical, self._claim_owner)
         self.port = canonical or port
 
     def close(self) -> None:
@@ -103,7 +110,7 @@ class AMFSwitchController(DeviceDriver):
                 self._amf.disconnect()
             finally:
                 if self.port is not None:
-                    release_port(self.port, self.controller_type)
+                    release_port(self.port, self._claim_owner)
                 self._amf = None
                 self.port = None
 
