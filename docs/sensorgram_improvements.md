@@ -155,7 +155,9 @@ reuse in the same render cycle if signature matches.
 **File:** `plot_controller.py` ~line 1313
 **Impact:** MEDIUM — the cache key uses `id(display_x), id(display_y)`, which changes on every
 render even when data is identical (new array object, same contents). This causes redundant
-`setData()` calls in archive/replay mode.
+`setData()` calls in "session" display mode (`window._sensorgram_display_mode == "session"`,
+see the 2026-07-21 update above) whenever data is reloaded from the archive file without
+actually changing.
 **Fix:** Replace with a `(len, first_x, last_x)` tuple — cheap to compute, stable for unchanged
 data.
 **Effort:** Small (~5 lines)
