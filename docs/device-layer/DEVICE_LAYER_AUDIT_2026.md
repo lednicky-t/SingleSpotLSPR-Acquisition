@@ -19,7 +19,9 @@ connect/probe calls happening on `device_io_pool` — fixed 2026-07-21 with a no
 cached-status read, see below. Remaining open items: `DeviceManagerDialog`'s
 "Scan && connect" button (still a separate discovery/connect path), B2 (standalone device
 window - `hardware_inventory.py` appears to be pre-built, unwired scaffolding for this),
-B3 (fast reconnect, low priority). Simulated pump/valve/selector devices ("Part B")
+B3 (fast reconnect, low priority), B4 (split `DeviceCommunicationService`'s lock into a fast
+status-read lock and a slow hardware-I/O lock — flagged 2026-07-21, wants a design discussion
+first, see the fix sequence below). Simulated pump/valve/selector devices ("Part B")
 were discussed and explicitly dropped — see below.
 
 ---
@@ -834,3 +836,14 @@ change: `serial_number` currently duplicates `protocol_version`, which wastes th
 28. Dead code found, not removed: `hardware_inventory.py` (unwired B2 scaffolding),
     `connect_enabled_profiles`/`safe_stop_all`/`probe_pump_port` on `DeviceCommunicationService`
     (no callers anywhere) (2026-07-21)
+29. B4 — Split `DeviceCommunicationService`'s single lock into a fast state-lock (for
+    `is_connected`/`connection`/`status`/etc. reads) and a slow hardware-I/O lock (for the real
+    `connect`/`disconnect`/`send_command`/`probe_endpoint`/`refresh_device_ports` work). Flagged,
+    not started (2026-07-21) — see "UI freezes during device initialization" above for why this
+    would be the more complete version of that fix. Would also help `shutdown_all`/
+    `rerun_post_connect`'s internal `is_connected()` calls, which weren't touched by that fix.
+    Restructures locking in the most safety-critical code in this file, with zero existing test
+    coverage for `device_manager.py` itself - needs a design discussion (what should the lock
+    ordering guarantee be, does it need new tests written alongside it, does it change behavior
+    for any edge case like a status read racing a disconnect) before implementation, not a
+    drive-by change.
