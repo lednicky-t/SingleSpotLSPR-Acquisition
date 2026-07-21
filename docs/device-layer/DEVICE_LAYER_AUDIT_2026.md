@@ -10,7 +10,10 @@ canonical pump/valve/selector now also routes through the same owner (2026-07-21
 The orphaned, never-laid-out connect widgets in `experiment_control_window.py` have been
 deleted (2026-07-21). A whole-subsystem audit (2026-07-21, see below) found and fixed a real
 unlocked-hardware-I/O gap in `probe_endpoint()` and a port-claim identity bug shared by the
-AMF and generic serial-controller drivers. Remaining open items: `DeviceManagerDialog`'s
+AMF and generic serial-controller drivers. A follow-up report ("selector homes but doesn't
+react during a running plan") traced to `_apply_step_to_pump_async` dispatching real device
+commands, including `switch.move_to`, on the general-purpose `QThreadPool` instead of
+`device_io_pool()` — fixed 2026-07-21, see below. Remaining open items: `DeviceManagerDialog`'s
 "Scan && connect" button (still a separate discovery/connect path), B2 (standalone device
 window - `hardware_inventory.py` appears to be pre-built, unwired scaffolding for this),
 B3 (fast reconnect, low priority). Simulated pump/valve/selector devices ("Part B")
@@ -249,6 +252,44 @@ canonical name - `hardware_inventory.py` already gets this right) for correctnes
 Verified after every fix: full test suite (213 tests) green, pyflakes clean across `device/` and
 `gui/` (only pre-existing, unrelated warnings remain), and a real offscreen app launch with no
 tracebacks.
+
+---
+
+## 2026-07-21: selector homes fine but doesn't react during a running plan
+
+Reported: the M-switch initializes and homes correctly, but once an experiment plan is running,
+it doesn't respond to step-driven position changes. Traced the full step-execution wiring
+(`_advance_experiment_control_progress` → `_apply_step_to_pump_async` → `_plan_step_commands` →
+`_StepApplyRunnable.run()` → `DeviceCommunicationService.send_command`) - the command-building
+logic itself (`_plan_step_commands`'s `_switch_cmd()`) is correct and unchanged by this session's
+other work.
+
+**Root cause: `_apply_step_to_pump_async` submitted `_StepApplyRunnable` to
+`QThreadPool.globalInstance()` instead of `device_io_pool()`.** This is the *normal, steady-state*
+path every step transition takes while a plan is running (as opposed to
+`_apply_experiment_control_step_to_pump`, the synchronous version used only for the first step of
+a run and manual step application). `DeviceCommunicationService.send_command` still takes the
+service lock regardless of which pool calls it, so this was never a hard data race - but the AMF
+selector was connected and homed on `device_io_pool`'s single persistent worker thread, and this
+runnable then sent its `switch.move_to` (and every other) command from an arbitrary thread in the
+general-purpose pool instead. Vendor hardware SDKs commonly assume same-thread access to a device
+handle (this one already required the dedicated single-lane pool specifically because it isn't
+guaranteed thread-safe - see R7/R8 and the 2026-07-21 whole-subsystem audit above); a mismatch
+here plausibly causes commands to silently fail or no-op rather than raise a loud Python
+exception, which matches "no reaction, no visible error" exactly. Fixed by routing the same
+runnable through `device_io_pool()` instead - `device_io_pool` was already imported in this file
+for `DevicePortRefreshTask`.
+
+Not changed: `_apply_experiment_control_step_to_pump` (the synchronous path) also calls
+`send_command` directly from whatever thread invokes it - the GUI thread for its real call sites
+(starting a run, selecting a timeline row, restoring pause state) - which is a different thread
+again from `device_io_pool`'s worker. Converting this to also dispatch through `device_io_pool`
+would need a larger refactor (several call sites currently depend on its synchronous `bool`
+return value); flagged here as a related, currently-unconfirmed follow-up rather than changed
+without checking in first, since it touches core run/pause/resume control flow.
+
+Verified: full test suite (213 tests) green, pyflakes clean, panel constructs cleanly with the
+fix applied.
 
 ---
 

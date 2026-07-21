@@ -4833,7 +4833,15 @@ class ExperimentControlWindow(QWidget):
             self._device_comm_service, commands, step, needs_mswitch_refresh, pre_status
         )
         runnable.signals.done.connect(self._on_step_apply_async_done)
-        QThreadPool.globalInstance().start(runnable)
+        # Must run on the single-lane device I/O pool, not the general-purpose
+        # pool: this sends real commands (including switch.move_to) to drivers
+        # that were connected/homed on device_io_pool's worker thread. The AMF
+        # vendor SDK is not guaranteed thread-safe, and some vendor SDKs also
+        # assume same-thread access to a device handle - dispatching from an
+        # arbitrary QThreadPool.globalInstance() worker thread risks commands
+        # silently failing/no-op'ing instead of raising, which would look
+        # exactly like "the selector doesn't react" with no visible error.
+        device_io_pool().start(runnable)
 
     def _on_step_apply_async_done(self, result: _StepApplyResult) -> None:
         self._step_apply_pending = False
