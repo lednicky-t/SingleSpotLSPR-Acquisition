@@ -47,12 +47,17 @@ class ArchiveBackedReloadTests(unittest.TestCase):
             self.skipTest("h5py is not available in this Python environment")
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "metrics.h5"
-            times_ms = np.arange(0, 11, dtype=np.float64) * 1000.0
+            # Absolute Unix-epoch ms (schema 6.0+ - see docs/sensorgram_improvements.md,
+            # "Correctness fixes" C3): the reader derives relative seconds from this at
+            # read time, anchored to the first sample, so the expected x_values below
+            # (0..10s) are unaffected by the arbitrary epoch base chosen here.
+            epoch_base_ms = 1_700_000_000_000.0
+            unix_ms = epoch_base_ms + np.arange(0, 11, dtype=np.float64) * 1000.0
             metric = np.arange(0, 11, dtype=np.float64)
             with h5py.File(path, "w") as handle:
                 processed = handle.create_group("processed")
                 metrics = processed.create_group("metrics")
-                metrics.create_dataset("t_ms", data=times_ms)
+                metrics.create_dataset("acquired_at_unix_ms", data=unix_ms)
                 metrics.create_dataset("smoothed_max_nm", data=metric)
 
             series = load_processed_metric_history(path, {"smoothed_max_nm"}, time_range_s=(3.0, 7.0))

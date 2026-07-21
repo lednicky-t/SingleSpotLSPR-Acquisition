@@ -51,11 +51,11 @@ Recommended root attributes:
 
 ```text
 attrs["schema_name"] = "lspr_measurement"
-attrs["schema_version"] = "5.2"
-attrs["schema_major"] = 5
-attrs["schema_minor"] = 2
+attrs["schema_version"] = "6.0"
+attrs["schema_major"] = 6
+attrs["schema_minor"] = 0
 attrs["format_name"] = "experiment_run"
-attrs["format_version"] = 5
+attrs["format_version"] = 6
 attrs["app_version"] = "<application version>"
 attrs["created_by"] = "LSPR Acquisition"
 attrs["created_at_utc"] = "YYYY-MM-DDTHH:MM:SS.sssZ"
@@ -120,29 +120,41 @@ attrs["columns"] = ["column_a", "column_b", ...]
 
 ## Time Model
 
-The canonical saved time coordinate is absolute UTC milliseconds:
+**As of schema 6.0 (2026-07-21), spectra rows and processed-metric rows carry only an
+absolute timestamp on disk. There is no relative `t_ms` column for these streams anymore.**
+Schema 5.x and earlier files wrote both an absolute `acquired_at_unix_ms` and a relative
+`t_ms` for the same row; the relative value could be silently reset mid-file by a live/
+measurement-mode transition, which produced a genuine, shipped bug (non-monotonic display
+time, sensorgram redrawing over already-plotted history — see
+[`sensorgram_improvements.md`](./sensorgram_improvements.md), "Correctness fixes" C1/C2).
+Removing the write-time relative value and always deriving it at read time (anchored to the
+first sample in the file being read) eliminates that whole bug class by construction.
+
+The canonical saved time coordinate is absolute Unix-epoch milliseconds:
 
 ```text
-timestamp_utc_ms int64
+acquired_at_unix_ms int64
 ```
 
-`timestamp_utc_ms` is the canonical event time used for file persistence and cross-stream joins.
-Display values may still be shown as relative milliseconds for usability.
+`acquired_at_unix_ms` is the canonical event time used for file persistence and cross-stream
+joins, for spectra and processed-metric rows. Any relative/elapsed display value is computed
+by the reader from this column, never trusted from a value baked in at write time.
 
 Rules:
 
 - Use millisecond resolution only.
 - Use `int64` for timestamps.
 - Store `started_at_utc` once at the root.
-- Keep `t_ms` as the relative display coordinate for runtime orientation.
-- Store absolute event timestamps in UTC milliseconds.
+- Store absolute event timestamps in Unix-epoch UTC milliseconds (`acquired_at_unix_ms`).
+- Readers derive relative/elapsed seconds at read time, anchored to the first row of the
+  stream being read (or another explicit anchor the reader chooses) - never persisted.
 - Readers should align streams by selecting the latest state row at or before a spectrum timestamp.
 
-Recommended relative display field:
-
-```text
-t_ms int64
-```
+**This does not apply to the separate experiment-control/flow-state runtime log**
+(`/data/experiment_control_runtime`, see "Runtime Runs" below), which is a different table
+with its own `t_ms` column that is intentionally kept - it represents plan/step-relative time
+for a live control sequence, not a spectrum acquisition timestamp, and was not part of the
+6.0 change.
 
 ## Top-Level Layout
 
@@ -203,8 +215,7 @@ Spectra are stored by role.
 Each role group should contain:
 
 ```text
-t_ms                 int64   [n]
-acquired_at_unix_ms  int64   [n] optional
+acquired_at_unix_ms  int64   [n]
 intensity            float32 [n, n_wavelength]
 integration_time_ms  float32 [n]
 averages             int32   [n]
@@ -254,7 +265,6 @@ Metrics derived from sample spectra should be stored as appendable numeric vecto
 
 ```text
 /processed/metrics
-  t_ms                int64   [n_metric]
   acquired_at_unix_ms int64   [n_metric]
   sample_index        int64   [n_metric]
   centroid_nm         float64 [n_metric]

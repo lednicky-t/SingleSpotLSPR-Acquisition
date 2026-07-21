@@ -102,9 +102,7 @@ def _open_archive_handle(window: Any) -> _ArchiveState:
 
     _ensure_group(handle, "processed")
     processed = handle["processed"]
-    metrics = _ensure_group(processed, "metrics")
-    if "t_ms" not in metrics:
-        metrics.create_dataset("t_ms", shape=(0,), maxshape=(None,), dtype="f8")
+    _ensure_group(processed, "metrics")
     setattr(window, _ARCHIVE_HANDLE_ATTR, handle)
     setattr(window, _ARCHIVE_ROWS_ATTR, int(getattr(window, _ARCHIVE_ROWS_ATTR, 0)))
     return _ArchiveState(path=path, handle=handle, row_count=int(getattr(window, _ARCHIVE_ROWS_ATTR, 0)))
@@ -193,7 +191,7 @@ def load_metric_archive_history(
 
     suffix = path.suffix.lower()
     if suffix == ".jsonl":
-        series: dict[str, list[tuple[float, float]]] = {}
+        raw_rows: list[tuple[float, dict[str, Any]]] = []
         with path.open("r", encoding="utf-8") as handle:
             for fallback_index, line in enumerate(handle):
                 line = line.strip()
@@ -207,7 +205,19 @@ def load_metric_archive_history(
                     continue
                 if not isinstance(row, dict):
                     continue
-                timestamp_s = _row_timestamp_s(row, fallback_index)
+                raw_rows.append((_row_timestamp_s(row, fallback_index), row))
+
+        series: dict[str, list[tuple[float, float]]] = {}
+        if raw_rows:
+            # _row_timestamp_s can return an absolute Unix-epoch value (schema
+            # 6.0+ rows only have acquired_at_unix_ms, no relative t_ms) -
+            # normalize to relative-to-first-row seconds here, once, for the
+            # whole file. A no-op for legacy rows that had t_ms (already
+            # relative, so the minimum is already ~0). See
+            # docs/sensorgram_improvements.md.
+            anchor_s = min(t for t, _ in raw_rows)
+            for timestamp_s, row in raw_rows:
+                relative_s = timestamp_s - anchor_s
                 if time_range_s is not None:
                     try:
                         start_s = float(time_range_s[0])
@@ -218,7 +228,7 @@ def load_metric_archive_history(
                         if np.isfinite(start_s) and np.isfinite(end_s):
                             if end_s < start_s:
                                 start_s, end_s = end_s, start_s
-                            if timestamp_s < start_s or timestamp_s > end_s:
+                            if relative_s < start_s or relative_s > end_s:
                                 continue
                 for key, value in row.items():
                     if key in {"t_ms", "acquired_at_unix_ms", "time_s", "sample_index"}:
@@ -229,7 +239,7 @@ def load_metric_archive_history(
                         numeric_value = float(value)
                     except Exception:
                         continue
-                    series.setdefault(key, []).append((timestamp_s, numeric_value))
+                    series.setdefault(key, []).append((relative_s, numeric_value))
 
         result: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         for metric_name, points in series.items():
@@ -256,18 +266,24 @@ def load_metric_archive_history(
         metrics = processed.get("metrics")
         if metrics is None:
             return {}
-        time_ds = metrics.get("t_ms")
+        time_ds = metrics.get("acquired_at_unix_ms")
         if time_ds is None:
             return {}
-        times_s = np.asarray(time_ds[...], dtype=float) / 1000.0
+        unix_ms = np.asarray(time_ds[...], dtype=float)
         # Defensive: see the matching comment in
         # storage/hdf5_export.py:load_processed_metric_history - same fix,
-        # same reason (a non-monotonic t_ms column breaks the searchsorted
-        # slicing below and makes pyqtgraph draw backward over history).
-        sort_order = np.argsort(times_s, kind="stable")
-        needs_reorder = not np.array_equal(sort_order, np.arange(len(times_s)))
+        # same reason (a non-monotonic timestamp column breaks the
+        # searchsorted slicing below and makes pyqtgraph draw backward over
+        # history).
+        sort_order = np.argsort(unix_ms, kind="stable")
+        needs_reorder = not np.array_equal(sort_order, np.arange(len(unix_ms)))
         if needs_reorder:
-            times_s = times_s[sort_order]
+            unix_ms = unix_ms[sort_order]
+
+        # Convert absolute Unix-ms to a relative, plot-ready seconds axis,
+        # anchored to this file's own first sample - computed before any
+        # time_range_s slicing so the anchor doesn't shift with the query.
+        times_s = (unix_ms - unix_ms[0]) / 1000.0 if len(unix_ms) > 0 else unix_ms
 
         start_index = 0
         end_index = len(times_s)
@@ -285,7 +301,7 @@ def load_metric_archive_history(
                     end_index = int(np.searchsorted(times_s, end_s, side="right"))
                     times_s = times_s[start_index:end_index]
         for metric_name, dataset in metrics.items():
-            if metric_name in {"t_ms", "acquired_at_unix_ms", "sample_index"}:
+            if metric_name in {"acquired_at_unix_ms", "sample_index"}:
                 continue
             if metric_names is not None and metric_name not in metric_names:
                 continue

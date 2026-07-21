@@ -72,6 +72,34 @@ reload-seed call goes through, including the file-portion + live-tail concatenat
 identity permutation, detected and skipped); only pays extra cost (a full read instead of a
 partial HDF5 read) in the rare case where reordering is actually needed.
 
+### C3 — 2026-07-21 follow-up: removed the write-time relative `t_ms` for spectra/metrics entirely (schema 6.0)
+**Files:** `packages/lspr_io/src/lspr_io/schema.py`, `storage/hdf5_export.py`,
+`storage/metric_archive.py`, `storage/measurement_archive.py`, `gui/acquisition_controller.py`,
+plus `apps/sLSPR/eva`'s `io.py` time-axis detection
+**Rationale:** C1's root cause was fundamentally "a relative anchor computed at write time can go
+stale or get reset mid-file." C1's fix (a dedicated, stable anchor) and C2's defensive sorting
+addressed the *symptom* for the session/measurement metrics streams specifically, but the same
+class of write-time-relative-anchor risk still existed by construction anywhere a relative `t_ms`
+was written alongside the always-present absolute `acquired_at_unix_ms`. Rather than adding more
+anchor bookkeeping, schema 6.0 removes the relative column outright for raw-spectra rows and
+processed-metric rows: `acquired_at_unix_ms` is now the sole per-row timestamp on disk, and every
+reader computes relative/elapsed seconds at read time (anchored to the first row of the stream
+being read), never trusting a value baked in at write time. C1's dedicated anchor
+(`_metric_archive_started_at`) is kept, but only for its other, legitimate use (axis-label
+clock-mode display) — it is no longer needed to compute a written `t_ms`.
+**Note:** this does *not* touch the separate experiment-control/flow-state runtime log's own
+`t_ms` column (`LSPR_MEASUREMENT_RUNTIME_COLUMNS`) — that table is plan/step-relative by design,
+not a spectrum-acquisition timestamp, and was out of scope for this change.
+**Cross-repo impact:** `apps/sLSPR/eva`'s HDF5 loader infers the time axis from dataset name/shape
+heuristics rather than the shared `lspr_io` schema, and would otherwise have silently misread the
+new absolute-only files (dividing `acquired_at_unix_ms` by 1000 without normalizing, producing a
+nonsense epoch-scale axis). Fixed alongside this change — see `_score_time_candidate` and
+`_decode_time_axis` in `apps/sLSPR/eva/src/lspr_single_evaluation/io.py`.
+**Effort:** Medium (touches every spectra/metrics writer and reader in the acq app, plus eva)
+**Risk:** Medium — breaking schema change (major version bump 5.2 → 6.0); old files remain
+readable (readers only warn, not error, on an older major), but this session's own smoke tests
+plus the full test suite must confirm nothing else depended on the removed column.
+
 ---
 
 ## Performance fixes

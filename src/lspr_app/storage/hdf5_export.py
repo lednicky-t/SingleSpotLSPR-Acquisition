@@ -275,25 +275,23 @@ class HDF5MeasurementWriter:
         if not spectra:
             return
 
-        start = self._sample_group["t_ms"].shape[0]
+        start = self._sample_group["acquired_at_unix_ms"].shape[0]
         end = start + len(spectra)
 
         self._time.resize((end,))
         self._time[start:end] = np.asarray(time_series_s, dtype=np.float64)
-        self._append_spectra_rows(self._sample_group, spectra, time_series_s, self._dark_index, self._reference_index)
+        self._append_spectra_rows(self._sample_group, spectra, self._dark_index, self._reference_index)
 
     def append_metrics(self, rows: list[dict[str, object]]) -> None:
         if not rows:
             return
-        start = self._metrics_group["t_ms"].shape[0]
+        start = self._metrics_group[LSPR_PROCESSED_METRICS_ACQUIRED_AT_UNIX_MS_DATASET_NAME].shape[0]
         end = start + len(rows)
         for name, dataset in self._metrics_group.items():
             if not isinstance(dataset, h5py.Dataset):
                 continue
             dataset.resize((end,))
             if name == LSPR_PROCESSED_METRICS_ACQUIRED_AT_UNIX_MS_DATASET_NAME:
-                dataset[start:end] = np.asarray([int(row.get(name, 0) or 0) for row in rows], dtype=np.int64)
-            elif name == "t_ms":
                 dataset[start:end] = np.asarray([int(row.get(name, 0) or 0) for row in rows], dtype=np.int64)
             elif name == "sample_index":
                 dataset[start:end] = np.asarray([int(row.get(name, -1) or -1) for row in rows], dtype=np.int64)
@@ -339,7 +337,9 @@ class HDF5MeasurementWriter:
 
     def _create_spectrum_group(self, name: str, *, include_baseline_indices: bool = False):
         group = self._data_spectra.create_group(name)
-        group.create_dataset("t_ms", shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True, **self._compression_kwargs)
+        # No relative "t_ms" here (removed in schema 6.0) - acquired_at_unix_ms
+        # (absolute Unix epoch ms) is the sole per-row timestamp. See
+        # docs/sensorgram_improvements.md, "Correctness fixes" C1/C2.
         group.create_dataset(
             "acquired_at_unix_ms", shape=(0,), maxshape=(None,), dtype=np.int64, chunks=True, **self._compression_kwargs
         )
@@ -368,9 +368,10 @@ class HDF5MeasurementWriter:
 
     def _create_metrics_group(self):
         group = self._processed.create_group("metrics")
+        # No relative "t_ms" here (removed in schema 6.0) - see
+        # docs/sensorgram_improvements.md, "Correctness fixes" C1/C2.
         for name, dtype in (
             (LSPR_PROCESSED_METRICS_ACQUIRED_AT_UNIX_MS_DATASET_NAME, np.int64),
-            ("t_ms", np.int64),
             ("sample_index", np.int64),
             ("centroid_nm", np.float64),
             ("smoothed_max_nm", np.float64),
@@ -405,28 +406,26 @@ class HDF5MeasurementWriter:
     def _append_baseline_if_new(self, _role: str, spectrum: Spectrum, group, previous_key: tuple[object, ...] | None) -> int:
         key = self._spectrum_key(spectrum)
         if key == previous_key:
-            return max(group["t_ms"].shape[0] - 1, -1)
-        self._append_spectra_rows(group, [spectrum], [self._relative_seconds(spectrum)])
-        return group["t_ms"].shape[0] - 1
+            return max(group["acquired_at_unix_ms"].shape[0] - 1, -1)
+        self._append_spectra_rows(group, [spectrum])
+        return group["acquired_at_unix_ms"].shape[0] - 1
 
     def _append_spectra_rows(
         self,
         group,
         spectra: list[Spectrum],
-        time_series_s: list[float],
         dark_index: int | None = None,
         reference_index: int | None = None,
     ) -> None:
         if not spectra:
             return
-        start = group["t_ms"].shape[0]
+        start = group["acquired_at_unix_ms"].shape[0]
         end = start + len(spectra)
         for dataset in group.values():
             if dataset.ndim == 1:
                 dataset.resize((end,))
             else:
                 dataset.resize((end, dataset.shape[1]))
-        group["t_ms"][start:end] = np.asarray([int(round(float(t) * 1000.0)) for t in time_series_s], dtype=np.int64)
         group["acquired_at_unix_ms"][start:end] = np.asarray([_unix_ms(s.acquired_at) for s in spectra], dtype=np.int64)
         group["intensity"][start:end, :] = np.vstack([self._resample_spectrum(s) for s in spectra])
         group["integration_time_ms"][start:end] = np.asarray(
@@ -446,9 +445,6 @@ class HDF5MeasurementWriter:
             group["dark_index"][start:end] = np.full(len(spectra), int(dark_index), dtype=np.int64)
         if "reference_index" in group and reference_index is not None:
             group["reference_index"][start:end] = np.full(len(spectra), int(reference_index), dtype=np.int64)
-
-    def _relative_seconds(self, spectrum: Spectrum) -> float:
-        return max((spectrum.acquired_at - self._started_at_utc).total_seconds(), 0.0)
 
     def _spectrum_key(self, spectrum: Spectrum) -> tuple[object, ...]:
         return (
@@ -848,21 +844,25 @@ def load_processed_metric_history(
         if metrics_group is None:
             return {}
 
-        time_ds = metrics_group.get("t_ms")
+        time_ds = metrics_group.get(LSPR_PROCESSED_METRICS_ACQUIRED_AT_UNIX_MS_DATASET_NAME)
         if time_ds is None:
             return {}
-        times_s = np.asarray(time_ds[...], dtype=float) / 1000.0
-        # Defensive: rows are written append-only and should already be in
-        # timestamp order, but a stale/reused timestamp anchor upstream could
-        # still produce a non-monotonic t_ms column. time_range_s slicing below
-        # uses searchsorted, which silently misbehaves on unsorted input, and
-        # an unsorted x-array makes pyqtgraph draw the line backward over
-        # already-drawn history. Sort here so callers never see either failure
-        # mode - see docs/sensorgram_improvements.md.
-        sort_order = np.argsort(times_s, kind="stable")
-        needs_reorder = not np.array_equal(sort_order, np.arange(len(times_s)))
+        unix_ms = np.asarray(time_ds[...], dtype=float)
+        # Defensive: rows are written append-only and acquired_at_unix_ms has
+        # no anchor to desync (unlike the removed relative t_ms - see
+        # docs/sensorgram_improvements.md, "Correctness fixes" C1/C2), so this
+        # should already be monotonic. Sort anyway so callers never see the
+        # searchsorted-on-unsorted-input failure mode below, or an unsorted
+        # x-array making pyqtgraph draw backward over already-drawn history.
+        sort_order = np.argsort(unix_ms, kind="stable")
+        needs_reorder = not np.array_equal(sort_order, np.arange(len(unix_ms)))
         if needs_reorder:
-            times_s = times_s[sort_order]
+            unix_ms = unix_ms[sort_order]
+
+        # Convert absolute Unix-ms to a relative, plot-ready seconds axis,
+        # anchored to this file's own first sample - computed before any
+        # time_range_s slicing so the anchor doesn't shift with the query.
+        times_s = (unix_ms - unix_ms[0]) / 1000.0 if len(unix_ms) > 0 else unix_ms
 
         start_index = 0
         end_index = len(times_s)
@@ -881,7 +881,7 @@ def load_processed_metric_history(
                     times_s = times_s[start_index:end_index]
 
         for metric_name, dataset in metrics_group.items():
-            if metric_name in {"t_ms", "acquired_at_unix_ms", "sample_index"}:
+            if metric_name in {LSPR_PROCESSED_METRICS_ACQUIRED_AT_UNIX_MS_DATASET_NAME, "sample_index"}:
                 continue
             if metric_names is not None and metric_name not in metric_names:
                 continue
@@ -922,7 +922,7 @@ def load_spectrum_heatmap_history(
             spectrum_group = spectra_root.get(spectrum_group_name)
             if spectrum_group is None:
                 return np.empty(0, dtype=np.float64), []
-            time_ds = spectrum_group.get("t_ms")
+            time_ds = spectrum_group.get(LSPR_PROCESSED_METRICS_ACQUIRED_AT_UNIX_MS_DATASET_NAME)
             intensity_ds = spectrum_group.get("intensity")
             if time_ds is None or intensity_ds is None:
                 return np.empty(0, dtype=np.float64), []
@@ -942,7 +942,11 @@ def load_spectrum_heatmap_history(
             else:
                 wavelength_mask = np.ones(len(wavelengths), dtype=bool)
 
-            times_s = np.asarray(time_ds[...], dtype=np.float64) / 1000.0
+            # Absolute Unix-ms, converted to a relative, plot-ready seconds
+            # axis anchored to this file's own first row - see
+            # load_processed_metric_history for the same conversion.
+            unix_ms = np.asarray(time_ds[...], dtype=np.float64)
+            times_s = (unix_ms - unix_ms[0]) / 1000.0 if unix_ms.size > 0 else unix_ms
             if times_s.size == 0:
                 return wavelengths, []
 

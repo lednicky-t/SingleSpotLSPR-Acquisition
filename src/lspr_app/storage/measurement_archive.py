@@ -185,8 +185,8 @@ class _FallbackTempMeasurementWriter:
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = h5py.File(path, "a")
         processed = handle.require_group("processed").require_group("metrics")
-        if "t_ms" not in processed:
-            processed.create_dataset("t_ms", shape=(0,), maxshape=(None,), dtype="f8")
+        if "acquired_at_unix_ms" not in processed:
+            processed.create_dataset("acquired_at_unix_ms", shape=(0,), maxshape=(None,), dtype="f8")
         handle.require_group("raw").require_group("events")
         handle.require_group("device_state")
         handle.require_group("control")
@@ -212,15 +212,18 @@ class _FallbackTempMeasurementWriter:
                     row = dict(row)
                 except Exception:
                     row = {}
-            t_ms = row.get("t_ms")
-            if t_ms is None:
-                t_ms = row.get("acquired_at_unix_ms")
-            if t_ms is None:
-                t_ms = float(metrics["t_ms"].shape[0]) * 1000.0
-            ds = metrics["t_ms"]
+            acquired_at_unix_ms = row.get("acquired_at_unix_ms")
+            if acquired_at_unix_ms is None:
+                # Legacy callers may still pass the removed relative t_ms;
+                # accept it as a best-effort fallback rather than dropping
+                # the row's timing entirely.
+                acquired_at_unix_ms = row.get("t_ms")
+            if acquired_at_unix_ms is None:
+                acquired_at_unix_ms = float(metrics["acquired_at_unix_ms"].shape[0]) * 1000.0
+            ds = metrics["acquired_at_unix_ms"]
             size = int(ds.shape[0])
             ds.resize((size + 1,))
-            ds[size] = float(t_ms)
+            ds[size] = float(acquired_at_unix_ms)
             for key, value in row.items():
                 if key in {"t_ms", "acquired_at_unix_ms", "sample_index"}:
                     continue

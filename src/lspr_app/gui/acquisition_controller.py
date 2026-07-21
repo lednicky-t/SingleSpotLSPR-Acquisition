@@ -1384,34 +1384,24 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
             "snr": metrics.get("snr", np.nan),
         }
 
-        # Always write to the session file with session-relative t_ms. Anchored to
-        # _metric_archive_started_at, NOT _live_trace_started_at: the session
-        # file's timeline must stay stable across live-acquisition and measurement
-        # start/stop, or its t_ms column stops being monotonic (see
-        # docs/sensorgram_improvements.md). _live_trace_started_at is reset by
-        # both of those and is only appropriate for the live-only display cache
-        # below (the non-measurement elapsed_s branch above).
+        # Always write to the session file. acquired_at_unix_ms (absolute,
+        # already in common_fields) is the sole per-row timestamp as of
+        # schema 6.0 - no relative anchor to compute or keep in sync across
+        # live-acquisition/measurement start-stop transitions. See
+        # docs/sensorgram_improvements.md, "Correctness fixes" C1/C2, for why
+        # the old per-branch relative t_ms was the actual bug source.
         from lspr_app.storage.measurement_archive import ensure_session_writer
         session_writer = ensure_session_writer(window, processed)
         if session_writer is not None:
-            session_started_at = getattr(window, "_metric_archive_started_at", None)
-            if session_started_at is not None:
-                sess_elapsed_s = max((processed.acquired_at - session_started_at).total_seconds(), 0.0)
-            else:
-                sess_elapsed_s = elapsed_s
-            session_metric_row = dict(common_fields)
-            session_metric_row["t_ms"] = int(round(sess_elapsed_s * 1000.0))
             try:
-                session_writer.append_metrics([session_metric_row])
+                session_writer.append_metrics([common_fields])
             except Exception:
                 pass
 
-        # Also write to the measurement file during active recording with measurement-relative t_ms.
+        # Also write to the measurement file during active recording.
         if measurement_active and window._measurement_writer is not None:
-            meas_metric_row = dict(common_fields)
-            meas_metric_row["t_ms"] = int(round(elapsed_s * 1000.0))
             try:
-                window._measurement_writer.append_metrics([meas_metric_row])
+                window._measurement_writer.append_metrics([common_fields])
             except Exception:
                 pass
         window._request_deferred_ui_refresh(trace_plot=True, trace_label="Metric position (nm)")
