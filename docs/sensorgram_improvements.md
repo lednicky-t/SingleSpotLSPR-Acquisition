@@ -185,15 +185,20 @@ short-circuit if unchanged.
 
 ---
 
-### P8 — Activate `RollingMetricDisplayCache` for rolling-window mode
-**File:** `plot_view_cache.py` ~line 61
-**Impact:** MEDIUM — the class is fully implemented but never instantiated. Activating it for the
-"last N seconds" rolling window path would skip the entire old-data pyramid traversal, roughly
-halving display-rebuild work when the user has a short rolling window configured.
-**Fix:** Instantiate `RollingMetricDisplayCache` when rolling-window mode is selected; route
-`live_absolute_metric_series()` to it.
-**Effort:** Medium
-**Risk:** Medium — new code path, needs thorough testing
+### P8 — `RollingMetricDisplayCache` removed (2026-07-21): was scaffolding, not a working optimization
+**File:** `plot_view_cache.py` (was ~line 61)
+**Correction to the original P8 entry above:** re-checked while acting on this backlog item. The
+class was a bare `@dataclass` with no methods and zero call sites anywhere in the codebase -
+not "fully implemented but never instantiated" as originally written here, just a placeholder
+that was never wired to anything. Windowed/rolling-window display already works today through
+the ordinary `MetricDisplayCache` path (`_build_windowed_metric_arrays` /
+`_build_windowed_metric_envelope_arrays` in this same file both operate on `MetricDisplayCache`,
+not this class), so nothing was providing the "roughly halving display-rebuild work" benefit this
+entry originally described - that benefit was speculative, not measured or working.
+**Action taken:** deleted the dead class outright rather than "activating" it, since there was no
+working implementation to activate. If a dedicated rolling-window cache turns out to be worth
+building later, it should be designed fresh against the current `MetricDisplayCache`/compression-
+pyramid architecture rather than resurrected from this unused stub.
 
 ---
 
@@ -296,7 +301,7 @@ X-offset in `_sensorgram_display_x_values()`.
 | P5 | Fix render-state cache key | Medium | Small | Yes |
 | P6 | Batch tail trimming | Low-Med | Small | No |
 | P7 | Cache level selection | Low-Med | Small | No |
-| P8 | Activate RollingMetricDisplayCache | Medium | Medium | No |
+| P8 | ~~Activate RollingMetricDisplayCache~~ — deleted, was dead scaffolding | — | — | Done |
 | P9 | Eliminate redundant dtype casts | Low | Tiny | No |
 | F1 | LTTB downsampling | — | Medium | Discuss |
 | F2 | Baseline subtraction view | — | Low | Discuss |

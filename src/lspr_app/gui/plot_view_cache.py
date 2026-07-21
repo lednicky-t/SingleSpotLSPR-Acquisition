@@ -57,23 +57,6 @@ class MetricDisplayCache:
     last_archive_points: int = 0
 
 
-@dataclass(slots=True)
-class RollingMetricDisplayCache:
-    metric_name: str = ""
-    window_s: float = 60.0
-    latest_s: float | None = None
-    window_start_x: float | None = None
-    window_end_x: float | None = None
-    raw_x: deque[float] = field(default_factory=deque)
-    raw_y: deque[float] = field(default_factory=deque)
-    compression: MetricDisplayCache = field(default_factory=MetricDisplayCache)
-    pending_live_points: int = 0
-    reload_request_id: int = 0
-    applied_reload_request_id: int = 0
-    stale_reload_count: int = 0
-    archive_path: str | None = None
-
-
 @dataclass(slots=True, frozen=True)
 class MetricCompressionBlock:
     start_x: float
