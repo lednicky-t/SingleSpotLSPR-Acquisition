@@ -105,6 +105,14 @@ class DeviceCommunicationService:
     def __init__(self) -> None:
         # RLock (reentrant) because connect() calls disconnect() internally.
         self._lock = threading.RLock()
+        # Separate, fast lock guarding self._profiles/_connections/_last_errors/
+        # _events only - see _state() below. RLock because list_statuses() calls
+        # status() reentrantly while already holding it. Never held while
+        # acquiring self._lock (one-way nesting only: self._lock may acquire
+        # this lock, never the reverse), so the two locks cannot deadlock each
+        # other regardless of thread count. See docs/device-layer/
+        # DEVICE_LAYER_AUDIT_2026.md item 29 (B4) for the full design.
+        self._state_lock = threading.RLock()
         self._debug_timing = False
         self._deep_timing = False
         self._timing_records: deque[tuple[str, float, float]] = deque(maxlen=500)
@@ -131,12 +139,22 @@ class DeviceCommunicationService:
 
     @contextmanager
     def _device_lock(self, operation: str):
-        """Acquire the service lock, recording wait time when timing is enabled.
+        """Acquire the hardware-I/O lock, recording wait time when timing is enabled.
 
-        All state-mutating public methods serialize through this lock — device
-        communication is intentionally sequential. Use debug/deep diagnostic
-        profiles to measure contention between concurrent callers.
-        Re-entrant: connect() calls disconnect() internally; both use this lock.
+        The slow, real-hardware-touching public methods (connect/disconnect/
+        send_command/probe_endpoint/refresh_device_ports) and the profile-
+        mutation methods serialize through this lock — device communication
+        is intentionally sequential, service-wide, regardless of which device
+        is involved. Use debug/deep diagnostic profiles to measure contention
+        between concurrent callers. Re-entrant: connect() calls disconnect()
+        internally; both use this lock.
+
+        This does NOT guard self._profiles/_connections/_last_errors/_events -
+        see _state() for that. Methods that only read that bookkeeping
+        (is_connected, status, list_statuses, connection, list_profiles,
+        get_profile, list_events) never acquire this lock at all, so they
+        never block behind a slow operation here. See docs/device-layer/
+        DEVICE_LAYER_AUDIT_2026.md item 29 (B4).
         """
         t0 = perf_counter()
         with self._lock:
@@ -145,6 +163,31 @@ class DeviceCommunicationService:
                 self._timing_records.append((operation, wait_ms, t0))
                 if wait_ms > 5.0:
                     _LOGGER.debug("[device-timing] %.1f ms wait — %s", wait_ms, operation)
+            yield
+
+    @contextmanager
+    def _state(self, operation: str):
+        """Acquire the fast state lock guarding self._profiles/_connections/
+        _last_errors/_events, recording wait time (prefixed "state:") when
+        timing is enabled.
+
+        Kept deliberately separate from _device_lock (the slow hardware-I/O
+        lock) so pure bookkeeping reads/writes never wait behind real device
+        I/O. Critical sections here must stay short - no hardware I/O, no
+        file I/O, no calls back into _device_lock - or this defeats the whole
+        point of the split. Never acquired while already holding _device_lock
+        from the *reverse* direction (i.e. this may be nested inside
+        _device_lock, never the other way around) - that one-way nesting is
+        what makes deadlock impossible between the two locks. See
+        docs/device-layer/DEVICE_LAYER_AUDIT_2026.md item 29 (B4).
+        """
+        t0 = perf_counter()
+        with self._state_lock:
+            if self._debug_timing:
+                wait_ms = (perf_counter() - t0) * 1000.0
+                self._timing_records.append((f"state:{operation}", wait_ms, t0))
+                if wait_ms > 5.0:
+                    _LOGGER.debug("[device-timing] %.1f ms wait — state:%s", wait_ms, operation)
             yield
 
     def timing_summary(self) -> dict[str, dict] | None:
@@ -164,20 +207,21 @@ class DeviceCommunicationService:
         }
 
     def list_profiles(self) -> list[DeviceProfile]:
-        with self._lock:
+        with self._state("list_profiles"):
             return list(self._profiles.values())
 
     def get_profile(self, label: str) -> DeviceProfile | None:
-        with self._lock:
+        with self._state(f"get_profile:{label}"):
             return self._profiles.get(self._canonical_label(label))
 
     def save_profile(self, profile: DeviceProfile) -> None:
         with self._device_lock("save_profile"):
             original_label = str(profile.label or "").strip()
             normalized = self._normalize_profile(profile)
-            if original_label and original_label != normalized.label:
-                self._profiles.pop(original_label, None)
-            self._profiles[normalized.label] = normalized
+            with self._state("save_profile_commit"):
+                if original_label and original_label != normalized.label:
+                    self._profiles.pop(original_label, None)
+                self._profiles[normalized.label] = normalized
             self.save_profiles()
 
     def delete_profile(self, label: str) -> None:
@@ -186,7 +230,8 @@ class DeviceCommunicationService:
             if not normalized_label:
                 return
             self._disconnect_impl(normalized_label)
-            self._profiles.pop(normalized_label, None)
+            with self._state(f"delete_profile_commit:{normalized_label}"):
+                self._profiles.pop(normalized_label, None)
             self.save_profiles()
 
     # Backward-compatible names used by the older codebase.
@@ -311,9 +356,10 @@ class DeviceCommunicationService:
                 client = RegloICCClient()
                 client.connect(endpoint)
                 probe = cached_pump_probe if cached_pump_probe is not None else client.get_probe()
-                self._connections[profile.label] = client
-                self._connection_owners[profile.label] = client._claim_owner
-                self._last_errors.pop(profile.label, None)
+                with self._state(f"connect_commit:{profile.label}"):
+                    self._connections[profile.label] = client
+                    self._connection_owners[profile.label] = client._claim_owner
+                    self._last_errors.pop(profile.label, None)
                 status = self._make_status(profile.label, profile, True, None, {
                     "model": probe.model,
                     "serial_number": probe.serial_number,
@@ -327,9 +373,10 @@ class DeviceCommunicationService:
                 controller = AMFSwitchController()
                 controller.connect(endpoint)
                 probe = controller.get_probe()
-                self._connections[profile.label] = controller
-                self._connection_owners[profile.label] = controller._claim_owner
-                self._last_errors.pop(profile.label, None)
+                with self._state(f"connect_commit:{profile.label}"):
+                    self._connections[profile.label] = controller
+                    self._connection_owners[profile.label] = controller._claim_owner
+                    self._last_errors.pop(profile.label, None)
                 status = self._make_status(profile.label, profile, True, None, {
                     "model": probe.model,
                     "serial_number": probe.serial_number or "",
@@ -341,9 +388,10 @@ class DeviceCommunicationService:
 
             if profile.type in {"switch", "valve"} or profile.driver not in {"auto", "unknown", ""}:
                 controller, probe = detect_valve_controller(endpoint)
-                self._connections[profile.label] = controller
-                self._connection_owners[profile.label] = controller._claim_owner
-                self._last_errors.pop(profile.label, None)
+                with self._state(f"connect_commit:{profile.label}"):
+                    self._connections[profile.label] = controller
+                    self._connection_owners[profile.label] = controller._claim_owner
+                    self._last_errors.pop(profile.label, None)
                 status = self._make_status(profile.label, profile, True, None, {
                     "model": probe.model,
                     "serial_number": probe.serial_number or "",
@@ -358,7 +406,8 @@ class DeviceCommunicationService:
                 "Probe the port first or assign a device type."
             )
         except Exception as exc:
-            self._last_errors[profile.label] = str(exc)
+            with self._state(f"connect_fail:{profile.label}"):
+                self._last_errors[profile.label] = str(exc)
             self._record_event(label=profile.label, endpoint=endpoint, owner=f"device_comm:{profile.label}", action="connect", command=None, result="fail", duration_ms=0.0, message=str(exc))
             raise
 
@@ -368,8 +417,14 @@ class DeviceCommunicationService:
 
     def _disconnect_impl(self, label: str) -> DeviceStatus:
         normalized = self._canonical_label(label)
-        profile = self._profiles.get(normalized)
-        connection = self._connections.pop(normalized, None)
+        # Pop self._connections BEFORE the real close() I/O below (not after):
+        # a concurrent fast reader (is_connected/status/connection, which only
+        # take _state_lock) must never observe "connected" for a connection
+        # whose teardown is already irreversibly in progress. See
+        # docs/device-layer/DEVICE_LAYER_AUDIT_2026.md item 29 (B4).
+        with self._state(f"disconnect_pop:{normalized}"):
+            profile = self._profiles.get(normalized)
+            connection = self._connections.pop(normalized, None)
         owner = self._connection_owners.pop(normalized, None)
         endpoint = getattr(connection, "port", None) if connection is not None else (profile.endpoint if profile is not None else None)
         if endpoint and owner:
@@ -380,13 +435,16 @@ class DeviceCommunicationService:
                 if callable(close):
                     close()
             finally:
-                self._last_errors.pop(normalized, None)
+                with self._state(f"disconnect_clear_error:{normalized}"):
+                    self._last_errors.pop(normalized, None)
         if profile is None and connection is None:
             raise ControllerError(f"Unknown device label {label!r}.")
         if profile is None:
             profile = new_device_profile(label=normalized, type="unknown", driver=type(connection).__name__, endpoint=getattr(connection, "port", None))
         self._record_event(label=normalized, endpoint=str(endpoint or "") or None, owner=owner or "", action="disconnect", command=None, result="success", duration_ms=0.0, message="")
-        return self._make_status(normalized, profile, False, self._last_errors.get(normalized), {})
+        with self._state(f"disconnect_status:{normalized}"):
+            last_error = self._last_errors.get(normalized)
+        return self._make_status(normalized, profile, False, last_error, {})
 
     def disconnect_device(self, label: str) -> None:
         self.disconnect(label)
@@ -395,24 +453,27 @@ class DeviceCommunicationService:
         with self._device_lock(f"send_command:{label}"):
             started = perf_counter()
             normalized = str(label or "").strip()
-            connection = self._connections.get(normalized)
+            with self._state(f"send_command_lookup:{normalized}"):
+                connection = self._connections.get(normalized)
             if connection is None:
                 return DeviceCommandResult(normalized, command.command_type, False, None, "Device is not connected.", 0.0)
 
             try:
                 response = self._dispatch_command(connection, command)
-                self._last_errors.pop(normalized, None)
+                with self._state(f"send_command_clear_error:{normalized}"):
+                    self._last_errors.pop(normalized, None)
                 result = DeviceCommandResult(normalized, command.command_type, True, response, None, (perf_counter() - started) * 1000.0)
                 self._record_event(label=normalized, endpoint=str(getattr(connection, "port", None) or ""), owner=self._connection_owners.get(normalized, ""), action="command", command=command.command_type, result="success", duration_ms=result.duration_ms, message="")
                 return result
             except Exception as exc:
-                self._last_errors[normalized] = str(exc)
+                with self._state(f"send_command_set_error:{normalized}"):
+                    self._last_errors[normalized] = str(exc)
                 result = DeviceCommandResult(normalized, command.command_type, False, None, str(exc), (perf_counter() - started) * 1000.0)
                 self._record_event(label=normalized, endpoint=str(getattr(connection, "port", None) or ""), owner=self._connection_owners.get(normalized, ""), action="command", command=command.command_type, result="fail", duration_ms=result.duration_ms, message=str(exc))
                 return result
 
     def status(self, label: str) -> DeviceStatus:
-        with self._lock:
+        with self._state(f"status:{label}"):
             normalized = self._canonical_label(label)
             profile = self._profiles.get(normalized)
             if profile is None:
@@ -430,7 +491,9 @@ class DeviceCommunicationService:
             return self._make_status(normalized, profile, connected, self._last_errors.get(normalized), dict(profile.identity))
 
     def list_statuses(self) -> list[DeviceStatus]:
-        with self._lock:
+        # Reentrant: calls self.status() per label while already holding
+        # _state_lock - safe because _state_lock is an RLock. See _state().
+        with self._state("list_statuses"):
             labels = list(self._profiles)
             for label in self._connections:
                 if label not in self._profiles:
@@ -442,11 +505,11 @@ class DeviceCommunicationService:
         return self.list_statuses()
 
     def connection(self, label: str) -> object | None:
-        with self._lock:
+        with self._state(f"connection:{label}"):
             return self._connections.get(self._canonical_label(label))
 
     def is_connected(self, label: str) -> bool:
-        with self._lock:
+        with self._state(f"is_connected:{label}"):
             connection = self._connections.get(self._canonical_label(label))
             return bool(connection is not None and getattr(connection, "is_connected", lambda: False)())
 
@@ -461,12 +524,13 @@ class DeviceCommunicationService:
                 new_device_profile(label="switch_2", type="switch", driver="auto", role="outlet_switch", display_name="Outlet Switch", metadata=_default),
                 new_device_profile(label="selector_1", type="selector", driver="amf-mswitch", role="main_selector", display_name="Main Selector", metadata=_default),
             )
-            if not self._profiles:
-                for profile in defaults:
-                    self._profiles[profile.label] = profile
-            else:
-                for profile in defaults:
-                    self._profiles.setdefault(profile.label, profile)
+            with self._state("ensure_default_profiles_commit"):
+                if not self._profiles:
+                    for profile in defaults:
+                        self._profiles[profile.label] = profile
+                else:
+                    for profile in defaults:
+                        self._profiles.setdefault(profile.label, profile)
             self.save_profiles()
 
     def register_endpoint_assignment(
@@ -493,14 +557,15 @@ class DeviceCommunicationService:
         deliberate, dedicated "assign this port" action should pin.
         """
         with self._device_lock(f"register_endpoint:{label}"):
-            normalized_label = str(label or "").strip()
-            if not normalized_label:
-                normalized_label = next_device_label(set(self._profiles), device_type if device_type != "auto" else "device")
-            normalized_label = self._canonical_label(normalized_label)
             normalized_type = _normalize_device_type(device_type or "auto")
             normalized_endpoint = _normalize_endpoint_value(endpoint)
-            profile = new_device_profile(label=normalized_label, type=normalized_type, driver=driver, endpoint=normalized_endpoint, role=role)
-            self._profiles[normalized_label] = profile
+            with self._state(f"register_endpoint_commit:{label}"):
+                normalized_label = str(label or "").strip()
+                if not normalized_label:
+                    normalized_label = next_device_label(set(self._profiles), device_type if device_type != "auto" else "device")
+                normalized_label = self._canonical_label(normalized_label)
+                profile = new_device_profile(label=normalized_label, type=normalized_type, driver=driver, endpoint=normalized_endpoint, role=role)
+                self._profiles[normalized_label] = profile
             if normalized_endpoint and mark_manual:
                 set_port_assignment(normalized_endpoint, device_assignment_label(normalized_type))
             self.save_profiles()
@@ -523,52 +588,77 @@ class DeviceCommunicationService:
         endpoint is updated in place and persisted. On creation, the next available label
         for *device_type* is auto-assigned (pump_1, pump_2, ...).
         """
+        # Each branch below is restructured as: state-lock block does the
+        # lookup/mutation and computes the result, lock released, then
+        # save_profiles() (file I/O) runs unlocked - never do file I/O while
+        # holding _state_lock. See docs/device-layer/DEVICE_LAYER_AUDIT_2026.md
+        # item 29 (B4). The whole method still runs under the outer I/O lock
+        # (self._device_lock), which continues to serialize this against every
+        # other connect/disconnect/profile-mutation call exactly as before -
+        # only the nested state-lock sections are new.
         with self._device_lock("find_or_create_profile"):
             endpoint = _normalize_endpoint_value(endpoint) or ""
-            if fingerprint:
-                for profile in self._profiles.values():
-                    if profile.type == device_type and profile.fingerprint == fingerprint:
-                        if profile.endpoint != endpoint:
-                            updated = replace(profile, endpoint=endpoint, identity=dict(identity))
-                            self._profiles[profile.label] = updated
-                            self.save_profiles()
-                            return updated
-                        return profile
 
-            for profile in self._profiles.values():
-                if profile.type == device_type and _normalize_endpoint_value(profile.endpoint) == endpoint:
-                    updated = replace(profile, endpoint=endpoint, identity=dict(identity))
-                    self._profiles[profile.label] = updated
+            with self._state("find_or_create_profile_fingerprint_match"):
+                result: DeviceProfile | None = None
+                mutated = False
+                if fingerprint:
+                    for profile in self._profiles.values():
+                        if profile.type == device_type and profile.fingerprint == fingerprint:
+                            if profile.endpoint != endpoint:
+                                result = replace(profile, endpoint=endpoint, identity=dict(identity))
+                                self._profiles[profile.label] = result
+                                mutated = True
+                            else:
+                                result = profile
+                            break
+            if result is not None:
+                if mutated:
                     self.save_profiles()
-                    return updated
+                return result
 
-            reusable_profiles = [
-                profile
-                for profile in self._profiles.values()
-                if profile.type == device_type and _normalize_endpoint_value(profile.endpoint) is None
-            ]
-            if reusable_profiles:
-                reusable_profiles.sort(key=lambda profile: (profile.metadata.get("source") != "default", profile.label))
-                profile = reusable_profiles[0]
-                updated = replace(profile, endpoint=endpoint, identity=dict(identity))
-                self._profiles[profile.label] = updated
+            with self._state("find_or_create_profile_endpoint_match"):
+                result = None
+                for profile in self._profiles.values():
+                    if profile.type == device_type and _normalize_endpoint_value(profile.endpoint) == endpoint:
+                        result = replace(profile, endpoint=endpoint, identity=dict(identity))
+                        self._profiles[profile.label] = result
+                        break
+            if result is not None:
                 self.save_profiles()
-                return updated
+                return result
 
-            label = next_device_label(set(self._profiles), device_type)
-            profile = new_device_profile(
-                label=label,
-                type=device_type,
-                driver=driver,
-                endpoint=endpoint,
-                role=role,
-                display_name=display_name,
-                fingerprint=fingerprint,
-            )
-            profile = replace(profile, identity=dict(identity))
-            self._profiles[label] = profile
+            with self._state("find_or_create_profile_reuse"):
+                reusable_profiles = [
+                    profile
+                    for profile in self._profiles.values()
+                    if profile.type == device_type and _normalize_endpoint_value(profile.endpoint) is None
+                ]
+                result = None
+                if reusable_profiles:
+                    reusable_profiles.sort(key=lambda profile: (profile.metadata.get("source") != "default", profile.label))
+                    reused_profile = reusable_profiles[0]
+                    result = replace(reused_profile, endpoint=endpoint, identity=dict(identity))
+                    self._profiles[reused_profile.label] = result
+            if result is not None:
+                self.save_profiles()
+                return result
+
+            with self._state("find_or_create_profile_create"):
+                label = next_device_label(set(self._profiles), device_type)
+                new_profile = new_device_profile(
+                    label=label,
+                    type=device_type,
+                    driver=driver,
+                    endpoint=endpoint,
+                    role=role,
+                    display_name=display_name,
+                    fingerprint=fingerprint,
+                )
+                new_profile = replace(new_profile, identity=dict(identity))
+                self._profiles[label] = new_profile
             self.save_profiles()
-            return profile
+            return new_profile
 
     def connect_enabled_profiles(self) -> list[DeviceStatus]:
         statuses: list[DeviceStatus] = []
@@ -590,27 +680,33 @@ class DeviceCommunicationService:
         return results
 
     def list_events(self) -> list[DeviceEvent]:
-        with self._lock:
+        with self._state("list_events"):
             return list(self._events)
 
     def load_profiles(self) -> None:
         with self._device_lock("load_profiles"):
             raw = load_app_setting(_DEVICE_PROFILE_SETTING_KEY, [])
-            self._profiles.clear()
-            if isinstance(raw, dict):
-                raw = raw.get("devices", [])
-            if not isinstance(raw, list):
-                return
-            for item in raw:
-                if not isinstance(item, dict):
-                    continue
-                profile = self._profile_from_payload(item)
-                if profile is None:
-                    continue
-                self._profiles[profile.label] = profile
+            with self._state("load_profiles_commit"):
+                self._profiles.clear()
+                if isinstance(raw, dict):
+                    raw = raw.get("devices", [])
+                if not isinstance(raw, list):
+                    return
+                for item in raw:
+                    if not isinstance(item, dict):
+                        continue
+                    profile = self._profile_from_payload(item)
+                    if profile is None:
+                        continue
+                    self._profiles[profile.label] = profile
 
     def save_profiles(self) -> None:
-        payload = {"devices": [asdict(profile) for profile in self._profiles.values()]}
+        # Snapshot under the fast state lock (protects self._profiles), then
+        # do the real file write (save_app_setting) unlocked - file I/O must
+        # never happen while holding _state_lock. See _state()'s docstring.
+        with self._state("save_profiles_snapshot"):
+            snapshot = list(self._profiles.values())
+        payload = {"devices": [asdict(profile) for profile in snapshot]}
         save_app_setting(_DEVICE_PROFILE_SETTING_KEY, payload)
 
     def _profile_from_payload(self, item: dict[str, object]) -> DeviceProfile | None:
@@ -658,19 +754,19 @@ class DeviceCommunicationService:
         duration_ms: float,
         message: str,
     ) -> None:
-        self._events.append(
-            DeviceEvent(
-                timestamp_s=perf_counter(),
-                label=label,
-                endpoint=endpoint,
-                owner=owner,
-                action=action,
-                command=command,
-                result=result,
-                duration_ms=max(float(duration_ms), 0.0),
-                message=message,
-            )
+        event = DeviceEvent(
+            timestamp_s=perf_counter(),
+            label=label,
+            endpoint=endpoint,
+            owner=owner,
+            action=action,
+            command=command,
+            result=result,
+            duration_ms=max(float(duration_ms), 0.0),
+            message=message,
         )
+        with self._state("record_event"):
+            self._events.append(event)
 
     def _normalize_profile(self, profile: DeviceProfile) -> DeviceProfile:
         label = str(profile.label or "").strip()
@@ -707,7 +803,8 @@ class DeviceCommunicationService:
 
     def _require_profile(self, label: str) -> DeviceProfile:
         normalized = self._canonical_label(label)
-        profile = self._profiles.get(normalized)
+        with self._state(f"require_profile:{normalized}"):
+            profile = self._profiles.get(normalized)
         if profile is None:
             raise ControllerError(f"Unknown device label {label!r}.")
         return profile

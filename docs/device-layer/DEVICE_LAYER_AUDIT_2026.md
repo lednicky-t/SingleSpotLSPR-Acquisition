@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-25 (follow-up pass: 2026-07-20; full rewrite: 2026-07-20; Device Manager
 migration + simulated-device discussion + orphaned-widget deletion: 2026-07-21; whole-subsystem
-audit: 2026-07-21)
+audit: 2026-07-21; B4 lock split: 2026-07-22)
 **Scope:** `apps/sLSPR/acq/src/lspr_app/device/` and related GUI initializer
 **Status:** Discovery/connect architecture rewritten — see "2026-07-20: full device
 lifecycle rewrite" below. `DeviceManagerDialog`'s manual Connect/Disconnect for the
@@ -16,12 +16,15 @@ commands, including `switch.move_to`, on the general-purpose `QThreadPool` inste
 `device_io_pool()` — fixed 2026-07-21. A further report ("UI freezes during device
 initialization") traced to GUI-thread status-display code sharing a lock with the slow real
 connect/probe calls happening on `device_io_pool` — fixed 2026-07-21 with a non-blocking
-cached-status read, see below. Remaining open items: `DeviceManagerDialog`'s
+cached-status read, see below. **B4 (below) implemented 2026-07-22** — `DeviceCommunicationService`
+now has a separate fast state lock for `is_connected`/`status`/`list_statuses`/`connection`/
+`list_profiles`/`get_profile`/`list_events`, so those never block behind a slow connect/
+disconnect/command/probe/discover on any device; the non-blocking cached-status read from the
+prior fix stays in place as a separate, still-useful optimization (it avoids taking any lock at
+all, not just the slow one). Remaining open items: `DeviceManagerDialog`'s
 "Scan && connect" button (still a separate discovery/connect path), B2 (standalone device
 window - `hardware_inventory.py` appears to be pre-built, unwired scaffolding for this),
-B3 (fast reconnect, low priority), B4 (split `DeviceCommunicationService`'s lock into a fast
-status-read lock and a slow hardware-I/O lock — flagged 2026-07-21, wants a design discussion
-first, see the fix sequence below). Simulated pump/valve/selector devices ("Part B")
+B3 (fast reconnect, low priority). Simulated pump/valve/selector devices ("Part B")
 were discussed and explicitly dropped — see below.
 
 ---
@@ -836,14 +839,22 @@ change: `serial_number` currently duplicates `protocol_version`, which wastes th
 28. Dead code found, not removed: `hardware_inventory.py` (unwired B2 scaffolding),
     `connect_enabled_profiles`/`safe_stop_all`/`probe_pump_port` on `DeviceCommunicationService`
     (no callers anywhere) (2026-07-21)
-29. B4 — Split `DeviceCommunicationService`'s single lock into a fast state-lock (for
-    `is_connected`/`connection`/`status`/etc. reads) and a slow hardware-I/O lock (for the real
-    `connect`/`disconnect`/`send_command`/`probe_endpoint`/`refresh_device_ports` work). Flagged,
-    not started (2026-07-21) — see "UI freezes during device initialization" above for why this
-    would be the more complete version of that fix. Would also help `shutdown_all`/
-    `rerun_post_connect`'s internal `is_connected()` calls, which weren't touched by that fix.
-    Restructures locking in the most safety-critical code in this file, with zero existing test
-    coverage for `device_manager.py` itself - needs a design discussion (what should the lock
-    ordering guarantee be, does it need new tests written alongside it, does it change behavior
-    for any edge case like a status read racing a disconnect) before implementation, not a
-    drive-by change.
+29. B4 — **Done (2026-07-22).** Split `DeviceCommunicationService`'s single lock into a fast
+    state lock (`self._state_lock`, via a new `_state(operation)` helper — for
+    `is_connected`/`connection`/`status`/`list_statuses`/`list_profiles`/`get_profile`/
+    `list_events`, plus the brief bookkeeping-dict mutations nested inside the slow methods) and
+    the existing hardware-I/O lock (`self._lock`/`_device_lock`, unchanged, still serializes
+    `connect`/`disconnect`/`send_command`/`probe_endpoint`/`refresh_device_ports`/profile-mutation
+    methods service-wide, exactly as before). One-way nesting only (I/O lock may acquire the
+    state lock, never the reverse), so no deadlock is possible between the two. Also fixes a
+    pre-existing gap: `save_profiles()` had no lock at all before this. New test file
+    `tests/test_device_manager_locking.py` (4 tests, stable across repeated runs) proves a fast
+    read doesn't block during a slow connect or disconnect, that disconnect's `self._connections`
+    pop happens before the real `close()` I/O (so a concurrent reader never sees "connected" for
+    a connection whose teardown is already in progress), that the reentrant connect-over-
+    existing-connection path still works, and that concurrent status reads survive connect/
+    disconnect churn without hitting a dict-mutated-during-iteration race. Also helps
+    `shutdown_all`/`rerun_post_connect`'s internal `is_connected()` calls, which weren't touched
+    by the earlier cached-status-read fix. See the design writeup this was implemented from for
+    the full lock-ordering/torn-read/reentrancy reasoning (kept in this session's plan history,
+    not duplicated here).
