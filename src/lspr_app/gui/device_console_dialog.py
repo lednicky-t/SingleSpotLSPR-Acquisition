@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from PyQt6.QtCore import Qt, QTimer, QThreadPool, QRunnable, QObject, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QRunnable, QObject, pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
     QCheckBox,
@@ -189,8 +189,6 @@ class DeviceManagerDialog(QDialog):
         self.setObjectName("deviceManagerDialog")
         self.setWindowModality(Qt.WindowModality.NonModal)
         self.resize(1180, 760)
-
-        self._thread_pool = QThreadPool.globalInstance()
         self._service = getattr(parent, "_device_comm_service", None)
         if not isinstance(self._service, DeviceCommunicationService):
             self._service = DeviceCommunicationService.shared()
@@ -429,9 +427,6 @@ class DeviceManagerDialog(QDialog):
         self._command_result = QPlainTextEdit(self)
         self._command_result.setReadOnly(True)
         self._command_result.setPlaceholderText("Command result appears here.")
-        self._raw_command = QLineEdit(self)
-        self._raw_command.setPlaceholderText("Raw command requires debug mode")
-        self._raw_command.setEnabled(False)
 
         for label, value in (
             ("Pump stop all", "pump.stop_all"),
@@ -455,7 +450,6 @@ class DeviceManagerDialog(QDialog):
         form.addRow("Device label", self._command_label_combo)
         form.addRow("Preset command", self._command_type_combo)
         form.addRow("Extra payload", self._command_payload)
-        form.addRow("Raw command", self._raw_command)
 
         layout = QVBoxLayout()
         layout.addLayout(form)
@@ -500,7 +494,7 @@ class DeviceManagerDialog(QDialog):
         task.signals.finished.connect(self._on_discover_finished)
         task.signals.failed.connect(self._on_discover_failed)
         self._discover_task = task
-        self._thread_pool.start(task)
+        device_io_pool().start(task)
 
     def _on_discover_progress(self, message: str) -> None:
         self._discover_status.setText(message)
@@ -642,12 +636,7 @@ class DeviceManagerDialog(QDialog):
         if device_key is not None:
             self._connect_canonical_device(device_key, label)
             return
-        try:
-            self._service.connect(label)
-        except Exception as exc:
-            QMessageBox.warning(self, "Connect failed", str(exc))
-        self.refresh_connected_devices()
-        self.refresh_profiles()
+        self._connect_generic_profile(label)
 
     def _disconnect_selected_profile_from_profiles_tab(self) -> None:
         label = self._selected_profile_label()
@@ -658,10 +647,37 @@ class DeviceManagerDialog(QDialog):
         if device_key is not None:
             self._disconnect_canonical_device(device_key)
             return
-        try:
-            self._service.disconnect(label)
-        except Exception as exc:
-            QMessageBox.warning(self, "Disconnect failed", str(exc))
+        self._disconnect_generic_profile(label)
+
+    # -------------------------------------------------------------------------
+    # Non-canonical connect/disconnect - any profile other than the single
+    # canonical pump/switch/selector (aux/waste pump, second switch, or
+    # anything created via Probe/assign). These call DeviceCommunicationService
+    # directly rather than DeviceLifecycleController (which only knows about
+    # the 3 canonical devices), but must still run off the GUI thread since
+    # connect/disconnect do real hardware I/O - reuses the existing, previously
+    # unused _RefreshTask + device_io_pool(), the same dedicated single-lane
+    # pool the canonical path uses.
+    # -------------------------------------------------------------------------
+
+    def _connect_generic_profile(self, label: str) -> None:
+        task = _RefreshTask(lambda: self._service.connect(label))
+        task.signals.finished.connect(lambda _status: self._on_generic_device_task_done())
+        task.signals.failed.connect(lambda message: self._on_generic_device_task_failed("Connect failed", message))
+        device_io_pool().start(task)
+
+    def _disconnect_generic_profile(self, label: str) -> None:
+        task = _RefreshTask(lambda: self._service.disconnect(label))
+        task.signals.finished.connect(lambda _status: self._on_generic_device_task_done())
+        task.signals.failed.connect(lambda message: self._on_generic_device_task_failed("Disconnect failed", message))
+        device_io_pool().start(task)
+
+    def _on_generic_device_task_done(self) -> None:
+        self.refresh_connected_devices()
+        self.refresh_profiles()
+
+    def _on_generic_device_task_failed(self, title: str, message: str) -> None:
+        QMessageBox.warning(self, title, message)
         self.refresh_connected_devices()
         self.refresh_profiles()
 
@@ -675,15 +691,13 @@ class DeviceManagerDialog(QDialog):
         except Exception as exc:
             QMessageBox.warning(self, "Test failed", str(exc))
             return
-        self._log_output.setPlainText(str(asdict(status)))
+        QMessageBox.information(self, "Device status", str(asdict(status)))
 
     def refresh_port_list(self) -> None:
         ports = self._service.scan_passive()
         self._port_list_table.setRowCount(len(ports))
         self._probe_port_combo.blockSignals(True)
         self._probe_port_combo.clear()
-        self._command_label_combo.blockSignals(True)
-        self._command_label_combo.clear()
         for row, port in enumerate(ports):
             self._probe_port_combo.addItem(port.port, port.port)
             values = (
@@ -696,10 +710,7 @@ class DeviceManagerDialog(QDialog):
             )
             for column, value in enumerate(values):
                 self._port_list_table.setItem(row, column, QTableWidgetItem(str(value)))
-        for status in self._service.list_devices():
-            self._command_label_combo.addItem(status.label, status.label)
         self._probe_port_combo.blockSignals(False)
-        self._command_label_combo.blockSignals(False)
         self._port_list_table.resizeColumnsToContents()
 
     def refresh_connected_devices(self) -> None:
@@ -722,6 +733,16 @@ class DeviceManagerDialog(QDialog):
             for column, value in enumerate(values):
                 self._connected_table.setItem(row, column, QTableWidgetItem(str(value)))
         self._connected_table.resizeColumnsToContents()
+
+        # The Commands tab's device dropdown belongs to device state, not the
+        # port scan - refreshed here (called after every connect/disconnect,
+        # canonical or generic) instead of refresh_port_list() so it never
+        # goes stale after a normal Connect/Disconnect click.
+        self._command_label_combo.blockSignals(True)
+        self._command_label_combo.clear()
+        for status in devices:
+            self._command_label_combo.addItem(status.label, status.label)
+        self._command_label_combo.blockSignals(False)
 
     def refresh_probe_log(self) -> None:
         sections: list[str] = []
@@ -768,7 +789,14 @@ class DeviceManagerDialog(QDialog):
             QMessageBox.information(self, "Probe", "Select an endpoint first.")
             return
         expected = str(self._probe_type_combo.currentData() or "auto")
-        result = self._service.probe_endpoint(endpoint, expected)
+        self._probe_button.setEnabled(False)
+        task = _RefreshTask(lambda: self._service.probe_endpoint(endpoint, expected))
+        task.signals.finished.connect(self._on_probe_finished)
+        task.signals.failed.connect(self._on_probe_failed)
+        device_io_pool().start(task)
+
+    def _on_probe_finished(self, result: object) -> None:
+        self._probe_button.setEnabled(True)
         lines = [
             f"endpoint: {result.endpoint}",
             f"detected_type: {result.detected_type or '-'}",
@@ -780,6 +808,11 @@ class DeviceManagerDialog(QDialog):
         for key, value in result.identity.items():
             lines.append(f"{key}: {value}")
         self._probe_result.setPlainText("\n".join(lines))
+        self.refresh_probe_log()
+
+    def _on_probe_failed(self, message: str) -> None:
+        self._probe_button.setEnabled(True)
+        self._probe_result.setPlainText(f"Probe failed: {message}")
         self.refresh_probe_log()
 
     def _assign_selected_endpoint(self) -> None:
@@ -805,12 +838,7 @@ class DeviceManagerDialog(QDialog):
         if device_key is not None:
             self._connect_canonical_device(device_key, label)
             return
-        try:
-            self._service.connect(label)
-        except Exception as exc:
-            QMessageBox.warning(self, "Connect failed", str(exc))
-            return
-        self.refresh_connected_devices()
+        self._connect_generic_profile(label)
 
     def _disconnect_selected_profile(self) -> None:
         label = self._selected_connected_label()
@@ -821,8 +849,7 @@ class DeviceManagerDialog(QDialog):
         if device_key is not None:
             self._disconnect_canonical_device(device_key)
             return
-        self._service.disconnect_device(label)
-        self.refresh_connected_devices()
+        self._disconnect_generic_profile(label)
 
     # -------------------------------------------------------------------------
     # Canonical pump/valve/selector connect+disconnect - routed through
@@ -874,7 +901,7 @@ class DeviceManagerDialog(QDialog):
         except Exception as exc:
             QMessageBox.warning(self, "Test failed", str(exc))
             return
-        self._command_result.setPlainText(str(asdict(status)))
+        QMessageBox.information(self, "Device status", str(asdict(status)))
 
     def _send_command(self) -> None:
         label = self._selected_label()

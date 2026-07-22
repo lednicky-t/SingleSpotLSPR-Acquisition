@@ -858,3 +858,30 @@ change: `serial_number` currently duplicates `protocol_version`, which wastes th
     by the earlier cached-status-read fix. See the design writeup this was implemented from for
     the full lock-ordering/torn-read/reentrancy reasoning (kept in this session's plan history,
     not duplicated here).
+30. `gui/device_console_dialog.py` (Device Manager) audit and fix pass, 2026-07-22, prompted by a
+    maintainer question ("is it logically ok, does each function need to be there") plus a
+    separately-reported UI bug (an orphaned `_probe_output` widget overlapping the tab bar, fixed
+    first, same session - never added to any layout, a leftover from before the code moved to
+    `_probe_result`). The audit found six real issues, all fixed: (a) non-canonical
+    profiles (aux/waste pump, second switch, anything probed/assigned manually) called
+    `service.connect()`/`disconnect_device()` synchronously on the GUI thread - only the single
+    canonical pump/switch/selector went through `DeviceLifecycleController`/`device_io_pool()`;
+    now all of them do, via the previously-defined-but-never-used `_RefreshTask` wrapper; (b)
+    "Scan & connect" submitted real hardware I/O (including AMF selector connects) to
+    `QThreadPool.globalInstance()` instead of `device_io_pool()` - same AMF thread-safety risk
+    class as R7; now uses `device_io_pool()`, `self._thread_pool` removed as dead; (c) the Probe
+    button also ran `service.probe_endpoint()` synchronously on the GUI thread - now async via the
+    same `_RefreshTask`/`device_io_pool()` pattern; (d) both "Test" buttons wrote their result to
+    a *different* tab's text box with no visible feedback on the tab you were looking at - now
+    `QMessageBox.information`; (e) the Commands tab's device dropdown was only refreshed inside
+    `refresh_port_list()`, so a normal connect/disconnect never updated it - moved to
+    `refresh_connected_devices()` (the correct data ownership, and the one called after every
+    connect/disconnect); (f) the "Raw command" field was permanently `setEnabled(False)` scaffolding
+    for the simulated-device debug mode ("Part B") that was explicitly dropped earlier this session
+    - deleted, it could never be enabled by any current code path. Verified via
+    `python -m pyflakes`, the full test suite (no regressions; this file has zero dedicated test
+    coverage, confirmed), and an offscreen-`QApplication` construction/wiring smoke script (no
+    test file exists for this dialog). Remaining, explicitly deferred: the redundancy between the
+    Connected Devices tab's and Profiles tab's near-duplicate Connect/Disconnect/Test
+    implementations - a maintainer-facing simplification question, not a correctness bug, saved
+    for a separate decision.
