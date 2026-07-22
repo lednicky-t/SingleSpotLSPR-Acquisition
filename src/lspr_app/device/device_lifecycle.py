@@ -402,19 +402,24 @@ class DeviceLifecycleController:
             )
             sn = str(probe.serial_number or "").strip()
             fingerprint = f"reglo-icc:{sn}" if sn and sn.upper() not in {"#", "*", ""} else extract_usb_fingerprint(port.hwid)
-            profile = self._service.find_or_create_profile(
-                device_type="pump",
+            # Always the fixed canonical label (pump_1) - never resolved by
+            # searching other profiles for a fingerprint/endpoint match (that
+            # search is find_or_create_profile()'s job, for the general
+            # multi-profile Device Manager flow, not this fixed-label one).
+            # See update_profile_identity()'s docstring and
+            # docs/device-layer/DEVICE_LAYER_AUDIT_2026.md.
+            label = ensure_device_profile(self._service, PUMP, port.device, driver="reglo_icc")
+            self._service.update_profile_identity(
+                label,
                 fingerprint=fingerprint,
-                endpoint=port.device,
                 identity={
                     "model": probe.model,
                     "serial_number": probe.serial_number,
                     "protocol_version": probe.protocol_version,
                     "channel_count": str(probe.channel_count),
                 },
-                driver="reglo_icc",
             )
-            return self._connect_and_setup(PUMP, profile.label, port.device, emit, cached_pump_probe=probe)
+            return self._connect_and_setup(PUMP, label, port.device, emit, cached_pump_probe=probe)
         event = DeviceLifecycleEvent(PUMP, STAGE_FAILED, last_error or "Pump scan completed with no usable device.", error=last_error)
         emit(event)
         return event
@@ -454,19 +459,20 @@ class DeviceLifecycleController:
                 owner="startup:valve", duration_ms=(perf_counter() - started) * 1000.0,
             )
             fingerprint = extract_usb_fingerprint(port.hwid)
-            profile = self._service.find_or_create_profile(
-                device_type="valve",
+            # Always the fixed canonical label (switch_1) - see the matching
+            # comment in _discover_and_connect_pump above.
+            label = ensure_device_profile(self._service, SWITCH, port.device, driver=probe_result.detected_type or "valve")
+            self._service.update_profile_identity(
+                label,
                 fingerprint=fingerprint,
-                endpoint=port.device,
                 identity={
                     "model": probe_result.identity.get("model", ""),
                     "serial_number": probe_result.identity.get("serial_number", ""),
                     "protocol_version": probe_result.identity.get("protocol_version", ""),
                     "controller_type": probe_result.detected_type or "valve",
                 },
-                driver=probe_result.detected_type or "valve",
             )
-            return self._connect_and_setup(SWITCH, profile.label, port.device, emit)
+            return self._connect_and_setup(SWITCH, label, port.device, emit)
         event = DeviceLifecycleEvent(SWITCH, STAGE_FAILED, last_error or "Valve scan completed with no usable device.", error=last_error)
         emit(event)
         return event
@@ -480,19 +486,27 @@ class DeviceLifecycleController:
         port_name = str(getattr(device, "port", "") or "")
         sn = getattr(device, "serial_number", None) or ""
         fingerprint = f"amf-selector:{sn}" if sn else extract_usb_fingerprint(getattr(device, "hwid", ""))
-        profile = self._service.find_or_create_profile(
-            device_type="selector",
+        # Always the fixed canonical label (selector_1) - see the matching
+        # comment in _discover_and_connect_pump above. This is the exact bug
+        # reported 2026-07-22: a stale selector_2 profile elsewhere already
+        # held this fingerprint, so find_or_create_profile connected the
+        # real selector under "selector_2" while every experiment-control
+        # connectivity check looked at "selector_1" - the plan silently
+        # skipped every M-Switch move with "controller not connected" even
+        # though the device was genuinely connected, just under the wrong
+        # label. See docs/device-layer/DEVICE_LAYER_AUDIT_2026.md.
+        label = ensure_device_profile(self._service, SELECTOR, port_name, driver="amf-mswitch")
+        self._service.update_profile_identity(
+            label,
             fingerprint=fingerprint,
-            endpoint=port_name,
             identity={
                 "model": getattr(device, "model", ""),
                 "serial_number": sn,
                 "protocol_version": getattr(device, "protocol_version", "") or "",
                 "controller_type": getattr(device, "controller_type", "amf-mswitch"),
             },
-            driver="amf-mswitch",
         )
-        return self._connect_and_setup(SELECTOR, profile.label, port_name, emit)
+        return self._connect_and_setup(SELECTOR, label, port_name, emit)
 
     # -- The one real connect implementation -----------------------------------
 

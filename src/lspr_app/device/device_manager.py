@@ -234,6 +234,49 @@ class DeviceCommunicationService:
                 self._profiles.pop(normalized_label, None)
             self.save_profiles()
 
+    def update_profile_identity(
+        self,
+        label: str,
+        *,
+        fingerprint: str | None = None,
+        identity: dict[str, str] | None = None,
+    ) -> DeviceProfile | None:
+        """Update an existing profile's fingerprint/identity in place, without
+        touching its label or endpoint and without searching any other
+        profile.
+
+        Used by the canonical device lifecycle (pump_1/switch_1/selector_1,
+        see device/device_lifecycle.py) to record what physical unit is
+        currently plugged in. Deliberately separate from
+        find_or_create_profile(), which resolves a label by searching for a
+        fingerprint/endpoint match across *all* profiles - correct for the
+        general multi-profile Device Manager discovery flow, but wrong for
+        the fixed canonical labels: if a stale profile elsewhere already
+        held a matching fingerprint, find_or_create_profile would silently
+        connect the real device under that other label instead of the
+        canonical one, which is exactly what every other connectivity check
+        in the app (device_label_for()) assumes it can rely on. See
+        docs/device-layer/DEVICE_LAYER_AUDIT_2026.md for the incident this
+        fixes. Returns None if no profile exists at *label* yet - callers
+        should call register_endpoint_assignment()/ensure_device_profile()
+        first to guarantee one does.
+        """
+        with self._device_lock(f"update_profile_identity:{label}"):
+            with self._state(f"update_profile_identity_read:{label}"):
+                normalized_label = self._canonical_label(label)
+                profile = self._profiles.get(normalized_label)
+            if profile is None:
+                return None
+            updated = replace(
+                profile,
+                fingerprint=str(fingerprint) if fingerprint is not None else profile.fingerprint,
+                identity=dict(identity) if identity is not None else dict(profile.identity),
+            )
+            with self._state(f"update_profile_identity_commit:{normalized_label}"):
+                self._profiles[normalized_label] = updated
+            self.save_profiles()
+            return updated
+
     # Backward-compatible names used by the older codebase.
     def register_profile(self, profile: DeviceProfile) -> None:
         self.save_profile(profile)

@@ -885,3 +885,37 @@ change: `serial_number` currently duplicates `protocol_version`, which wastes th
     Connected Devices tab's and Profiles tab's near-duplicate Connect/Disconnect/Test
     implementations - a maintainer-facing simplification question, not a correctness bug, saved
     for a separate decision.
+31. **Selector silently ignored plan-step move commands despite showing connected - fixed
+    2026-07-22.** Real incident, traced live: user reported "selector is connected but does not
+    move with the experiment running." Log showed `M-Switch connected: RVMFS on COM9` at startup,
+    then `M-Switch command skipped | controller not connected | step=1 switch=4` when the plan
+    tried to move it. Root cause: `DeviceLifecycleController._discover_and_connect_selector`
+    (and the equivalent pump/valve methods) resolved which profile to connect via
+    `service.find_or_create_profile()` - a fingerprint/endpoint search across *all* profiles,
+    correct for the general multi-profile Device Manager discovery flow but wrong for the fixed
+    canonical labels this controller owns. The user's settings had a stale `selector_2` profile
+    (from an earlier session, before canonical defaults existed) already holding the real
+    selector's fingerprint, so discovery connected the physical device under `selector_2` -
+    while every experiment-control connectivity check (`_service_device_connected`, gating
+    `_switch_cmd()`'s `mswitch_connected`) looks at the fixed canonical `selector_1`
+    (`device_label_for(SELECTOR)`). The device was genuinely connected, just under the wrong
+    label, so it looked fine at startup and silently no-opped every move during a plan.
+    **Fix:** `_discover_and_connect_pump`/`_discover_and_connect_valve`/`_discover_and_connect_selector`
+    now resolve via `ensure_device_profile()` - the exact mechanism the manual "Connect" button
+    (`request_connect`) already used correctly - which always targets the fixed canonical label,
+    never searches other profiles. A new `DeviceCommunicationService.update_profile_identity(label,
+    fingerprint=..., identity=...)` records the discovered fingerprint/identity onto that same
+    canonical label afterward (in-place, no search, no new profile), preserving the diagnostic
+    info the old fingerprint-search path used to capture for the Device Manager's Profiles table.
+    `find_or_create_profile()` itself is untouched and still correctly used by the general
+    multi-profile "Scan & connect" flow (`device_console_dialog.py`'s `_DiscoverTask`), which
+    legitimately wants fingerprint-based dedup across possibly many devices of the same type -
+    only the fixed-canonical-label lifecycle stopped using it. Regression tests added in
+    `tests/unit/test_device_lifecycle.py` (`CanonicalLabelResolutionTests`, one per device type,
+    asserting `find_or_create_profile` is never called and the canonical label is always used)
+    plus an isolated script reproducing the exact reported scenario (a pre-existing stale
+    `selector_2` holding the real fingerprint) and confirming the fix. **Not fixed by this
+    change:** any *already-corrupted* local settings file still has the stale duplicate profile
+    sitting in it - the code fix prevents new occurrences and correctly reuses/updates the
+    canonical profile going forward, but an existing stale duplicate should still be deleted via
+    Device Manager's Profiles tab (the maintainer did this manually alongside the code fix).
