@@ -11,7 +11,11 @@ import pyqtgraph as pg
 from scipy.interpolate import CubicSpline
 
 from lspr_app.domain.models import Spectrum
-from lspr_app.gui.main_window_sensorgram import normalize_sensorgram_metric_y_axis_mode
+from lspr_app.gui.main_window_sensorgram import (
+    normalize_sensorgram_metric_y_axis_mode,
+    normalize_sensorgram_time_axis_mode,
+    sensorgram_time_axis_label_text,
+)
 from lspr_app.gui.plot_view_cache import (
     build_metric_series_token,
     downsample_metric_series_for_view as _downsample_metric_series_for_view,
@@ -65,8 +69,7 @@ def _current_metric_view_state(window) -> tuple[float | None, float | None, floa
 
 
 def _sensorgram_time_axis_mode(window) -> str:
-    mode = str(getattr(window, "_sensorgram_time_axis_mode", "elapsed") or "elapsed").strip().lower()
-    return mode if mode in {"elapsed", "clock"} else "elapsed"
+    return normalize_sensorgram_time_axis_mode(getattr(window, "_sensorgram_time_axis_mode", "elapsed"))
 
 
 def _sensorgram_axis_start_datetime(window):
@@ -79,15 +82,24 @@ def _sensorgram_axis_start_datetime(window):
     return None
 
 
-def _sensorgram_time_axis_clock_mode(window) -> bool:
-    return _sensorgram_time_axis_mode(window) == "clock"
-
-
 def _sensorgram_format_elapsed(seconds: float) -> str:
     total_seconds = max(int(round(float(seconds))), 0)
     hours, remainder = divmod(total_seconds, 3600)
     minutes, secs = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _sensorgram_format_seconds(seconds: float) -> str:
+    total_seconds = max(int(round(float(seconds))), 0)
+    return f"{total_seconds} s"
+
+
+def _sensorgram_format_time_value(window, mode: str, seconds: float) -> str:
+    if mode == "clock":
+        return _sensorgram_format_clock(window, seconds)
+    if mode == "seconds":
+        return _sensorgram_format_seconds(seconds)
+    return _sensorgram_format_elapsed(seconds)
 
 
 def _sensorgram_format_clock(window, elapsed_seconds: float) -> str:
@@ -106,12 +118,12 @@ def _sensorgram_display_x_values(window, x_values: np.ndarray, *, clock_mode: bo
 
 
 def _set_trace_time_axis_mode(window, *, axis_mode: str) -> str:
-    axis_mode = axis_mode if axis_mode in {"elapsed", "clock"} else "elapsed"
+    axis_mode = normalize_sensorgram_time_axis_mode(axis_mode)
     axis = getattr(window, "trace_time_axis", None)
     if axis is not None and hasattr(axis, "set_time_mode"):
         axis.set_time_mode(axis_mode, start_datetime=_sensorgram_axis_start_datetime(window))
     if hasattr(window, "trace_plot"):
-        window.trace_plot.setLabel("bottom", "Time (local)" if axis_mode == "clock" else "Elapsed time")
+        window.trace_plot.setLabel("bottom", sensorgram_time_axis_label_text(axis_mode))
     return axis_mode
 
 
@@ -1019,7 +1031,7 @@ def refresh_metric_plot(window, trace_label: str) -> None:
     window._last_metric_plot_disabled_fast_path = False
     try:
         if not metric_plot_enabled:
-            _show_metric_plot_unavailable(window, clock_mode)
+            _show_metric_plot_unavailable(window, axis_mode)
             window._last_metric_plot_disabled_fast_path = True
             sync_control_step_overlay = getattr(window, "_sync_sensorgram_control_step_overlay", None)
             if callable(sync_control_step_overlay):
@@ -1422,12 +1434,12 @@ def render_metric_series(
     return changed
 
 
-def _show_metric_plot_unavailable(window, clock_mode: bool) -> None:
-    _show_trace_plot_unavailable(window, clock_mode=clock_mode)
+def _show_metric_plot_unavailable(window, axis_mode: str) -> None:
+    _show_trace_plot_unavailable(window, axis_mode=axis_mode)
 
 
-def _show_trace_plot_unavailable(window, *, clock_mode: bool) -> None:
-    _set_trace_time_axis_mode(window, axis_mode="clock" if clock_mode else "elapsed")
+def _show_trace_plot_unavailable(window, *, axis_mode: str) -> None:
+    axis_mode = _set_trace_time_axis_mode(window, axis_mode=axis_mode)
     for curve in window.trace_curves.values():
         _set_visible_if_changed(curve, False)
     for band in getattr(window, "trace_metric_envelope_bands", {}).values():
@@ -1435,7 +1447,7 @@ def _show_trace_plot_unavailable(window, *, clock_mode: bool) -> None:
             band.setVisible(False)
     if hasattr(window, "trace_legend"):
         _set_visible_if_changed(window.trace_legend, False)
-    window._visible_trace_mode = "clock" if clock_mode else "elapsed"
+    window._visible_trace_mode = axis_mode
 
 
 def update_spectrum_stats(window, processed: Spectrum | None, fit: Spectrum | None) -> None:
@@ -1529,10 +1541,7 @@ def update_metric_stats(window) -> None:
     latest_y = float(y_values[-1])
     elapsed_from_start_s = max(float(x_values[-1]) - float(x_values[0]), 0.0)
     axis_mode = _sensorgram_time_axis_mode(window)
-    if axis_mode == "clock":
-        latest_time_text = _sensorgram_format_clock(window, float(x_values[-1]))
-    else:
-        latest_time_text = _sensorgram_format_elapsed(float(x_values[-1]))
+    latest_time_text = _sensorgram_format_time_value(window, axis_mode, float(x_values[-1]))
 
     dt_values = np.diff(x_values)
     dt_text = "-" if len(dt_values) == 0 else f"{float(np.nanmean(dt_values)):.2f} s"
@@ -1636,7 +1645,7 @@ def handle_metric_mouse_moved(window, event) -> None:
         x, y, _ = best_match
     window.trace_vline.setPos(x)
     window.trace_hline.setPos(y)
-    cursor_x = _sensorgram_format_clock(window, float(x)) if _sensorgram_time_axis_clock_mode(window) else _sensorgram_format_elapsed(float(x))
+    cursor_x = _sensorgram_format_time_value(window, _sensorgram_time_axis_mode(window), float(x))
     window._trace_cursor_text = f"cursor: {cursor_x}, {y:.3f} nm"
     window.trace_cursor_label.setText(window._trace_cursor_text)
 

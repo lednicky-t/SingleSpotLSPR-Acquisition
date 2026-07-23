@@ -221,23 +221,41 @@ def cycle_sensorgram_metric_y_axis_mode(window) -> None:
 
 
 
+SENSORGRAM_TIME_AXIS_MODES = ("elapsed", "seconds", "clock")
+
+
+def normalize_sensorgram_time_axis_mode(mode: object) -> str:
+    normalized = str(mode or "elapsed").strip().lower()
+    return normalized if normalized in SENSORGRAM_TIME_AXIS_MODES else "elapsed"
+
+
+def sensorgram_time_axis_label_text(mode: object) -> str:
+    """X-axis label for the sensorgram, including units - so the unit is
+    visible without having to read individual tick values first."""
+    normalized = normalize_sensorgram_time_axis_mode(mode)
+    return {
+        "elapsed": "Elapsed time (HH:MM:SS)",
+        "seconds": "Elapsed time (s)",
+        "clock": "Time (local, HH:MM:SS)",
+    }[normalized]
+
+
 def apply_sensorgram_time_axis_mode(window, *, redraw: bool = True) -> None:
-    mode = str(getattr(window, "_sensorgram_time_axis_mode", "elapsed") or "elapsed").strip().lower()
-    if mode not in {"elapsed", "clock"}:
-        mode = "elapsed"
+    mode = normalize_sensorgram_time_axis_mode(getattr(window, "_sensorgram_time_axis_mode", "elapsed"))
     window._sensorgram_time_axis_mode = mode
     axis = getattr(window, "trace_time_axis", None)
     if axis is not None and hasattr(axis, "set_time_mode"):
         axis.set_time_mode(mode, start_datetime=getattr(window, "_sensorgram_axis_started_at", None))
     if hasattr(window, "trace_plot"):
-        window.trace_plot.setLabel("bottom", "Time (local)" if mode == "clock" else "Elapsed time")
+        window.trace_plot.setLabel("bottom", sensorgram_time_axis_label_text(mode))
     if redraw:
         window._request_plot_refresh()
 
 
 def toggle_sensorgram_time_axis_mode(window) -> None:
-    current_mode = str(getattr(window, "_sensorgram_time_axis_mode", "elapsed") or "elapsed").strip().lower()
-    window._sensorgram_time_axis_mode = "clock" if current_mode != "clock" else "elapsed"
+    current_mode = normalize_sensorgram_time_axis_mode(getattr(window, "_sensorgram_time_axis_mode", "elapsed"))
+    next_index = (SENSORGRAM_TIME_AXIS_MODES.index(current_mode) + 1) % len(SENSORGRAM_TIME_AXIS_MODES)
+    window._sensorgram_time_axis_mode = SENSORGRAM_TIME_AXIS_MODES[next_index]
     apply_sensorgram_time_axis_mode(window)
     window._schedule_ui_state_persist()
 

@@ -137,6 +137,7 @@ class PumpPlanTimelineWidget(QWidget):
         self.setMinimumHeight(64)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setMouseTracking(True)
+        self.setToolTip("Drag a step to reorder it, double-click to edit, right-drag to pan, scroll to zoom.")
         self._update_label_mode_button()
 
     # ── Public setters ────────────────────────────────────────────────────────
@@ -515,12 +516,16 @@ class PumpPlanTimelineWidget(QWidget):
                 self._drag_target_row = row
                 self.step_activated.emit(row)
             return
-        # Hover tooltip
+        # Hover tooltip + cursor - only step segments are actually
+        # clickable/draggable, so the pointing-hand cursor is scoped to them
+        # rather than the whole bar (which also includes empty timeline
+        # background where a click is a no-op).
         self._hover_row = None
         for index, rect in enumerate(self._segment_rects):
             if rect.contains(point_f):
                 step = self._steps[index]
                 self._hover_row = index
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
                 QToolTip.showText(
                     self.mapToGlobal(point),
                     (
@@ -536,6 +541,7 @@ class PumpPlanTimelineWidget(QWidget):
                 )
                 return
         QToolTip.hideText()
+        self.unsetCursor()
 
     def mousePressEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
         if event.button() == Qt.MouseButton.RightButton and self._steps:

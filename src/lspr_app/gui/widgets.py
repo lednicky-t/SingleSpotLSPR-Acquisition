@@ -52,6 +52,11 @@ class FlexibleTimeAxis(pg.AxisItem):
         self._start_datetime: datetime | None = None
         self._diagnostics_owner = None
         self._diagnostics_prefix = ""
+        # Double-clicking this axis toggles the time display mode - a pointing
+        # hand cursor and tooltip are the only hints that it's clickable at
+        # all, since it looks like a plain, inert axis otherwise.
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Double-click to change how the time axis is displayed (elapsed HH:MM:SS / elapsed seconds / local clock time).")
 
     def _record_tickstrings(self, count: int, elapsed_ms: float) -> None:
         owner = getattr(self, "_diagnostics_owner", None)
@@ -83,7 +88,7 @@ class FlexibleTimeAxis(pg.AxisItem):
             return
 
     def set_time_mode(self, mode: str, *, start_datetime: datetime | None = None) -> None:
-        normalized = mode if mode in {"elapsed", "clock"} else "elapsed"
+        normalized = mode if mode in {"elapsed", "seconds", "clock"} else "elapsed"
         if self._mode != normalized:
             self._mode = normalized
         self._start_datetime = start_datetime if normalized == "clock" else None
@@ -116,6 +121,12 @@ class FlexibleTimeAxis(pg.AxisItem):
                 except (OverflowError, OSError, ValueError):
                     labels.append("")
             result = labels
+        elif self._mode == "seconds":
+            # Plain numeric seconds - reuse AxisItem's own numeric formatter
+            # so decimal precision adapts to tick spacing (e.g. "0", "50",
+            # "100" when zoomed out, "12.5" when zoomed in enough for
+            # sub-second spacing), the same way an un-overridden axis would.
+            result = super().tickStrings(values, scale, spacing)
         else:
             result = [self._format_elapsed_value(float(value)) for value in values]
         elapsed_ms = (perf_counter() - started) * 1000.0

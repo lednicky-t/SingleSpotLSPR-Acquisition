@@ -805,10 +805,9 @@ def restore_ui_state(window) -> None:
         if current_stats in sensorgram_metric_order(window):
             window._trace_stats_metric_name = current_stats
     if isinstance(sensorgram_time_axis_mode, str):
-        normalized_time_axis_mode = str(sensorgram_time_axis_mode).strip().lower()
-        if normalized_time_axis_mode not in {"elapsed", "clock"}:
-            normalized_time_axis_mode = "elapsed"
-        window._sensorgram_time_axis_mode = normalized_time_axis_mode
+        from lspr_app.gui.main_window_sensorgram import normalize_sensorgram_time_axis_mode
+
+        window._sensorgram_time_axis_mode = normalize_sensorgram_time_axis_mode(sensorgram_time_axis_mode)
         if hasattr(window, "_apply_sensorgram_time_axis_mode"):
             window._apply_sensorgram_time_axis_mode(redraw=False)
     if isinstance(metric_display_points, (int, float)) and int(metric_display_points) > 0:

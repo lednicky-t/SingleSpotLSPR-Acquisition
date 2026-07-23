@@ -106,9 +106,9 @@ def _metric_absolute_cache_modes_text(window: Any) -> str:
 
 
 def _sensorgram_x_domain_text(window: Any) -> str:
-    axis_mode = str(getattr(window, "_sensorgram_time_axis_mode", "elapsed") or "elapsed").strip().lower()
-    if axis_mode not in {"elapsed", "clock"}:
-        axis_mode = "elapsed"
+    from lspr_app.gui.main_window_sensorgram import normalize_sensorgram_time_axis_mode
+
+    axis_mode = normalize_sensorgram_time_axis_mode(getattr(window, "_sensorgram_time_axis_mode", "elapsed"))
     started_at = getattr(window, "_sensorgram_axis_started_at", None)
     if isinstance(started_at, datetime):
         start_text = started_at.astimezone().isoformat(timespec="seconds")
