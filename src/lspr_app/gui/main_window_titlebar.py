@@ -107,7 +107,7 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
         ("spectrometer", "Spectrometer"),
         ("pump", "Pump"),
         ("valve", "Valve"),
-        ("mswitch", "M-Switch"),
+        ("mswitch", "Switch Rotary Valve"),
     ):
         icon_label = QLabel(title_widget)
         icon_label.setFixedSize(16, 16)
@@ -159,7 +159,7 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
 
 
 def refresh_hw_device_status_strip(window) -> None:
-    """Render the titlebar's spectrometer/pump/valve/M-switch status dots.
+    """Render the titlebar's spectrometer/pump/valve/switch-rotary-valve status dots.
 
     Reads connection state directly from DeviceLifecycleController.shared() -
     the single owner of device connections - rather than reaching through

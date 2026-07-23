@@ -16,4 +16,12 @@ from __future__ import annotations
 
 PUMP = "pump"
 SWITCH = "switch"       # injection valve / flow switch (formerly "valve")
-SELECTOR = "selector"   # AMF M-Switch channel selector
+# AMF switch rotary valve (user-facing label: "Switch rotary valve"). Internal
+# key/class/file names still say "mswitch"/"selector" - not renamed yet.
+# TODO: this assumes a distribution/selector-head valve (one common port ->
+# N individually addressable positions). AMF also sells a switch-head variant
+# (N ports wired in pairs -> N/2 logical positions) which this code does not
+# yet distinguish or support. See the "Hardware Topology" section in
+# docs/experiment-control/mswitch_control_guide.md before trusting raw
+# switch_position numbers on a switch-head unit.
+SELECTOR = "selector"

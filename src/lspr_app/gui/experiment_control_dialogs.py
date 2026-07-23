@@ -854,9 +854,9 @@ class ExperimentControlDialogs:
                 )
             )
             wait_button.setToolTip(
-                "M-Switch-first mode enabled. Pump and valve wait until the switch move finishes."
+                "Switch-rotary-valve-first mode enabled. Pump and valve wait until the switch move finishes."
                 if checked
-                else "M-Switch-first mode disabled. Pump and valve can apply without waiting."
+                else "Switch-rotary-valve-first mode disabled. Pump and valve can apply without waiting."
             )
             try:
                 setattr(self._parent, "_wait_for_mswitch_first", bool(checked))

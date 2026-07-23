@@ -201,7 +201,7 @@ def register_post_connect_hook(device_key: str, hook: PostConnectHook) -> None:
 
 
 def _home_selector_hook(service: DeviceCommunicationService, label: str, device_key: str) -> PostConnectOutcome:
-    """Home the M-Switch if it isn't already homed. Moved from
+    """Home the switch rotary valve if it isn't already homed. Moved from
     ExperimentControlWindow._ensure_mswitch_homed, with one deliberate fix:
     the original never checked whether the home command itself succeeded
     before reporting "homed" - this version does."""
@@ -210,11 +210,11 @@ def _home_selector_hook(service: DeviceCommunicationService, label: str, device_
         if connection is not None and hasattr(connection, "is_homed") and connection.is_homed():
             return PostConnectOutcome(True, "Already homed.")
     except Exception as exc:
-        return PostConnectOutcome(False, f"Could not read M-Switch homing state: {exc}")
+        return PostConnectOutcome(False, f"Could not read switch rotary valve homing state: {exc}")
     result = service.send_command(label, DeviceCommand("switch.home", {"block": True}))
     if not result.success:
-        return PostConnectOutcome(False, f"M-Switch home failed: {result.error}")
-    return PostConnectOutcome(True, "M-Switch homed.")
+        return PostConnectOutcome(False, f"Switch rotary valve home failed: {result.error}")
+    return PostConnectOutcome(True, "Switch rotary valve homed.")
 
 
 register_post_connect_hook(SELECTOR, _home_selector_hook)

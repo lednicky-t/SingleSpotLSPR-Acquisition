@@ -1,8 +1,8 @@
 """Background task for applying a single pump-plan step to the hardware.
 
 When the experiment control panel advances to a new step it fans out a batch
-of device commands (flow rate, direction, valve, M-switch port) on a thread-
-pool thread so the GUI stays responsive.
+of device commands (flow rate, direction, valve, switch rotary valve port) on
+a thread-pool thread so the GUI stays responsive.
 
 Classes
 -------
@@ -42,8 +42,8 @@ class _PlannedCommand:
         command_type: Device command type string.
         payload: Command payload dict passed to the device service.
         description: Full description used in log messages.
-        is_switch_move: Whether this command changes the M-switch port
-            (triggers a position refresh after the step).
+        is_switch_move: Whether this command changes the switch rotary valve
+            port (triggers a position refresh after the step).
     """
 
     label: str
@@ -63,14 +63,15 @@ class _StepApplyResult:
             applied.
         status_messages: Accumulated warning / error messages for display in
             the status bar.
-        needs_mswitch_refresh: ``True`` if an M-switch move occurred and the
-            selector position should be re-queried.
+        needs_mswitch_refresh: ``True`` if a switch rotary valve move
+            occurred and its position should be re-queried.
         on_success: Optional callback the dispatcher wants run only if
             ``success`` is ``True``, once this specific result comes back.
             Carried on the result object itself (not a shared queue on the
             caller) so overlapping dispatches - e.g. a manual step jump
-            fired while an auto-advance's M-switch move is still in flight -
-            can never mix up which callback belongs to which completion.
+            fired while an auto-advance's switch rotary valve move is still
+            in flight - can never mix up which callback belongs to which
+            completion.
     """
 
     success: bool
