@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timedelta
+from datetime import timedelta
 from html import escape
 from time import perf_counter
 
@@ -22,6 +22,7 @@ from lspr_app.gui.plot_view_cache import (
     level_raw_weight,
     sample_absolute_metric_series_for_view,
 )
+from lspr_app.gui.sensorgram_time_anchor import display_time_anchor
 
 
 def _spline_render_series(x: np.ndarray, y: np.ndarray, *, max_points: int = 4096) -> tuple[np.ndarray, np.ndarray]:
@@ -72,16 +73,6 @@ def _sensorgram_time_axis_mode(window) -> str:
     return normalize_sensorgram_time_axis_mode(getattr(window, "_sensorgram_time_axis_mode", "elapsed"))
 
 
-def _sensorgram_axis_start_datetime(window):
-    for attr in ("_sensorgram_axis_started_at", "_measurement_started_at", "_live_trace_started_at", "_metric_archive_started_at"):
-        started_at = getattr(window, attr, None)
-        if started_at is None:
-            continue
-        if isinstance(started_at, datetime):
-            return started_at
-    return None
-
-
 def _sensorgram_format_elapsed(seconds: float) -> str:
     total_seconds = max(int(round(float(seconds))), 0)
     hours, remainder = divmod(total_seconds, 3600)
@@ -103,7 +94,7 @@ def _sensorgram_format_time_value(window, mode: str, seconds: float) -> str:
 
 
 def _sensorgram_format_clock(window, elapsed_seconds: float) -> str:
-    start_datetime = _sensorgram_axis_start_datetime(window)
+    start_datetime = display_time_anchor(window)
     if start_datetime is None:
         return _sensorgram_format_elapsed(elapsed_seconds)
     try:
@@ -121,7 +112,7 @@ def _set_trace_time_axis_mode(window, *, axis_mode: str) -> str:
     axis_mode = normalize_sensorgram_time_axis_mode(axis_mode)
     axis = getattr(window, "trace_time_axis", None)
     if axis is not None and hasattr(axis, "set_time_mode"):
-        axis.set_time_mode(axis_mode, start_datetime=_sensorgram_axis_start_datetime(window))
+        axis.set_time_mode(axis_mode, start_datetime=display_time_anchor(window))
     if hasattr(window, "trace_plot"):
         window.trace_plot.setLabel("bottom", sensorgram_time_axis_label_text(axis_mode))
     return axis_mode

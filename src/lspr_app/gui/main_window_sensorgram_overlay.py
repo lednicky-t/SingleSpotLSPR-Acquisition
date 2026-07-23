@@ -14,6 +14,7 @@ from lspr_app.gui.sensorgram_control_step_overlay import (
     normalize_sensorgram_control_step_overlay_label,
     resolve_sensorgram_control_step_overlay_palette_label,
 )
+from lspr_app.gui.sensorgram_time_anchor import display_time_anchor
 
 
 def handle_trace_view_range_changed(window, *_args) -> None:
@@ -28,6 +29,44 @@ def handle_trace_view_range_changed(window, *_args) -> None:
             pass
 
 
+def _rebase_sensorgram_control_step_events(window, events: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Recompute each event's elapsed_s against whichever anchor is
+    currently driving the sensorgram's own x-axis (measurement-relative
+    while a measurement is recording, session-relative once back in session
+    view - see gui/sensorgram_time_anchor.py's display_time_anchor, the
+    same anchor resolver the plot itself uses for clock-mode display).
+
+    Events are recorded once, during a measurement, with an absolute
+    timestamp (timestamp_utc_ms). Baking in an elapsed_s at record time
+    would leave it stuck on whatever anchor happened to be active then, so
+    the overlay would drift out of alignment with the plot the moment the
+    display switches back to session view - the events themselves never
+    change, only which anchor "now" is measured from does, every time this
+    runs. See docs/sensorgram_improvements.md.
+    """
+    anchor = display_time_anchor(window)
+    if anchor is None:
+        return events
+    rebased: list[dict[str, object]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        timestamp_utc_ms = event.get("timestamp_utc_ms")
+        if timestamp_utc_ms is None:
+            rebased.append(event)
+            continue
+        try:
+            event_at = datetime.fromtimestamp(float(timestamp_utc_ms) / 1000.0, tz=timezone.utc)
+            elapsed_s = max((event_at - anchor).total_seconds(), 0.0)
+        except Exception:
+            rebased.append(event)
+            continue
+        updated = dict(event)
+        updated["elapsed_s"] = elapsed_s
+        rebased.append(updated)
+    return rebased
+
+
 def sensorgram_control_step_overlay_current_elapsed_s(window) -> float | None:
     if window._measurement_started_at is not None and window._measurement_active:
         try:
@@ -36,7 +75,7 @@ def sensorgram_control_step_overlay_current_elapsed_s(window) -> float | None:
             return None
     events = getattr(window, "_sensorgram_control_step_events", None)
     if isinstance(events, list) and events:
-        last_event = events[-1]
+        last_event = _rebase_sensorgram_control_step_events(window, events)[-1]
         try:
             return max(float(last_event.get("elapsed_s", last_event.get("t_ms", 0.0) / 1000.0)), 0.0)
         except Exception:
@@ -248,6 +287,10 @@ def record_sensorgram_control_step_event(window, payload: dict[str, object]) -> 
         elapsed_s = float(payload.get("t_ms", 0.0)) / 1000.0
     except Exception:
         elapsed_s = 0.0
+    try:
+        timestamp_utc_ms = float(payload["timestamp_utc_ms"])
+    except (KeyError, TypeError, ValueError):
+        timestamp_utc_ms = None
     step_index = payload.get("step_index")
     try:
         step_index_value = max(int(float(step_index)), 0) if step_index not in {None, ""} else None
@@ -287,17 +330,24 @@ def record_sensorgram_control_step_event(window, payload: dict[str, object]) -> 
         )
     if not label:
         label = normalize_sensorgram_control_step_overlay_label("", step_index=step_index_value)
-    events.append(
-        {
-            "elapsed_s": max(float(elapsed_s), 0.0),
-            "step_index": step_index_value,
-            "state": state,
-            "event": str(payload.get("event") or ""),
-            "status": str(payload.get("status") or ""),
-            "color": color,
-            "label": label,
-        }
-    )
+    event_record: dict[str, object] = {
+        # elapsed_s here is only the initial/fallback value (measurement-
+        # relative, matching payload["t_ms"]) - sync_sensorgram_control_step_overlay
+        # recomputes it fresh from timestamp_utc_ms against whichever anchor
+        # is currently active, so the overlay stays aligned with the plot
+        # across session/measurement view switches. See
+        # _rebase_sensorgram_control_step_events above.
+        "elapsed_s": max(float(elapsed_s), 0.0),
+        "step_index": step_index_value,
+        "state": state,
+        "event": str(payload.get("event") or ""),
+        "status": str(payload.get("status") or ""),
+        "color": color,
+        "label": label,
+    }
+    if timestamp_utc_ms is not None:
+        event_record["timestamp_utc_ms"] = timestamp_utc_ms
+    events.append(event_record)
 
 
 def sync_sensorgram_control_step_overlay(window) -> None:
@@ -336,7 +386,7 @@ def sync_sensorgram_control_step_overlay(window) -> None:
     x_min, x_max, y_min, y_max = bounds
     current_elapsed_s = sensorgram_control_step_overlay_current_elapsed_s(window)
     segments = build_sensorgram_control_step_overlay_segments(
-        events,
+        _rebase_sensorgram_control_step_events(window, events),
         current_elapsed_s=current_elapsed_s,
     )
     if not segments:

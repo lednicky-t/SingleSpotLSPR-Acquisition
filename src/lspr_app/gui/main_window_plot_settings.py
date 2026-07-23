@@ -995,8 +995,6 @@ class SensorgramPlotSettingsDialog(QDialog):
             window._last_metric_autoscale_range = None
             if hasattr(window, "_plot_view_cache"):
                 window._plot_view_cache.clear()
-            if new_display_mode == "session":
-                window._sensorgram_axis_started_at = None
             try:
                 from lspr_app.gui.main_window_sensorgram_archive import request_absolute_sensorgram_metric_archive_reload
                 request_absolute_sensorgram_metric_archive_reload(window)

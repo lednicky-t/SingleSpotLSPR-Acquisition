@@ -866,6 +866,27 @@ class PlotViewCache:
     def clear_live_absolute_metric_cache(self) -> None:
         self._live_absolute_metric_cache.clear()
 
+    def rebase_live_absolute_metric_recent_tail(self, offset_s: float) -> None:
+        """Shift every metric's raw recent-tail x-values by a constant offset.
+
+        Used when the live cache's time anchor changes (e.g. a measurement
+        stopping, where cached tail points were relative to measurement
+        start but the plot is about to switch to session-start-relative
+        time) - a pure shift preserves point order and x/y pairing exactly,
+        unlike clearing the tail outright (which would lose not-yet-flushed
+        points until the next archive reload catches up). Only the raw tail
+        needs this: the compressed display pyramid (x_display/levels) is
+        always rebuilt from scratch on the next reload, never rebased.
+        """
+        if not offset_s:
+            return
+        for cache in self._live_absolute_metric_cache.values():
+            if not isinstance(cache, MetricDisplayCache):
+                continue
+            tail_x = cache.recent_tail_x
+            for index in range(len(tail_x)):
+                tail_x[index] += offset_s
+
     def live_tail_snapshot(
         self,
         metric_names: set[str] | frozenset[str],

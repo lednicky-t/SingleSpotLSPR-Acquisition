@@ -680,7 +680,6 @@ class MainWindow(QMainWindow):
         self._sensorgram_settings_dialog = None
         self._sensorgram_time_axis_mode = "elapsed"
         self._sensorgram_metric_y_axis_mode = "auto"
-        self._sensorgram_axis_started_at: datetime | None = None
         self._sensorgram_line_step_mode = None
         self._sensorgram_line_width_px = 2.2
         self._plot_antialias_enabled = False

@@ -150,6 +150,136 @@ asymmetry fix are both deliberate, user-confirmed behavior changes — verify by
 freeze button independently and confirm only its own plot stops updating; pan/zoom the sensorgram,
 start a measurement, confirm the view re-follows instead of staying locked.
 
+### C5 — 2026-07-23: live-cache tail still on the measurement's time scale spliced a backward segment into the reload-on-stop plot
+**Files:** `gui/acquisition_controller.py` (`stop_measurement_run`), `gui/plot_view_cache.py`
+(`PlotViewCache.rebase_live_absolute_metric_recent_tail`, new)
+**Symptom:** distinct from C1 (same visible symptom, different root cause - C1 was fixed
+2026-07-21 and stayed fixed). While a measurement records, the live sensorgram counts elapsed time
+from when Record was pressed (`_measurement_started_at`); once back in session view, it counts
+from session start (`_metric_archive_started_at`) instead - intentional, so "measurement" mode
+genuinely shows "5 seconds into this recording," not "3625 seconds into this session." On Stop,
+`request_absolute_sensorgram_metric_archive_reload` reloads the full session file
+(session-relative) and merges in whatever is still sitting in the live cache's "recent tail" (to
+avoid a gap for points not yet flushed to disk) - but that tail was written while still
+measurement-relative. C2's defensive sort (`seed_live_absolute_metric_cache`) only guarantees the
+merged array ends up in x-order; it can't fix values computed on the wrong scale to begin with.
+The result: a handful of tail points land at small x-values that fall inside territory the session
+view already drew minutes earlier, appearing as a short new line segment stitched into
+already-drawn history, specifically at the moment a measurement stops (the C1 fix's own
+description of the normal workflow - live preview already running before Record is pressed -
+is exactly the condition that makes the offset large enough to be visible).
+**Fix:** `stop_measurement_run` now computes
+`offset_s = (measurement_started_at - metric_archive_started_at).total_seconds()` - both anchors
+are still valid at that exact point, before either gets cleared - and calls the new
+`rebase_live_absolute_metric_recent_tail(offset_s)` to shift the live cache's raw tail onto the
+session's scale before the mode switch and reload happen. A pure additive shift, not a
+re-derivation, so it can't reorder or mismatch x/y pairs. Only the raw tail needs rebasing - the
+compressed display pyramid (`x_display`/`levels`) is rebuilt from scratch on every reload
+regardless, never carried across it. `_metric_archive_started_at` (C1's anchor, already reused for
+axis-label clock-mode display per C3) now has this third legitimate use.
+**Effort:** Small (~20 lines: one new cache method, one call site)
+**Risk:** Low - the rebase is a no-op whenever either anchor is unavailable (guarded by
+`is not None` checks) or the offset is zero, and only ever runs once, synchronously, at the one
+call site that has both anchors still valid.
+
+### C6 — 2026-07-23 follow-up: every point recorded after the first Stop in a session used a broken time anchor, corrupting both the live plot and the saved session file
+**Files:** `gui/acquisition_controller.py` (`append_processed_trace_history`,
+`_archive_to_session_writer_if_available`)
+**Symptom:** reported after C5 landed - C5 fixed the one-time reload-merge splice, but the
+maintainer still saw (1) measurement data appearing at the *start* of the x-axis instead of after
+the existing session data, and (2) two separate places in the plot receiving new data
+simultaneously ("overlapping"), both starting the moment a measurement stopped and continuing for
+the rest of the session.
+**Root cause:** distinct from C5, same neighborhood. Both functions anchor their elapsed-time
+calculation to `window._live_trace_started_at` when no measurement is active. `stop_measurement_run`
+unconditionally clears that value to `None`, and it is *only* ever restored inside
+`_start_live_acquisition()`, guarded by `if not window._live_active` - which never runs across a
+Record/Stop cycle if live preview was already running before Record was pressed (the normal
+workflow, per C1). So from the moment Stop is pressed onward, for the rest of the session:
+`append_processed_trace_history` fell through to an unrelated display-cursor counter (not a time
+value at all - just an incrementing counter left over from wherever it was during the measurement,
+i.e. small values), continuously appending new live points at the wrong, low x-position - a second,
+ongoing stream visually distinct from the correctly-reloaded session curve, matching both reported
+symptoms. Independently, `_archive_to_session_writer_if_available` fell through to
+`elapsed_s = 0.0`, silently writing a near-zero elapsed time into the session file's *persisted*
+`time_series` dataset (schema-required, read by `apps/sLSPR/eva`) for every spectrum recorded after
+the first Stop - a real data-integrity bug, not just a display one.
+**Fix:** both functions now prefer `_metric_archive_started_at` - the same stable,
+session-lifetime anchor C1 introduced and C5 already relies on, set once when the session writer is
+created and never touched by Record/Stop - falling back to `_live_trace_started_at` only for the
+narrow window before the session writer exists yet (first spectrum of a session), and to the
+display-cursor/zero fallback only if neither anchor has ever been set at all.
+**Effort:** Small (~10 lines across 2 functions, both one-line anchor-preference changes)
+**Risk:** Low - `_metric_archive_started_at` was already proven stable across Record/Stop by C1;
+this just extends its use to two more read sites that were still using the fragile anchor.
+
+### C7 — 2026-07-23 follow-up: the control-step overlay baked in a fixed elapsed_s at record time, so it drifted out of alignment with the plot on Stop
+**Files:** `gui/main_window_sensorgram_overlay.py` (`record_sensorgram_control_step_event`,
+`sync_sensorgram_control_step_overlay`, `sensorgram_control_step_overlay_current_elapsed_s`, plus
+new `_rebase_sensorgram_control_step_events`)
+**Symptom:** the maintainer asked directly whether the sensorgram's per-step overlay bars (marking
+when each experiment-plan step ran) had "the same issue" as C1/C5/C6 - they did. The overlay's
+bars stayed positioned at their measurement-relative location even after switching back to session
+view, instead of moving to the step's true session-relative position.
+**Root cause:** same family as C1/C5/C6, third occurrence. `record_sensorgram_control_step_event`
+is only ever called while a measurement is recording, and stored `elapsed_s = payload["t_ms"] / 1000`
+- the same measurement-relative value written to the per-measurement HDF5 file. That's the right
+value for that file, but the overlay is redrawn against the *sensorgram plot's own* x-axis, which
+switches to session-relative the moment the display goes back to session view on Stop - the events
+list was never rebased, and unlike the metric curves (fixed by C6, computed at every new point) the
+overlay's events are a fixed record of the past with no new points arriving to naturally correct
+via a fresh anchor.
+**Fix:** don't bake in a fixed elapsed_s at all - events now also store their absolute
+`timestamp_utc_ms` (already available on the payload, added for C6's HDF5-durability work), and
+`sync_sensorgram_control_step_overlay`/`sensorgram_control_step_overlay_current_elapsed_s` recompute
+`elapsed_s` fresh on every sync, via the new `_rebase_sensorgram_control_step_events`, against
+`display_time_anchor` (originally `plot_controller.py`'s `_sensorgram_axis_start_datetime`,
+relocated to `gui/sensorgram_time_anchor.py` by C8 below) - the same anchor resolver the axis's own
+clock-mode display uses, so the overlay is guaranteed to agree with whatever anchor the plot itself
+is using, in both session and measurement view, without duplicating any anchor-selection logic. The
+stored fallback `elapsed_s` (from `t_ms`) is kept only for events that somehow lack a timestamp; a
+missing/unavailable anchor leaves events untouched rather than raising.
+**Effort:** Small (~50 lines: one new pure helper, two call sites updated, one field added at
+record time)
+**Risk:** Low - the rebase is a no-op (returns the same list) whenever no anchor is resolvable, and
+`build_sensorgram_control_step_overlay_segments` (the actual segment-building logic, unit-tested
+separately) is untouched - only the elapsed_s values fed into it changed.
+
+### C8 — 2026-07-23 follow-up: unified the anchor-selection logic itself into one module
+**Files:** `gui/sensorgram_time_anchor.py` (new), `gui/plot_controller.py`,
+`gui/acquisition_controller.py`, `gui/main_window_sensorgram_overlay.py`,
+`gui/main_window_sensorgram.py`, `gui/runtime_diagnostics.py`, `gui/main_window.py`,
+`gui/main_window_plot_settings.py`
+**Rationale:** the maintainer asked directly why C1/C5/C6/C7 kept recurring instead of being fixed
+once - because each was a different call site independently reimplementing "which time anchor
+applies right now" and drifting out of sync with the others. There was no single source of truth.
+**Change:** extracted three functions into a new dedicated module:
+- `session_time_anchor(window)` - the stable, whole-session anchor (`_metric_archive_started_at`,
+  falling back to `_live_trace_started_at` only before the session writer exists yet).
+- `display_time_anchor(window)` - whichever anchor the plot is showing right now
+  (measurement-relative while `_measurement_active`, session-relative otherwise).
+- `measurement_to_session_offset_s(window)` - the conversion C5's tail-rebase needs.
+
+Every scattered call site now delegates to these instead of reimplementing the selection: C6's two
+`acquisition_controller.py` functions, C5's rebase-offset calculation in `stop_measurement_run`,
+C7's overlay rebase, and `plot_controller.py`'s/`main_window_sensorgram.py`'s/
+`runtime_diagnostics.py`'s clock-mode-display anchor lookups (previously
+`_sensorgram_axis_start_datetime`, now deleted).
+
+Also retired `window._sensorgram_axis_started_at` entirely (write sites in
+`_start_live_acquisition`, `start_measurement_run`, `stop_measurement_run`, and the manual
+display-mode switch in `main_window_plot_settings.py`, plus the attribute declaration in
+`MainWindow.__init__`) - it was a redundant shadow copy of `_measurement_started_at`/
+`_live_trace_started_at` that existed only to feed the old chain-based lookup, and was itself a
+smaller instance of the same class of bug: it also got reset whenever live acquisition restarted
+mid-session (independent of any measurement), which could have shown a wrong clock-mode timestamp
+in an edge case nobody had reported yet. `display_time_anchor` doesn't need it - `session_time_anchor`
+is stable across live-acquisition restarts by construction.
+**Effort:** Medium (one new ~80-line module, seven call sites migrated, one attribute retired across
+five write sites)
+**Risk:** Low - confirmed via a full re-run of the C5/C6 reproduction scripts against the refactored
+code, producing byte-identical results to before the refactor, plus the full test suite.
+
 ---
 
 ## Performance fixes

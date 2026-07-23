@@ -6,6 +6,7 @@ from time import perf_counter
 import numpy as np
 from lspr_app.gui.main_window_processing import normalize_sensorgram_metric_name, sensorgram_metric_order, sensorgram_metric_archive_names
 from lspr_app.gui.plot_view_cache import build_active_trace_series_token
+from lspr_app.gui.sensorgram_time_anchor import display_time_anchor
 from lspr_app.storage.hdf5_export import load_processed_metric_history
 
 
@@ -245,7 +246,7 @@ def apply_sensorgram_time_axis_mode(window, *, redraw: bool = True) -> None:
     window._sensorgram_time_axis_mode = mode
     axis = getattr(window, "trace_time_axis", None)
     if axis is not None and hasattr(axis, "set_time_mode"):
-        axis.set_time_mode(mode, start_datetime=getattr(window, "_sensorgram_axis_started_at", None))
+        axis.set_time_mode(mode, start_datetime=display_time_anchor(window))
     if hasattr(window, "trace_plot"):
         window.trace_plot.setLabel("bottom", sensorgram_time_axis_label_text(mode))
     if redraw:

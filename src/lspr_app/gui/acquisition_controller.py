@@ -26,6 +26,11 @@ from lspr_app.gui.experiment_control_runtime import (
 )
 from lspr_app.gui.main_window_headers import update_source_link_buttons
 from lspr_app.gui.main_window_state import apply_source_mode_for
+from lspr_app.gui.sensorgram_time_anchor import (
+    display_time_anchor,
+    measurement_to_session_offset_s,
+    session_time_anchor,
+)
 from lspr_app.gui.workers import (
     AcquisitionRequest,
     AcquisitionResult,
@@ -187,7 +192,10 @@ def _archive_to_session_writer_if_available(window, spectrum: Spectrum) -> None:
     # they're not separate objects — they're always separate objects here, but be safe).
     if writer is window._measurement_writer:
         return
-    session_started_at = getattr(window, "_live_trace_started_at", None)
+    # Always session-relative regardless of whether a measurement happens to
+    # be recording right now - see gui/sensorgram_time_anchor.py and
+    # docs/sensorgram_improvements.md (C6).
+    session_started_at = session_time_anchor(window)
     if session_started_at is not None:
         elapsed_s = max((spectrum.acquired_at - session_started_at).total_seconds(), 0.0)
     else:
@@ -837,7 +845,6 @@ def start_live_acquisition(window) -> None:
     window._processing_displayed_count = 0
     window._live_display_started_at = perf_counter()
     window._live_trace_started_at = datetime.now(timezone.utc)
-    window._sensorgram_axis_started_at = window._live_trace_started_at
     window._last_live_processing_perf = None
     if hasattr(window, "_plot_view_cache") and hasattr(window._plot_view_cache, "clear_live_absolute_metric_cache"):
         window._plot_view_cache.clear_live_absolute_metric_cache()
@@ -1231,7 +1238,6 @@ def start_measurement_run(window) -> None:
     window._measurement_signal_mode = signal_mode
     window._measurement_path = destination
     window._measurement_started_at = started_at
-    window._sensorgram_axis_started_at = started_at
     window._measurement_experiment_name = experiment_name
     window._session_stats_log.clear()
     window._session_stats_log_last_text = ""
@@ -1292,6 +1298,21 @@ def stop_measurement_run(window) -> None:
     window._measurement_writer = None
     window._measurement_active = False
     window._measurement_paused = False
+    # Sensorgram x-values are relative to measurement start while a
+    # measurement is recording, but the session view (which the plot is
+    # about to switch back to, below) is relative to session start instead.
+    # Rebase any live-cache tail points still on the measurement's scale
+    # onto the session's scale before that anchor is cleared - otherwise the
+    # post-stop session reload (which reads everything as session-relative)
+    # would merge those points in on the wrong scale, splicing a short
+    # misplaced line segment into already-drawn session history. This is a
+    # pure time shift, not a re-derivation, so point order/pairing can't be
+    # scrambled by it. See docs/sensorgram_improvements.md.
+    offset_s = measurement_to_session_offset_s(window)
+    if offset_s is not None:
+        cache = getattr(window, "_plot_view_cache", None)
+        if cache is not None and hasattr(cache, "rebase_live_absolute_metric_recent_tail"):
+            cache.rebase_live_absolute_metric_recent_tail(offset_s)
     window._measurement_started_at = None
     window._measurement_axis_lock = None
     set_measurement_ui_locked(window, False)
@@ -1303,7 +1324,6 @@ def stop_measurement_run(window) -> None:
     # Auto-switch back to session view so the full session history is visible
     # again, and clear any pan/zoom lock (see SensorgramDisplayState.end_measurement).
     window._sensorgram_display.end_measurement()
-    window._sensorgram_axis_started_at = None
     window._last_metric_autoscale_range = None
     # Reload session archive so the cache gets repopulated with the full session.
     try:
@@ -1333,19 +1353,16 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
     if not window._live_active:
         return
 
-    measurement_active = bool(window._measurement_active)
-    if measurement_active:
-        started_at = window._measurement_started_at
-        if started_at is not None:
-            elapsed_s = max((processed.acquired_at - started_at).total_seconds(), 0.0)
-        else:
-            elapsed_s = 0.0
+    # display_time_anchor is measurement-relative while a measurement is
+    # recording and session-relative otherwise (see
+    # gui/sensorgram_time_anchor.py) - the same anchor the plot's own axis
+    # and the per-step overlay use, so this stays consistent with what's
+    # actually drawn regardless of view-mode switches.
+    started_at = display_time_anchor(window)
+    if started_at is not None:
+        elapsed_s = max((processed.acquired_at - started_at).total_seconds(), 0.0)
     else:
-        started_at = window._live_trace_started_at
-        if started_at is not None:
-            elapsed_s = max((processed.acquired_at - started_at).total_seconds(), 0.0)
-        else:
-            elapsed_s = float(getattr(window, "_trace_display_cursor_s", 0.0) or 0.0)
+        elapsed_s = float(getattr(window, "_trace_display_cursor_s", 0.0) or 0.0)
 
     display_step_s = max(1.0 / max(window.live_rate_spin.value(), 1e-9), 1e-3)
     metrics = window._get_analysis_metrics(processed, fit)
@@ -1401,7 +1418,7 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
                 pass
 
         # Also write to the measurement file during active recording.
-        if measurement_active and window._measurement_writer is not None:
+        if window._measurement_active and window._measurement_writer is not None:
             try:
                 window._measurement_writer.append_metrics([common_fields])
             except Exception:
