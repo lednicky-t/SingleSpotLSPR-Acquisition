@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from time import monotonic, perf_counter
+from typing import Callable
 
 try:
     import h5py
@@ -126,6 +127,12 @@ class ExperimentControlWindow(QWidget):
     experimental_control_state_recorded = pyqtSignal(object)
     flow_state_recorded = experimental_control_state_recorded
     theme_changed = pyqtSignal(str)
+    # No payload - just tells the titlebar strip a device's BUSY status may
+    # have changed. Fired at both the start and end of a step-apply dispatch
+    # (see _apply_step_to_pump_async/_on_step_apply_async_done), since a
+    # "step applied" event only fires on completion and the busy dot needs
+    # to appear immediately, not just after the command finishes.
+    hw_status_refresh_requested = pyqtSignal()
     PLAN_COLOR_OPTIONS = [
         ("Blue", "#4E79A7"),
         ("Green", "#59A14F"),
@@ -264,7 +271,14 @@ class ExperimentControlWindow(QWidget):
         self._plan_timer = QTimer(self)
         self._plan_timer.setSingleShot(True)
         self._plan_timer.timeout.connect(self._advance_experiment_control_progress)
-        self._step_apply_pending = False
+        # Count, not a bool: multiple step-applies can legitimately overlap
+        # once every GUI trigger dispatches async (not just auto-advance) -
+        # e.g. a manual step jump fired while an earlier dispatch's M-switch
+        # move is still in flight on device_io_pool(). Each dispatch's own
+        # on_success callback is carried on its _StepApplyResult, not a
+        # shared queue here, so overlap can't mix up which callback belongs
+        # to which completion.
+        self._step_apply_inflight = 0
         loaded_theme = str(theme_mode or load_app_setting("theme_mode", "dark"))
         self._theme_mode = "dark" if loaded_theme not in {"light", "dark"} else loaded_theme
         if self._theme_mode != "dark":
@@ -2065,15 +2079,14 @@ class ExperimentControlWindow(QWidget):
         self._set_status_message("Pause state updated.")
         _LOGGER.info("Pause state updated.")
 
-    def _apply_pause_state(self) -> bool:
+    def _apply_pause_state(self) -> None:
         step = self._pause_row_step()
         if step is None:
-            return False
-        try:
-            return self._apply_experiment_control_step_to_pump(step, start=False)
-        except Exception as exc:
-            _LOGGER.warning("Could not apply pause state: %s", exc)
-            return False
+            return
+        # Dispatched async - _apply_step_to_pump_async already catches and
+        # logs internally, so no try/except is needed here (unlike the old
+        # synchronous call this replaces).
+        self._apply_step_to_pump_async(step, start=False)
 
     def _edit_color_palette_entries(self, anchor: QWidget | None = None) -> None:
         dialogs = ExperimentControlDialogs(self, self._theme_palette(), self._contrast_text_color, self._tint_icon)
@@ -2392,7 +2405,7 @@ class ExperimentControlWindow(QWidget):
         emit_step: PumpPlanStep | None = None,
     ) -> None:
         if restore_step is not None:
-            self._apply_experiment_control_step_to_pump(restore_step, start=True)
+            self._apply_step_to_pump_async(restore_step, start=True)
         self._set_plan_runtime_flags(running=True, holding=False, paused=False)
         self._plan_started_monotonic = monotonic()
         self._plan_timer.stop()
@@ -2429,24 +2442,15 @@ class ExperimentControlWindow(QWidget):
         self._plan_started_monotonic = None
         self._step_started_monotonic = None
         self._schedule_plan_timer()
-        pause_applied = self._apply_pause_state()
+        self._apply_pause_state()
         self._update_experiment_control_toggle_button()
-        if pause_applied:
-            self._set_status_message(
-                f"Experiment plan started in pause state on step {self._plan_active_row + 1 if self._plan_active_row is not None else 1}. Pause state applied."
-            )
-            _LOGGER.info(
-                "Experiment plan started in pause state with pause state applied | step=%s",
-                self._plan_active_row + 1 if self._plan_active_row is not None else 1,
-            )
-        else:
-            self._set_status_message(
-                f"Experiment plan started in pause state on step {self._plan_active_row + 1 if self._plan_active_row is not None else 1}."
-            )
-            _LOGGER.info(
-                "Experiment plan started in pause state | step=%s",
-                self._plan_active_row + 1 if self._plan_active_row is not None else 1,
-            )
+        self._set_status_message(
+            f"Experiment plan started in pause state on step {self._plan_active_row + 1 if self._plan_active_row is not None else 1}."
+        )
+        _LOGGER.info(
+            "Experiment plan started in pause state | step=%s",
+            self._plan_active_row + 1 if self._plan_active_row is not None else 1,
+        )
         if self._plan_active_row is not None and 0 <= self._plan_active_row < len(steps):
             self._emit_experimental_control_state("plan_pause", self._applied_plan_step, status="started in pause state")
 
@@ -2461,8 +2465,13 @@ class ExperimentControlWindow(QWidget):
         steps = self._read_experiment_control_steps()
         if row < 0 or row >= len(steps):
             return
-        if not self._apply_experiment_control_step_to_pump(steps[row], start=True):
-            return
+        # Dispatched async and not gated on the result: plan-runtime state
+        # always advances here, exactly like every other step-apply trigger.
+        # A hardware failure is surfaced via the status bar text a moment
+        # later (and durably logged to the session HDF5 file regardless of
+        # active recording - see _handle_experimental_control_state_recorded
+        # in main_window.py) rather than silently blocking the resume.
+        self._apply_step_to_pump_async(steps[row], start=True)
         self._paused_plan_step = None
         self._reset_plan_runtime_counters()
         self._ensure_measurement_started()
@@ -2524,18 +2533,14 @@ class ExperimentControlWindow(QWidget):
         self._paused_plan_step = deepcopy(self._applied_plan_step) if self._applied_plan_step is not None else None
         if restore_step is not None:
             self._paused_plan_step = deepcopy(restore_step)
-        pause_applied = self._apply_pause_state()
+        self._apply_pause_state()
         self._set_plan_runtime_flags(running=False, holding=False, paused=True)
         self._plan_started_monotonic = None
         self._plan_runtime_s = self._step_runtime_for_display()
         self._step_started_monotonic = None
         self._update_experiment_control_toggle_button()
-        if pause_applied:
-            self._set_status_message("Experiment plan paused. Pause state applied.")
-            _LOGGER.info("Experiment plan paused with pause state applied.")
-        else:
-            self._set_status_message("Experiment plan paused.")
-            _LOGGER.info("Experiment plan paused.")
+        self._set_status_message("Experiment plan paused.")
+        _LOGGER.info("Experiment plan paused.")
         self._emit_experimental_control_state("plan_pause", self._applied_plan_step)
 
     def _stop_experiment_plan(self, last_step: PumpPlanStep | None) -> None:
@@ -4407,8 +4412,20 @@ class ExperimentControlWindow(QWidget):
                 previous_step = previous_steps[self._plan_active_row] if self._plan_active_row < len(previous_steps) else None
                 change_summary = self._experiment_control_step_change_summary(previous_step, updated_step)
                 if updated_step is not None:
-                    if self._apply_experiment_control_step_to_pump(updated_step, start=True) and change_summary:
-                        self._emit_experimental_control_state("step_edited", updated_step, status=change_summary)
+                    if change_summary:
+                        # Only announce "step edited" once the device has
+                        # actually received the change - announcing it
+                        # immediately (before the async dispatch completes)
+                        # would be a visible lie if the command failed.
+                        self._apply_step_to_pump_async(
+                            updated_step,
+                            start=True,
+                            on_success=lambda step=updated_step, summary=change_summary: self._emit_experimental_control_state(
+                                "step_edited", step, status=summary
+                            ),
+                        )
+                    else:
+                        self._apply_step_to_pump_async(updated_step, start=True)
         self.save_ui_state()
 
     def _handle_experiment_control_table_change(self, *_args) -> None:
@@ -4767,45 +4784,30 @@ class ExperimentControlWindow(QWidget):
         needs_mswitch_refresh = any(c.is_switch_move for c in commands)
         return commands, needs_mswitch_refresh, status_messages
 
-    def _apply_experiment_control_step_to_pump(self, step: PumpPlanStep, *, start: bool) -> bool:
-        previous = self._applied_plan_step
-        _LOGGER.info(
-            "Experiment control step apply requested | step=%s valve=%s previous_valve=%s pump_connected=%s valve_connected=%s switch_connected=%s running=%s holding=%s start=%s",
-            step.step,
-            str(step.valve or "").strip() or "-",
-            str(previous.valve or "").strip() if previous is not None else "-",
-            self._service_device_connected("pump"),
-            self._service_device_connected(SWITCH),
-            self._service_device_connected(SELECTOR),
-            self._plan_running,
-            self._plan_holding,
-            start,
-        )
-        try:
-            commands, needs_mswitch_refresh, status_messages = self._plan_step_commands(step, start=start)
-            for cmd in commands:
-                result = self._device_comm_service.send_command(cmd.label, DeviceCommand(cmd.command_type, cmd.payload))
-                if result.success:
-                    _LOGGER.info("Step command OK | %s", cmd.description)
-                    if cmd.is_switch_move:
-                        self._update_mswitch_state_from_probe()
-                else:
-                    _LOGGER.warning("Device command failed | %s | error=%s", cmd.description, result.error)
-                    status_messages.append(f"{cmd.command_type} failed")
-        except Exception as exc:
-            self._set_status_message(f"Step apply failed: {exc}")
-            _LOGGER.error("Experiment plan step apply failed | step=%s error=%s", step.step, exc)
-            return False
-        self._applied_plan_step = step
-        self._set_status_message(
-            ((" | ".join(status_messages) + " | ") if status_messages else "") + f"Applied experiment-plan step {step.step}."
-        )
-        _LOGGER.info("Applied experiment-plan step %s", step.step)
-        self._emit_experimental_control_state("step_applied", step, status="; ".join(status_messages))
-        return True
+    @property
+    def _step_apply_pending(self) -> bool:
+        """True while at least one step-apply is in flight on device_io_pool().
 
-    def _apply_step_to_pump_async(self, step: PumpPlanStep, *, start: bool) -> None:
-        """Dispatch device commands for a step transition to a QRunnable (main-thread safe entry point)."""
+        A count, not the single dispatch's own state: multiple applies can
+        legitimately overlap now that every GUI trigger dispatches async,
+        not just auto-advance.
+        """
+        return self._step_apply_inflight > 0
+
+    def _apply_step_to_pump_async(
+        self,
+        step: PumpPlanStep,
+        *,
+        start: bool,
+        on_success: Callable[[], None] | None = None,
+    ) -> None:
+        """Dispatch device commands for a step transition to a QRunnable (main-thread safe entry point).
+
+        *on_success* runs only if every command in this specific dispatch
+        succeeded, once its own result comes back - never a different
+        dispatch's, even if several are in flight at once (see
+        _StepApplyResult.on_success's docstring).
+        """
         # FIXME: flagged during a pyflakes/ruff sweep - captured but never used. The actual
         # command diffing reads self._applied_plan_step inside _plan_step_commands below, so
         # this was likely meant for the log line right after (no "previous step" context is
@@ -4828,11 +4830,12 @@ class ExperimentControlWindow(QWidget):
         # Optimistic state update: record the new step as applied so back-to-back
         # _plan_step_commands calls produce the correct diff even before the runnable finishes.
         self._applied_plan_step = step
-        self._step_apply_pending = True
+        self._step_apply_inflight += 1
         runnable = _StepApplyRunnable(
-            self._device_comm_service, commands, step, needs_mswitch_refresh, pre_status
+            self._device_comm_service, commands, step, needs_mswitch_refresh, pre_status, on_success
         )
         runnable.signals.done.connect(self._on_step_apply_async_done)
+        self.hw_status_refresh_requested.emit()
         # Must run on the single-lane device I/O pool, not the general-purpose
         # pool: this sends real commands (including switch.move_to) to drivers
         # that were connected/homed on device_io_pool's worker thread. The AMF
@@ -4844,7 +4847,8 @@ class ExperimentControlWindow(QWidget):
         device_io_pool().start(runnable)
 
     def _on_step_apply_async_done(self, result: _StepApplyResult) -> None:
-        self._step_apply_pending = False
+        self._step_apply_inflight = max(0, self._step_apply_inflight - 1)
+        self.hw_status_refresh_requested.emit()
         if result.needs_mswitch_refresh:
             self._update_mswitch_state_from_probe()
         status = "; ".join(result.status_messages)
@@ -4854,6 +4858,8 @@ class ExperimentControlWindow(QWidget):
         )
         _LOGGER.info("Applied experiment-plan step %s (async)", result.step.step)
         self._emit_experimental_control_state("step_applied", result.step, status=status)
+        if result.success and result.on_success is not None:
+            result.on_success()
 
     def _experiment_control_step_change_summary(self, previous: PumpPlanStep | None, updated: PumpPlanStep | None) -> str:
         if previous is None or updated is None:
@@ -4898,7 +4904,7 @@ class ExperimentControlWindow(QWidget):
             return
         self._plan_active_row = row
         if apply_step:
-            self._apply_experiment_control_step_to_pump(steps[row], start=True)
+            self._apply_step_to_pump_async(steps[row], start=True)
         self._sync_experiment_control_timeline(steps, row, refresh_status=refresh_status)
         self._emit_experimental_control_state(event, steps[row], status=status)
 
@@ -4961,7 +4967,7 @@ class ExperimentControlWindow(QWidget):
             )
             return
         self._jump_to_experiment_control_step(row)
-        self._apply_experiment_control_step_to_pump(steps[row], start=True)
+        self._apply_step_to_pump_async(steps[row], start=True)
 
     def _run_experiment_control(self) -> None:
         self._start_or_resume_experiment_control()
@@ -5172,7 +5178,7 @@ class ExperimentControlWindow(QWidget):
             target_row = 0
         if force or target_row != self._plan_active_row:
             self._plan_active_row = target_row
-            self._apply_experiment_control_step_to_pump(steps[target_row], start=True)
+            self._apply_step_to_pump_async(steps[target_row], start=True)
         self._sync_experiment_control_timeline(steps, target_row)
 
     def _stop_all_channels(self) -> None:

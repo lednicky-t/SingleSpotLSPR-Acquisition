@@ -38,10 +38,14 @@ class _GatedFakePumpDriver(DeviceDriver):
         self._connected = False
         self.gate_connect = False
         self.gate_close = False
+        self.gate_execute = False
+        self.raise_on_execute = False
         self.connect_started = threading.Event()
         self.connect_release = threading.Event()
         self.close_started = threading.Event()
         self.close_release = threading.Event()
+        self.execute_started = threading.Event()
+        self.execute_release = threading.Event()
         self.close_calls = 0
 
     def connect(self, endpoint: str) -> None:
@@ -65,10 +69,20 @@ class _GatedFakePumpDriver(DeviceDriver):
         return _FAKE_PROBE
 
     def execute_command(self, command: DeviceCommand) -> object | None:
+        self.execute_started.set()
+        if self.gate_execute:
+            assert self.execute_release.wait(timeout=5.0), "execute_release never signaled"
+        if self.raise_on_execute:
+            raise RuntimeError("simulated command failure")
         return {"ok": True, "command_type": command.command_type}
 
 
-class DeviceManagerLockingTests(unittest.TestCase):
+class _DeviceManagerFakePumpTestCase(unittest.TestCase):
+    """Shared fixture: a DeviceCommunicationService with a fake, gate-able
+    pump driver wired in place of the real RegloICCClient. Split out so
+    DeviceManagerBusyStateTests doesn't inherit (and re-run) every test
+    method already defined on DeviceManagerLockingTests."""
+
     def setUp(self) -> None:
         patcher_load = patch.object(device_manager, "load_app_setting", return_value=[])
         patcher_save = patch.object(device_manager, "save_app_setting", return_value=None)
@@ -105,6 +119,8 @@ class DeviceManagerLockingTests(unittest.TestCase):
         self._pending_drivers.put(driver)
         return self.service.connect("pump_1", cached_pump_probe=_FAKE_PROBE)
 
+
+class DeviceManagerLockingTests(_DeviceManagerFakePumpTestCase):
     def test_status_does_not_block_during_slow_connect(self) -> None:
         driver = _GatedFakePumpDriver()
         driver.gate_connect = True
@@ -231,6 +247,84 @@ class DeviceManagerLockingTests(unittest.TestCase):
 
         self.assertEqual(churn_errors, [])
         self.assertEqual(read_errors, [])
+
+
+class DeviceManagerBusyStateTests(_DeviceManagerFakePumpTestCase):
+    """BUSY device-status coverage (Part C1): status() must report BUSY
+    while a send_command() dispatch is in flight, revert to CONNECTED once
+    it completes - on both the success and the exception path - and must
+    keep answering status() promptly the whole time (no B4 regression:
+    _make_status only reads the fast state-lock-protected _busy_labels set,
+    never the slow hardware-I/O lock send_command holds for its duration).
+    """
+
+    def test_status_reports_busy_during_in_flight_command_and_reverts_after(self) -> None:
+        driver = _GatedFakePumpDriver()
+        driver.gate_execute = True
+        self._connect_with_fake(driver)
+        self.assertEqual(self.service.status("pump_1").state, "connected")
+
+        errors: list[Exception] = []
+        results: list[object] = []
+
+        def _run_command() -> None:
+            try:
+                results.append(self.service.send_command("pump_1", DeviceCommand("noop", {})))
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+
+        thread = threading.Thread(target=_run_command)
+        thread.start()
+        self.assertTrue(driver.execute_started.wait(timeout=5.0), "execute_command() never started")
+
+        started = time.perf_counter()
+        status = self.service.status("pump_1")
+        elapsed_s = time.perf_counter() - started
+
+        self.assertLess(elapsed_s, 0.5, "status() blocked behind an in-progress send_command()")
+        self.assertEqual(status.state, "busy")
+        self.assertTrue(status.connected, "busy still counts as connected for gating purposes")
+
+        driver.execute_release.set()
+        thread.join(timeout=5.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].success)
+
+        status_after = self.service.status("pump_1")
+        self.assertEqual(status_after.state, "connected")
+
+    def test_status_reverts_to_connected_after_failed_command(self) -> None:
+        driver = _GatedFakePumpDriver()
+        driver.raise_on_execute = True
+        self._connect_with_fake(driver)
+
+        result = self.service.send_command("pump_1", DeviceCommand("noop", {}))
+
+        self.assertFalse(result.success)
+        # The finally-block busy-clear must run even though execute_command
+        # raised - a stuck BUSY status would be worse than the original bug.
+        status_after = self.service.status("pump_1")
+        self.assertEqual(status_after.state, "connected")
+
+    def test_list_statuses_reports_busy_for_the_in_flight_label_only(self) -> None:
+        driver = _GatedFakePumpDriver()
+        driver.gate_execute = True
+        self._connect_with_fake(driver)
+
+        thread = threading.Thread(
+            target=lambda: self.service.send_command("pump_1", DeviceCommand("noop", {}))
+        )
+        thread.start()
+        self.assertTrue(driver.execute_started.wait(timeout=5.0), "execute_command() never started")
+
+        statuses = {status.label: status.state for status in self.service.list_statuses()}
+        self.assertEqual(statuses.get("pump_1"), "busy")
+
+        driver.execute_release.set()
+        thread.join(timeout=5.0)
+        self.assertFalse(thread.is_alive())
 
 
 if __name__ == "__main__":

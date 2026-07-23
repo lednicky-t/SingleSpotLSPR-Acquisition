@@ -166,7 +166,7 @@ Important methods:
 - `_connect_selected_mswitch_port()`
 - `_disconnect_mswitch()`
 - `_ensure_mswitch_homed()`
-- `_apply_experiment_control_step_to_pump()`
+- `_apply_step_to_pump_async()`
 - `shutdown_devices()`
 
 ## Flow-Plan Execution Logic

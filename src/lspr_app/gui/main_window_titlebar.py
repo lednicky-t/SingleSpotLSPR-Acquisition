@@ -4,9 +4,18 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QMenuBar, QWidget
 
 from lspr_core import DEFAULT_LAUNCH_PROFILE, launch_profile_spec
+from lspr_app.device.communication_models import DeviceLifecycleState
 from lspr_app.device.device_lifecycle import DeviceLifecycleController
+from lspr_app.device.device_manager import DeviceCommunicationService
 from lspr_app.device.device_types import PUMP, SELECTOR, SWITCH
 from lspr_app.gui.icon_helpers import device_status_icon
+
+# DeviceCommunicationService labels are fixed for the three canonical
+# devices - see device_lifecycle._DEVICE_LABEL, which this mirrors so the
+# busy check below can call DeviceCommunicationService.status(...) directly
+# without going through DeviceLifecycleController (whose is_connected_cached
+# is deliberately a cached snapshot, not a live read - see its docstring).
+_TITLEBAR_KEY_TO_SERVICE_LABEL = {"pump": "pump_1", "valve": "switch_1", "mswitch": "selector_1"}
 
 # Titlebar status-strip keys ("pump"/"valve"/"mswitch") predate and differ
 # from the device-layer keys (PUMP/SWITCH/SELECTOR) - map between them here
@@ -29,7 +38,11 @@ def _device_status_entry(connected: bool, discovered: bool, detail: str = "") ->
 
 
 def device_status_tooltip(label_text: str, state: str, *, port_name: str = "", detail: str = "") -> str:
-    normalized = device_status_state(state == "connected", state == "discovered")
+    # "busy" (and any other already-normalized literal) passes straight
+    # through - only bare booleans-as-strings need re-deriving via
+    # device_status_state, which only knows connected/discovered/disconnected.
+    known_states = {"connected", "discovered", "disconnected", "busy", "error"}
+    normalized = state if state in known_states else device_status_state(state == "connected", state == "discovered")
     tooltip = f"{label_text}: {normalized}."
     if port_name:
         tooltip = f"{label_text}: {normalized} on {port_name}."
@@ -160,6 +173,13 @@ def refresh_hw_device_status_strip(window) -> None:
     connect/probe/command is currently in progress on device_io_pool's
     worker thread (see docs/device-layer/DEVICE_LAYER_AUDIT_2026.md, "UI
     freezes during device initialization").
+
+    BUSY is the one exception: it's read live via
+    DeviceCommunicationService.status(), not from the cached lifecycle
+    snapshot. status() only ever takes the fast _state_lock (never the slow
+    _device_lock a real connect/disconnect/command holds for its whole
+    duration - see the B4 lock split in device_manager.py), so it can't
+    block behind an in-progress command the way is_connected() can.
     """
     items = getattr(window, "_hw_status_items", None)
     if not items:
@@ -182,11 +202,19 @@ def refresh_hw_device_status_strip(window) -> None:
         port = getattr(probe, "port", None)
         return str(getattr(port, "device", port) or "").strip()
 
+    service = DeviceCommunicationService.shared()
     devices = {"spectrometer": ("connected" if bool(window._hardware_available) else "disconnected", "")}
     for titlebar_key, device_key in _TITLEBAR_KEY_TO_DEVICE_KEY.items():
         connected = controller.is_connected_cached(device_key)
         probe = controller.probe_for(device_key)
         state = device_status_state(connected, probe is not None)
+        if connected:
+            service_label = _TITLEBAR_KEY_TO_SERVICE_LABEL.get(titlebar_key)
+            try:
+                if service.status(service_label).state == DeviceLifecycleState.BUSY:
+                    state = "busy"
+            except Exception:
+                pass
         devices[titlebar_key] = (state, _port_name(probe))
 
     for key, icon_label, text_label in items:

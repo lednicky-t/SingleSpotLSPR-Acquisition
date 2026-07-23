@@ -120,6 +120,13 @@ class DeviceCommunicationService:
         self._connections: dict[str, object] = {}
         self._connection_owners: dict[str, str] = {}
         self._last_errors: dict[str, str] = {}
+        # Labels with a send_command() dispatch currently in flight - status
+        # reads report BUSY (see _make_status) while a label is in here.
+        # Status/display only, not a correctness guard: device_io_pool() is
+        # already single-lane, so overlapping real commands can't happen
+        # regardless. State-lock protected like every other bookkeeping
+        # dict here.
+        self._busy_labels: set[str] = set()
         self._events: deque[DeviceEvent] = deque(maxlen=1000)
         self.load_profiles()
 
@@ -403,12 +410,12 @@ class DeviceCommunicationService:
                     self._connections[profile.label] = client
                     self._connection_owners[profile.label] = client._claim_owner
                     self._last_errors.pop(profile.label, None)
-                status = self._make_status(profile.label, profile, True, None, {
-                    "model": probe.model,
-                    "serial_number": probe.serial_number,
-                    "protocol_version": probe.protocol_version,
-                    "channel_count": str(probe.channel_count),
-                })
+                    status = self._make_status(profile.label, profile, True, None, {
+                        "model": probe.model,
+                        "serial_number": probe.serial_number,
+                        "protocol_version": probe.protocol_version,
+                        "channel_count": str(probe.channel_count),
+                    })
                 self._record_event(label=profile.label, endpoint=endpoint, owner=client._claim_owner, action="connect", command=None, result="success", duration_ms=0.0, message=probe.model)
                 return status
 
@@ -420,12 +427,12 @@ class DeviceCommunicationService:
                     self._connections[profile.label] = controller
                     self._connection_owners[profile.label] = controller._claim_owner
                     self._last_errors.pop(profile.label, None)
-                status = self._make_status(profile.label, profile, True, None, {
-                    "model": probe.model,
-                    "serial_number": probe.serial_number or "",
-                    "protocol_version": probe.protocol_version or "",
-                    "controller_type": probe.controller_type,
-                })
+                    status = self._make_status(profile.label, profile, True, None, {
+                        "model": probe.model,
+                        "serial_number": probe.serial_number or "",
+                        "protocol_version": probe.protocol_version or "",
+                        "controller_type": probe.controller_type,
+                    })
                 self._record_event(label=profile.label, endpoint=endpoint, owner=self._connection_owners[profile.label], action="connect", command=None, result="success", duration_ms=0.0, message=probe.model)
                 return status
 
@@ -435,12 +442,12 @@ class DeviceCommunicationService:
                     self._connections[profile.label] = controller
                     self._connection_owners[profile.label] = controller._claim_owner
                     self._last_errors.pop(profile.label, None)
-                status = self._make_status(profile.label, profile, True, None, {
-                    "model": probe.model,
-                    "serial_number": probe.serial_number or "",
-                    "protocol_version": probe.protocol_version or "",
-                    "controller_type": probe.controller_type,
-                })
+                    status = self._make_status(profile.label, profile, True, None, {
+                        "model": probe.model,
+                        "serial_number": probe.serial_number or "",
+                        "protocol_version": probe.protocol_version or "",
+                        "controller_type": probe.controller_type,
+                    })
                 self._record_event(label=profile.label, endpoint=endpoint, owner=controller._claim_owner, action="connect", command=None, result="success", duration_ms=0.0, message=probe.model)
                 return status
 
@@ -487,7 +494,7 @@ class DeviceCommunicationService:
         self._record_event(label=normalized, endpoint=str(endpoint or "") or None, owner=owner or "", action="disconnect", command=None, result="success", duration_ms=0.0, message="")
         with self._state(f"disconnect_status:{normalized}"):
             last_error = self._last_errors.get(normalized)
-        return self._make_status(normalized, profile, False, last_error, {})
+            return self._make_status(normalized, profile, False, last_error, {})
 
     def disconnect_device(self, label: str) -> None:
         self.disconnect(label)
@@ -501,19 +508,25 @@ class DeviceCommunicationService:
             if connection is None:
                 return DeviceCommandResult(normalized, command.command_type, False, None, "Device is not connected.", 0.0)
 
+            with self._state(f"send_command_mark_busy:{normalized}"):
+                self._busy_labels.add(normalized)
             try:
-                response = self._dispatch_command(connection, command)
-                with self._state(f"send_command_clear_error:{normalized}"):
-                    self._last_errors.pop(normalized, None)
-                result = DeviceCommandResult(normalized, command.command_type, True, response, None, (perf_counter() - started) * 1000.0)
-                self._record_event(label=normalized, endpoint=str(getattr(connection, "port", None) or ""), owner=self._connection_owners.get(normalized, ""), action="command", command=command.command_type, result="success", duration_ms=result.duration_ms, message="")
-                return result
-            except Exception as exc:
-                with self._state(f"send_command_set_error:{normalized}"):
-                    self._last_errors[normalized] = str(exc)
-                result = DeviceCommandResult(normalized, command.command_type, False, None, str(exc), (perf_counter() - started) * 1000.0)
-                self._record_event(label=normalized, endpoint=str(getattr(connection, "port", None) or ""), owner=self._connection_owners.get(normalized, ""), action="command", command=command.command_type, result="fail", duration_ms=result.duration_ms, message=str(exc))
-                return result
+                try:
+                    response = self._dispatch_command(connection, command)
+                    with self._state(f"send_command_clear_error:{normalized}"):
+                        self._last_errors.pop(normalized, None)
+                    result = DeviceCommandResult(normalized, command.command_type, True, response, None, (perf_counter() - started) * 1000.0)
+                    self._record_event(label=normalized, endpoint=str(getattr(connection, "port", None) or ""), owner=self._connection_owners.get(normalized, ""), action="command", command=command.command_type, result="success", duration_ms=result.duration_ms, message="")
+                    return result
+                except Exception as exc:
+                    with self._state(f"send_command_set_error:{normalized}"):
+                        self._last_errors[normalized] = str(exc)
+                    result = DeviceCommandResult(normalized, command.command_type, False, None, str(exc), (perf_counter() - started) * 1000.0)
+                    self._record_event(label=normalized, endpoint=str(getattr(connection, "port", None) or ""), owner=self._connection_owners.get(normalized, ""), action="command", command=command.command_type, result="fail", duration_ms=result.duration_ms, message=str(exc))
+                    return result
+            finally:
+                with self._state(f"send_command_clear_busy:{normalized}"):
+                    self._busy_labels.discard(normalized)
 
     def status(self, label: str) -> DeviceStatus:
         with self._state(f"status:{label}"):
@@ -860,7 +873,11 @@ class DeviceCommunicationService:
         return normalized
 
     def _make_status(self, label: str, profile: DeviceProfile, connected: bool, last_error: str | None, identity: dict[str, str]) -> DeviceStatus:
-        if connected:
+        # Callers already hold _state_lock (via _state(...)) when they reach
+        # here, so reading _busy_labels needs no extra locking.
+        if connected and label in self._busy_labels:
+            state = DeviceLifecycleState.BUSY
+        elif connected:
             state = DeviceLifecycleState.CONNECTED
         elif last_error is not None:
             state = DeviceLifecycleState.ERROR

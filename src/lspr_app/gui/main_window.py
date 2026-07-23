@@ -2206,14 +2206,39 @@ class MainWindow(QMainWindow):
 
     def _handle_experimental_control_state_recorded(self, payload: object) -> None:
         self._update_window_mode_label()
-        if self._measurement_writer is None or not self._measurement_active:
-            return
         if not isinstance(payload, dict):
             return
-        row = dict(payload)
         # Persist the event on an absolute UTC axis for file stability; the GUI still shows relative time.
+        base_row = dict(payload)
         timestamp_utc_ms = int(round(datetime.now(timezone.utc).timestamp() * 1000.0))
-        row["timestamp_utc_ms"] = max(timestamp_utc_ms, 0)
+        base_row["timestamp_utc_ms"] = max(timestamp_utc_ms, 0)
+
+        # Always log device state/failures to the always-on session file,
+        # regardless of whether an official measurement is being recorded -
+        # this is the durable record a scientist can review after the fact
+        # (setup, between measurements, while paused all count), not just
+        # the ephemeral in-app status bar/log window. Best-effort: the
+        # session writer doesn't exist yet until the first spectrum has been
+        # processed (needs the wavelength axis), matching its existing
+        # semantics elsewhere - see storage/measurement_archive.py.
+        from lspr_app.storage.measurement_archive import ensure_session_writer
+        session_writer = ensure_session_writer(self)
+        if session_writer is not None:
+            session_row = dict(base_row)
+            session_started_at = getattr(self, "_metric_archive_started_at", None)
+            if session_started_at is not None:
+                session_elapsed_ms = int(round((datetime.now(timezone.utc) - session_started_at).total_seconds() * 1000.0))
+            else:
+                session_elapsed_ms = 0
+            session_row["t_ms"] = max(session_elapsed_ms, 0)
+            try:
+                session_writer.append_flow_state(session_row)
+            except Exception:
+                pass
+
+        if self._measurement_writer is None or not self._measurement_active:
+            return
+        row = dict(base_row)
         if self._measurement_started_at is not None:
             elapsed_ms = int(round((datetime.now(timezone.utc) - self._measurement_started_at).total_seconds() * 1000.0))
         else:

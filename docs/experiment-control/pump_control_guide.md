@@ -208,7 +208,7 @@ Important methods:
 - `connect_best_pump_controller()`
 - `_connect_selected_port()`
 - `_disconnect_pump()`
-- `_apply_experiment_control_step_to_pump()`
+- `_apply_step_to_pump_async()`
 - `_stop_all_channels()`
 - `shutdown_devices()`
 

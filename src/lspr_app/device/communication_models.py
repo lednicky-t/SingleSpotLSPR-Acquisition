@@ -21,12 +21,17 @@ class DeviceLifecycleState(str, Enum):
         ERROR        → CONNECTED  : successful reconnect()
         DISCONNECTED → DISCOVERED : device found by scan but not yet connected
         DISCOVERED   → CONNECTED  : user-triggered connect after scan
+        CONNECTED    → BUSY       : send_command() dispatch begins
+        BUSY         → CONNECTED  : send_command() dispatch completes, device still reports connected
+        BUSY         → ERROR      : dispatch completes but the device no longer reports connected,
+                                     and an error was recorded
     """
 
     DISCONNECTED = "disconnected"
     CONNECTED = "connected"
     ERROR = "error"
     DISCOVERED = "discovered"
+    BUSY = "busy"
 
 
 @dataclass(frozen=True, slots=True)

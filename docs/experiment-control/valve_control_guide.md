@@ -209,7 +209,7 @@ Important methods:
 - `connect_best_valve_controller()`
 - `_connect_selected_valve_port()`
 - `_disconnect_valve()`
-- `_apply_experiment_control_step_to_pump()`
+- `_apply_step_to_pump_async()`
 - `shutdown_devices()`
 
 ## Flow-Plan Execution Logic

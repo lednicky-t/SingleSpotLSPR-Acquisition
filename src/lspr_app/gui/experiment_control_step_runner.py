@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Callable
 
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 
@@ -64,12 +65,19 @@ class _StepApplyResult:
             the status bar.
         needs_mswitch_refresh: ``True`` if an M-switch move occurred and the
             selector position should be re-queried.
+        on_success: Optional callback the dispatcher wants run only if
+            ``success`` is ``True``, once this specific result comes back.
+            Carried on the result object itself (not a shared queue on the
+            caller) so overlapping dispatches - e.g. a manual step jump
+            fired while an auto-advance's M-switch move is still in flight -
+            can never mix up which callback belongs to which completion.
     """
 
     success: bool
     step: PumpPlanStep
     status_messages: list[str]
     needs_mswitch_refresh: bool
+    on_success: Callable[[], None] | None = None
 
 
 class _StepApplySignals(QObject):
@@ -94,6 +102,7 @@ class _StepApplyRunnable(QRunnable):
         step: PumpPlanStep,
         needs_mswitch_refresh: bool,
         pre_status: list[str],
+        on_success: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self.signals = _StepApplySignals()
@@ -102,6 +111,7 @@ class _StepApplyRunnable(QRunnable):
         self._step = step
         self._needs_mswitch_refresh = needs_mswitch_refresh
         self._pre_status = pre_status
+        self._on_success = on_success
         self.setAutoDelete(True)
 
     def run(self) -> None:  # pragma: no cover - thread-pool path
@@ -127,4 +137,5 @@ class _StepApplyRunnable(QRunnable):
             step=self._step,
             status_messages=status_messages,
             needs_mswitch_refresh=needs_mswitch_refresh,
+            on_success=self._on_success,
         ))

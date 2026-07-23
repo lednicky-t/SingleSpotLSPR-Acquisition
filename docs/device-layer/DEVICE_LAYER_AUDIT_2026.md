@@ -288,16 +288,39 @@ exception, which matches "no reaction, no visible error" exactly. Fixed by routi
 runnable through `device_io_pool()` instead - `device_io_pool` was already imported in this file
 for `DevicePortRefreshTask`.
 
-Not changed: `_apply_experiment_control_step_to_pump` (the synchronous path) also calls
-`send_command` directly from whatever thread invokes it - the GUI thread for its real call sites
-(starting a run, selecting a timeline row, restoring pause state) - which is a different thread
-again from `device_io_pool`'s worker. Converting this to also dispatch through `device_io_pool`
-would need a larger refactor (several call sites currently depend on its synchronous `bool`
-return value); flagged here as a related, currently-unconfirmed follow-up rather than changed
-without checking in first, since it touches core run/pause/resume control flow.
+**Follow-up, done 2026-07-23:** `_apply_experiment_control_step_to_pump` (the synchronous path)
+called `send_command` directly from whatever thread invoked it - the GUI thread for its real call
+sites (starting a run, selecting a timeline row, restoring pause state, resuming after pause/hold,
+live-editing the active step's row) - blocking the Qt event loop for however long the slowest
+command (the M-switch's real several-second rotation) took, which also froze live sensorgram
+plotting (it depends on the GUI event loop being free to process queued signals). Reported
+separately as "GUI/sensorgram freezes while the selector is changing port." All 7 of its call
+sites now dispatch through `_apply_step_to_pump_async`/`device_io_pool()` instead, matching the
+already-correct auto-advance path; `_apply_experiment_control_step_to_pump` itself is deleted
+(zero remaining callers). This needed `_apply_step_to_pump_async` to become overlap-safe first
+(`on_success` is now carried on each dispatch's own `_StepApplyResult`, not a shared queue, since
+multiple GUI-triggered applies can now legitimately be in flight at once) and one deliberate
+behavior change: `_resume_experiment_control_after_manual_step_change` no longer hard-blocks the
+resume if the hardware apply fails (previously it silently left the plan not-resumed) - a failure
+now surfaces via the status bar and, per the same-day durable-logging fix below, the always-on
+session HDF5 file, which is a stronger data-integrity guarantee than a synchronous gate that only
+helps if someone is watching the screen at that exact moment.
 
-Verified: full test suite (213 tests) green, pyflakes clean, panel constructs cleanly with the
-fix applied.
+Also same day: devices gained a `BUSY` lifecycle state (`DeviceCommunicationService.send_command`
+marks the label busy for the duration of dispatch), surfaced in both Device Manager and the
+titlebar status strip, so "the M-switch is mid-move" has one consistent representation instead of
+being invisible.
+
+Also same day: `_handle_experimental_control_state_recorded` (`gui/main_window.py`) previously only
+wrote device state/failure events to the per-measurement HDF5 file, gated on
+`self._measurement_active` - meaning a device failure during setup, between measurements, or while
+paused left no durable record anywhere, only the ephemeral in-app log. Now also writes
+unconditionally to the always-on session file (`storage/measurement_archive.py`'s
+`ensure_session_writer`, same writer class/schema as the measurement file), so device state is
+reviewable from the data file itself regardless of whether an official recording happened to be
+running at the time.
+
+Verified: full test suite green, pyflakes clean, panel constructs cleanly with the fix applied.
 
 ---
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import traceback
 
+from functools import partial
+
 from time import perf_counter
 
 from PyQt6.QtCore import QEvent, Qt, QTimer
@@ -155,6 +157,10 @@ def ensure_experiment_control_panel_for(window) -> None:
             window._experiment_control_window.mswitch_availability_changed.connect(window._handle_mswitch_availability_changed)
             window._experiment_control_window.recording_control_requested.connect(window._handle_flow_recording_control)
             window._experiment_control_window.experimental_control_state_recorded.connect(window._handle_experimental_control_state_recorded)
+            # partial(), not a lambda: disconnect() below needs the exact same
+            # callable object back, which a fresh lambda can't provide.
+            window._hw_status_refresh_slot = partial(refresh_hw_device_status_strip, window)
+            window._experiment_control_window.hw_status_refresh_requested.connect(window._hw_status_refresh_slot)
             window._experiment_control_window.recording_controller = window
             window._experiment_control_window.theme_changed.connect(window.set_theme)
             window._experiment_control_window.set_theme(str(getattr(window, "_theme_mode", "dark")))
@@ -448,6 +454,9 @@ def close_event_for(window, event) -> None:  # pragma: no cover - GUI runtime pa
             ecw.mswitch_availability_changed.disconnect(window._handle_mswitch_availability_changed)
             ecw.recording_control_requested.disconnect(window._handle_flow_recording_control)
             ecw.experimental_control_state_recorded.disconnect(window._handle_experimental_control_state_recorded)
+            hw_status_refresh_slot = getattr(window, "_hw_status_refresh_slot", None)
+            if hw_status_refresh_slot is not None:
+                ecw.hw_status_refresh_requested.disconnect(hw_status_refresh_slot)
             ecw.theme_changed.disconnect(window.set_theme)
         except RuntimeError:
             pass
