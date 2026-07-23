@@ -329,3 +329,45 @@ since `step.start_s == 0`); from the second step onward "Plan left" barely decre
 was overestimated. Fixed by computing the plan-cumulative elapsed position as
 `step.start_s + _plan_elapsed_s` first - the same combination `_timeline_progress_for_display`
 already used correctly - before comparing against the cumulative totals.
+
+### 2026-07-23 — pressing Next on the last step replayed it instead of finishing the plan
+
+`_move_to_relative_experiment_control_step` clamps its target row to `len(steps) - 1` - correct for
+staying in range, but when already on the last step and running/holding/paused, `row + 1` clamps
+right back to the *same* row. Combined with the elapsed-time-reset fix above (which now
+unconditionally restarts the target step's clock), pressing Next on the last step reset and
+replayed it from 0 instead of finishing the plan - there is no next step to go to, so nothing should
+restart. `_advance_experiment_control_progress` (auto-advance) already handles reaching the end
+correctly (calls `_stop_experiment_control()` and reports "Experiment plan finished."). Fixed by
+checking `row + delta >= len(steps)` *before* clamping, while running/holding/paused, and taking the
+same finish path auto-advance already does instead of falling through to the jump/reset logic.
+Pressing Next while idle (not running/holding/paused) past the last step is unaffected - there's
+nothing to finish, so it keeps the existing clamp-and-select behavior.
+
+## Extended Mode Plan-Table Interactions
+
+The plan table's per-channel "extended" view (toggled via `plan_detail_toggle`, showing the
+direction and tube-diameter columns alongside the flow-rate column for every channel) supports the
+same hover-and-scroll editing style for all three per-channel fields, plus click-to-toggle for
+direction:
+
+- **Flow rate**: scroll over the cell to change it. Default step is 5 per wheel notch; hold Ctrl
+  while scrolling for a finer step of 1. Value is clamped at 0.
+- **Direction**: click the cell (or press Space/Enter while it has focus) to toggle CW/CCW, or
+  scroll over it - any wheel notch in either direction flips it, since it's a two-state value. The
+  cell paints as a rotation-arrow glyph (↻ CW / ↺ CCW, via `direction_glyph` in
+  `experiment_control_builders.py`) instead of plain text, matching the manual-control panel's Dir
+  button. `ExperimentPlanDirectionDelegate` in `gui/flow_plan_model.py` implements the click/paint
+  half; `_cycle_plan_table_cell_by_wheel` in `gui/experiment_control_window.py` implements the
+  scroll half.
+- **Tube diameter**: scroll over the cell to change it by the shared spinbox's single step (0.01
+  mm). Tube diameter is **not** a per-step value - it's a per-channel constant that backs
+  `manual_tube_spins[channel_index]` in the manual-control panel, shared across every row for that
+  channel. Scrolling over any row's tube cell for a channel moves that channel's spinbox directly
+  (`spin.setValue(...)`), which then propagates to every row via the spinbox's existing
+  `valueChanged` -> `_sync_experiment_control_tube_columns` wiring - the same thing editing the
+  manual-control spinbox itself already does. There is deliberately no click-to-edit for tube (only
+  scroll), since the field only ever needs to move by a fixed physical increment.
+
+All three wheel-scroll behaviors, and the direction delegate's click/paint, are covered by
+`tests/unit/test_experiment_control_plan_table_extended_wheel.py` in the umbrella repo.

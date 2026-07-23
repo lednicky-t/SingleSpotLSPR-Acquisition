@@ -273,8 +273,8 @@ class ExperimentControlWindow(QWidget):
         self._plan_timer.timeout.connect(self._advance_experiment_control_progress)
         # Count, not a bool: multiple step-applies can legitimately overlap
         # once every GUI trigger dispatches async (not just auto-advance) -
-        # e.g. a manual step jump fired while an earlier dispatch's M-switch
-        # move is still in flight on device_io_pool(). Each dispatch's own
+        # e.g. a manual step jump fired while an earlier dispatch's switch
+        # rotary valve move is still in flight on device_io_pool(). Each dispatch's own
         # on_success callback is carried on its _StepApplyResult, not a
         # shared queue here, so overlap can't mix up which callback belongs
         # to which completion.
@@ -3573,7 +3573,7 @@ class ExperimentControlWindow(QWidget):
                 DeviceCommand("switch.get_position", {}),
             )
         except Exception as exc:
-            _LOGGER.warning("Could not refresh M-Switch state: %s", exc)
+            _LOGGER.warning("Could not refresh switch rotary valve state: %s", exc)
 
     def _set_connection_visual(self, connected: bool, text: str) -> None:
         """Pump connection message, surfaced through the panel's shared status
@@ -3855,7 +3855,12 @@ class ExperimentControlWindow(QWidget):
             return self.plan_table.indexAt(viewport.mapFromGlobal(global_pos().toPoint()))
         return QModelIndex()
 
-    def _cycle_plan_table_cell_by_wheel(self, index: QModelIndex, wheel_delta: int) -> bool:
+    def _cycle_plan_table_cell_by_wheel(
+        self,
+        index: QModelIndex,
+        wheel_delta: int,
+        modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier,
+    ) -> bool:
         if not index.isValid() or wheel_delta == 0:
             return False
         if index.row() != self.plan_table.currentRow():
@@ -3880,13 +3885,35 @@ class ExperimentControlWindow(QWidget):
         channel_count = ACTIVE_PUMP_CHANNELS
         if flow_start <= index.column() < flow_start + channel_count * 3:
             offset = index.column() - flow_start
-            if offset % 3 == 0:
+            channel_index = offset // 3
+            field = offset % 3
+            if field == 0:
+                # Default step of 5 for quick adjustments; hold Ctrl while
+                # scrolling for the finer, single-unit step.
+                fine = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+                step = 1 if fine else 5
                 raw_value = index.data(Qt.ItemDataRole.EditRole)
                 try:
                     value = int(float(raw_value)) if raw_value is not None else 0
                 except (TypeError, ValueError):
                     value = 0
-                return bool(model.setData(index, max(value + cycle_delta, 0), Qt.ItemDataRole.EditRole))
+                return bool(model.setData(index, max(value + (cycle_delta * step), 0), Qt.ItemDataRole.EditRole))
+            if field == 1:
+                current = str(index.data(Qt.ItemDataRole.EditRole) or "CW").strip().upper()
+                next_value = "CW" if current == "CCW" else "CCW"
+                return bool(model.setData(index, next_value, Qt.ItemDataRole.EditRole))
+            if field == 2:
+                # Tube diameter is a shared per-channel setting (the same
+                # manual_tube_spins value backs every row for this channel,
+                # not a per-step value like flow/direction), so scrolling
+                # over any row's tube cell adjusts it for every row on that
+                # channel at once - matching how editing it via the manual
+                # control spinbox already behaves.
+                if 0 <= channel_index < len(self.manual_tube_spins):
+                    spin = self.manual_tube_spins[channel_index]
+                    spin.setValue(spin.value() + (cycle_delta * spin.singleStep()))
+                    return True
+                return False
         if index.column() == self._switch_column() and hasattr(model, "cycle_switch"):
             handled = bool(model.cycle_switch(index.row(), cycle_delta))
         elif index.column() == self._color_column() and hasattr(model, "cycle_color"):
@@ -4188,6 +4215,19 @@ class ExperimentControlWindow(QWidget):
         self._experiment_control_timeline_label_mode = "color_name" if current == "comment" else "comment"
         self._update_experiment_control_timeline_label_mode()
         self.save_ui_state()
+        # The sensorgram overlay re-resolves its labels from this same mode
+        # on every sync (see _refresh_sensorgram_control_step_event_labels
+        # in main_window_sensorgram_overlay.py), but syncs happen on a
+        # tick/view-range cadence - trigger one immediately so the overlay
+        # updates the moment the toggle is clicked, matching how the
+        # timeline widget itself repaints instantly.
+        recording_controller = getattr(self, "recording_controller", None)
+        sync_overlay = getattr(recording_controller, "_sync_sensorgram_control_step_overlay", None)
+        if callable(sync_overlay):
+            try:
+                sync_overlay()
+            except Exception:
+                pass
 
     def _apply_experiment_control_view_mode(self, *, save: bool = False) -> None:
         from lspr_app.gui.main_window_state import ensure_visible_top_content_splitter
@@ -4468,7 +4508,7 @@ class ExperimentControlWindow(QWidget):
                     return self._scroll_plan_table_by_wheel(event.angleDelta().y())
         if event.type() == QEvent.Type.Wheel and obj in (self.plan_table, self.plan_table.viewport()):
             index = self._wheel_event_index_for_plan_table(obj, event)
-            if self._cycle_plan_table_cell_by_wheel(index, event.angleDelta().y()):
+            if self._cycle_plan_table_cell_by_wheel(index, event.angleDelta().y(), event.modifiers()):
                 event.accept()
                 return True
         if event.type() == QEvent.Type.MouseButtonPress and getattr(obj, "property", None) is not None:
@@ -4772,8 +4812,8 @@ class ExperimentControlWindow(QWidget):
                     switch_label, "switch.move_to", {"position": switch_position, "block": True},
                     f"switch.move_to pos={switch_position}", is_switch_move=True,
                 )]
-            status_messages.append("M-Switch not connected.")
-            _LOGGER.warning("M-Switch command skipped | controller not connected | step=%s switch=%s", step.step, switch_position)
+            status_messages.append("Switch rotary valve not connected.")
+            _LOGGER.warning("Switch rotary valve command skipped | controller not connected | step=%s switch=%s", step.step, switch_position)
             return []
 
         if wait_for_switch_first:
@@ -4977,8 +5017,13 @@ class ExperimentControlWindow(QWidget):
                 emit_event="plan_resume",
             )
             return
+        # Not running/holding/paused - only select the row. Applying the
+        # step to hardware here would start devices moving with no way to
+        # stop them: Stop is gated on _plan_running/_plan_holding/
+        # _plan_paused, none of which double-clicking a step outside those
+        # states ever sets, leaving the plan in an unstoppable "device is
+        # moving but nothing is running" state.
         self._jump_to_experiment_control_step(row)
-        self._apply_step_to_pump_async(steps[row], start=True)
 
     def _run_experiment_control(self) -> None:
         self._start_or_resume_experiment_control()
@@ -5054,11 +5099,27 @@ class ExperimentControlWindow(QWidget):
         if not steps:
             return
         running = self._plan_running
-        row = self._plan_active_row if (self._plan_running or self._plan_holding or self._plan_paused) else self._selected_experiment_control_row()
+        active = self._plan_running or self._plan_holding or self._plan_paused
+        row = self._plan_active_row if active else self._selected_experiment_control_row()
         if row is None:
             row = 0
-        target = min(max(row + delta, 0), len(steps) - 1)
-        if self._plan_running or self._plan_holding or self._plan_paused:
+        raw_target = row + delta
+        if active and raw_target >= len(steps):
+            # Pressing Next past the last step finishes the plan, mirroring
+            # what _advance_experiment_control_progress already does when
+            # auto-advance reaches the end. Without this, target below just
+            # clamps to the last step (same row), and the running branch's
+            # elapsed-time reset would restart that same last step from 0
+            # instead of finishing - "Next" on the last step should finish
+            # the plan, not replay it.
+            self._plan_elapsed_s = max(float(steps[-1].duration_s), 0.0)
+            self._plan_resume_elapsed_s = self._plan_elapsed_s
+            self._stop_experiment_control()
+            self._set_status_message("Experiment plan finished.")
+            _LOGGER.info("Experiment plan finished.")
+            return
+        target = min(max(raw_target, 0), len(steps) - 1)
+        if active:
             if running:
                 # Mirrors _jump_to_experiment_control_step's reset - without
                 # it, the new step's elapsed/ETA tracking kept accumulating
@@ -5108,6 +5169,21 @@ class ExperimentControlWindow(QWidget):
             return max(monotonic() - self._step_started_monotonic, 0.0)
         return max(float(self._plan_resume_runtime_s), 0.0)
 
+    def _experiment_control_step_label_for_overlay(self, step: PumpPlanStep) -> str:
+        """Label text for a step, matching whichever label mode the
+        timeline widget is currently showing (comment vs color name) -
+        reuses the timeline widget's own resolution logic directly so the
+        sensorgram's step overlay can never drift out of sync with what
+        the experiment-control panel's own timeline displays.
+        """
+        timeline_widget = getattr(self, "timeline_widget", None)
+        if timeline_widget is not None and hasattr(timeline_widget, "_step_label_text"):
+            try:
+                return timeline_widget._step_label_text(step)
+            except Exception:
+                pass
+        return str(step.description or "").strip()
+
     def _emit_experimental_control_state(self, event: str, step: PumpPlanStep | None = None, *, status: str = "") -> None:
         if step is None:
             step = self._applied_plan_step
@@ -5117,7 +5193,7 @@ class ExperimentControlWindow(QWidget):
             "plan_state": plan_state,
             "step_index": int(step.step) if step is not None else "",
             "color": str(step.color or "") if step is not None else "",
-            "label": str(step.description or "").strip() if step is not None else "",
+            "label": self._experiment_control_step_label_for_overlay(step) if step is not None else "",
             "elapsed_in_step_ms": int(round(max(float(self._plan_elapsed_s), 0.0) * 1000.0)),
             "pump_running": bool(self._plan_running),
             "valve_position": str(step.valve or "") if step is not None else "",

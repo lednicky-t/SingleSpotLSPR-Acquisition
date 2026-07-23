@@ -19,6 +19,7 @@ from lspr_app.domain.pump_plan import PumpChannelStep, PumpPlanStep
 from lspr_app.gui.flow_plan_model import (
     ExperimentPlanColorDelegate,
     ExperimentPlanCommentDelegate,
+    ExperimentPlanDirectionDelegate,
     ExperimentPlanDurationDelegate,
     ExperimentPlanFlowDelegate,
     ExperimentPlanSwitchDelegate,
@@ -60,7 +61,7 @@ def configure_experiment_control_plan_view(window, table, model: ExperimentPlanT
     table.setItemDelegateForColumn(1, ExperimentPlanDurationDelegate(window))
     for channel_index in range(ACTIVE_PUMP_CHANNELS):
         table.setItemDelegateForColumn(window._flow_rate_column(channel_index), ExperimentPlanFlowDelegate(window))
-        table.setItemDelegateForColumn(window._direction_column(channel_index), _NoFocusItemDelegate(table))
+        table.setItemDelegateForColumn(window._direction_column(channel_index), ExperimentPlanDirectionDelegate(window))
         table.setItemDelegateForColumn(window._tube_column(channel_index), _NoFocusItemDelegate(table))
     table.setItemDelegateForColumn(window._valve_column(), ExperimentPlanValveDelegate(window))
     table.setItemDelegateForColumn(window._switch_column(), ExperimentPlanSwitchDelegate(window))

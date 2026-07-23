@@ -67,6 +67,81 @@ def _rebase_sensorgram_control_step_events(window, events: list[dict[str, object
     return rebased
 
 
+def _refresh_sensorgram_control_step_event_labels(window, events: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Re-resolve each event's label against the experiment-control
+    timeline's *current* label mode (comment vs color name), every time
+    this runs - the same "recompute fresh, never trust what was baked in
+    at record time" reasoning as _rebase_sensorgram_control_step_events
+    above, just for the label instead of elapsed_s.
+
+    Without this, toggling the timeline's label-mode switch mid-measurement
+    had no visible effect on the sensorgram overlay until the next step
+    transition happened to record a fresh event with the new mode already
+    baked in - unlike the timeline widget itself, which resolves its label
+    fresh on every repaint and so updates instantly. See
+    docs/sensorgram_improvements.md.
+    """
+    experiment_control_window = getattr(window, "_experiment_control_window", None)
+    if experiment_control_window is None or not hasattr(experiment_control_window, "_experiment_control_step_label_for_overlay"):
+        return events
+    try:
+        steps = experiment_control_window._read_experiment_control_steps()
+    except Exception:
+        return events
+    if not steps:
+        return events
+    refreshed: list[dict[str, object]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        step_index = event.get("step_index")
+        try:
+            step_index_value = int(step_index) if step_index not in (None, "") else None
+        except (TypeError, ValueError):
+            step_index_value = None
+        if step_index_value is None or not (1 <= step_index_value <= len(steps)):
+            refreshed.append(event)
+            continue
+        try:
+            label = experiment_control_window._experiment_control_step_label_for_overlay(steps[step_index_value - 1])
+        except Exception:
+            refreshed.append(event)
+            continue
+        updated = dict(event)
+        updated["label"] = label
+        refreshed.append(updated)
+    return refreshed
+
+
+def _visible_sensorgram_control_step_events(window, events: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Restrict events to the current measurement while one is actively
+    recording, so "measurement" view keeps showing only the current
+    recording's own steps.
+
+    The events list itself accumulates across every measurement in the
+    session (nothing clears it between recordings anymore - see
+    start_measurement_run in acquisition_controller.py), which is what lets
+    session view show step markers from every past recording at once, not
+    just the latest. This filter is what keeps "measurement" view from also
+    picking up every earlier recording's steps once they start
+    accumulating.
+    """
+    if not bool(getattr(window, "_measurement_active", False)):
+        return events
+    measurement_started_at = getattr(window, "_measurement_started_at", None)
+    if not isinstance(measurement_started_at, datetime):
+        return events
+    cutoff_ms = measurement_started_at.timestamp() * 1000.0
+    visible: list[dict[str, object]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        timestamp_utc_ms = event.get("timestamp_utc_ms")
+        if timestamp_utc_ms is None or float(timestamp_utc_ms) >= cutoff_ms - 1.0:
+            visible.append(event)
+    return visible
+
+
 def sensorgram_control_step_overlay_current_elapsed_s(window) -> float | None:
     if window._measurement_started_at is not None and window._measurement_active:
         try:
@@ -278,6 +353,36 @@ def sensorgram_control_step_overlay_reserved_y_padding(window, y_min: float, y_m
     return 0.0, reserve
 
 
+def close_sensorgram_control_step_overlay_segment(window) -> None:
+    """Append a boundary STOP event when a measurement stops.
+
+    The events list accumulates across every measurement in the session
+    (nothing clears it between recordings - see start_measurement_run),
+    so session view can show step markers from every past recording at
+    once. But build_sensorgram_control_step_overlay_segments only stops
+    extending a segment at an explicit STOP-state event - if the
+    experiment-control plan was still RUN/HOLD/PAUSE when recording
+    stopped (a real, common case: recording and the plan are independent
+    controls), the last recorded event would still say RUN, and the next
+    measurement's first event would silently close a segment spanning the
+    entire idle gap between the two recordings, drawn as though a step had
+    kept running the whole time. Called from stop_measurement_run, before
+    a new measurement can add anything after it.
+    """
+    events = getattr(window, "_sensorgram_control_step_events", None)
+    if not isinstance(events, list) or not events:
+        return
+    last_event = events[-1]
+    if not isinstance(last_event, dict) or str(last_event.get("state") or "").strip().upper() == "STOP":
+        return
+    boundary = dict(last_event)
+    boundary["state"] = "STOP"
+    boundary["event"] = "measurement_stopped"
+    boundary["status"] = ""
+    boundary["timestamp_utc_ms"] = datetime.now(timezone.utc).timestamp() * 1000.0
+    events.append(boundary)
+
+
 def record_sensorgram_control_step_event(window, payload: dict[str, object]) -> None:
     events = getattr(window, "_sensorgram_control_step_events", None)
     if not isinstance(events, list):
@@ -375,6 +480,14 @@ def sync_sensorgram_control_step_overlay(window) -> None:
             except Exception:
                 pass
         return
+    events = _visible_sensorgram_control_step_events(window, events)
+    if not events:
+        for item in items:
+            try:
+                item.setVisible(False)
+            except Exception:
+                pass
+        return
     bounds = sensorgram_control_step_overlay_view_bounds(window)
     if bounds is None:
         for item in items:
@@ -385,6 +498,7 @@ def sync_sensorgram_control_step_overlay(window) -> None:
         return
     x_min, x_max, y_min, y_max = bounds
     current_elapsed_s = sensorgram_control_step_overlay_current_elapsed_s(window)
+    events = _refresh_sensorgram_control_step_event_labels(window, events)
     segments = build_sensorgram_control_step_overlay_segments(
         _rebase_sensorgram_control_step_events(window, events),
         current_elapsed_s=current_elapsed_s,

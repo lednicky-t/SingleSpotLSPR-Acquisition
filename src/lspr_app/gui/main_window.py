@@ -166,6 +166,7 @@ from lspr_app.gui.main_window_sensorgram_archive import (
     start_sensorgram_metric_archive_reload_task,
 )
 from lspr_app.gui.main_window_sensorgram_overlay import (
+    close_sensorgram_control_step_overlay_segment as close_sensorgram_control_step_overlay_segment_for_sensorgram,
     handle_trace_view_range_changed as handle_trace_view_range_changed_for_sensorgram,
     normalize_sensorgram_control_step_overlay_position as normalize_sensorgram_control_step_overlay_position_for_sensorgram,
     normalize_sensorgram_control_step_overlay_style as normalize_sensorgram_control_step_overlay_style_for_sensorgram,
@@ -2180,11 +2181,11 @@ class MainWindow(QMainWindow):
         refresh_hw_device_status_strip(self)
         if probe is None:
             if not self._closing and not self._suppress_hardware_disconnect_warning():
-                self._log_warning("M-Switch disconnected.")
+                self._log_warning("Switch rotary valve disconnected.")
             return
         port_name = getattr(probe, "port", "unknown")
         model = getattr(probe, "model", "AMF switch")
-        self._log_success(f"M-Switch connected: {model} on {port_name}.")
+        self._log_success(f"Switch rotary valve connected: {model} on {port_name}.")
 
     def _handle_flow_recording_control(self, action: str) -> bool:
         action = str(action or "").strip().lower()
@@ -3178,6 +3179,9 @@ class MainWindow(QMainWindow):
 
     def _record_sensorgram_control_step_event(self, payload: dict[str, object]) -> None:
         record_sensorgram_control_step_event_for_sensorgram(self, payload)
+
+    def _close_sensorgram_control_step_overlay_segment(self) -> None:
+        close_sensorgram_control_step_overlay_segment_for_sensorgram(self)
 
     def _sync_sensorgram_control_step_overlay(self) -> None:
         sync_sensorgram_control_step_overlay_for_sensorgram(self)

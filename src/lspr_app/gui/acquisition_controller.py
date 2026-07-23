@@ -1242,8 +1242,13 @@ def start_measurement_run(window) -> None:
     window._session_stats_log.clear()
     window._session_stats_log_last_text = ""
     window._session_stats_log_last_capture_ts = 0.0
-    if hasattr(window, "_sensorgram_control_step_events"):
-        window._sensorgram_control_step_events.clear()
+    # Deliberately NOT cleared here: the events list accumulates across
+    # every measurement in the session (each entry carries its own
+    # timestamp_utc_ms), so session view can show step markers from every
+    # past recording, not just the most recent one. sync_sensorgram_control_
+    # step_overlay filters to just the current measurement while one is
+    # active; clear_trace_history_for (main_window_plotting.py) is the
+    # actual "reset everything" point, for when the whole session resets.
     if hasattr(window, "_sync_sensorgram_control_step_overlay"):
         window._sync_sensorgram_control_step_overlay()
     if window._live_worker is not None and window._live_worker.is_alive():
@@ -1313,6 +1318,11 @@ def stop_measurement_run(window) -> None:
         cache = getattr(window, "_plot_view_cache", None)
         if cache is not None and hasattr(cache, "rebase_live_absolute_metric_recent_tail"):
             cache.rebase_live_absolute_metric_recent_tail(offset_s)
+    # Close off this measurement's overlay segment with a STOP boundary
+    # before its events can be mistaken for still-open by whatever the next
+    # measurement records - see close_sensorgram_control_step_overlay_segment.
+    if hasattr(window, "_close_sensorgram_control_step_overlay_segment"):
+        window._close_sensorgram_control_step_overlay_segment()
     window._measurement_started_at = None
     window._measurement_axis_lock = None
     set_measurement_ui_locked(window, False)

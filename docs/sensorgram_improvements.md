@@ -280,6 +280,119 @@ five write sites)
 **Risk:** Low - confirmed via a full re-run of the C5/C6 reproduction scripts against the refactored
 code, producing byte-identical results to before the refactor, plus the full test suite.
 
+### C9 — 2026-07-23 follow-up: session view only ever showed the most recent measurement's step overlay
+**Files:** `gui/acquisition_controller.py` (`start_measurement_run`, `stop_measurement_run`),
+`gui/main_window_sensorgram_overlay.py` (new `_visible_sensorgram_control_step_events`,
+`close_sensorgram_control_step_overlay_segment`), `gui/main_window.py`
+**Symptom:** the maintainer wanted session view to show step markers from *every* measurement run
+during the session (run twice, see both sets of markers), not just the latest - "steps are written
+down for every data point... maybe issue is only in display" (correct diagnosis).
+**Root cause:** `start_measurement_run` called `window._sensorgram_control_step_events.clear()` on
+every Record press, discarding the previous recording's overlay events even though the underlying
+data itself (the session file's `experiment_control_runtime` table, durably logged since Part A of
+the 2026-07-22 work) was never lost - purely an in-memory display list being wiped too eagerly.
+**Fix:** stopped clearing the events list at measurement start - it now accumulates across the
+whole session, exactly mirroring how the session file itself already accumulates every
+measurement's flow-state rows. Two things had to be added to make that safe:
+- `sync_sensorgram_control_step_overlay` now filters through `_visible_sensorgram_control_step_events`,
+  which restricts to the current measurement's own events while one is actively recording (so
+  "measurement" view doesn't also pick up every earlier recording's steps) but returns everything
+  otherwise (so session view shows the full accumulated history).
+- `stop_measurement_run` now calls a new `close_sensorgram_control_step_overlay_segment`, which
+  appends a synthetic STOP-state boundary event if the last recorded event wasn't already STOP.
+  Without it, if the experiment-control plan was still RUN/HOLD/PAUSE when recording stopped (a
+  real, common case - recording and the plan are independent controls), the segment-builder's
+  existing "don't extend past a STOP event" guard would never trigger, and the idle gap between two
+  separate measurements would render as one continuous "step still running" bar spanning the whole
+  gap.
+`clear_trace_history_for` (main_window_plotting.py) remains the actual "wipe everything" point, for
+when the whole session resets - unchanged.
+**Effort:** Small (~50 lines: one filter function, one boundary-marker function, one line removed)
+**Risk:** Low - the filter is a no-op (returns the same list) whenever not actively measuring, and
+the boundary marker is a no-op whenever the last event is already STOP; verified with a real
+multi-measurement reproduction (two measurements' events, a boundary between them, confirmed the
+segment-builder produces two separate segments instead of one spanning the gap).
+
+### C10 — 2026-07-23 follow-up: double-clicking a timeline step while idle moved devices with no way to stop them
+**Files:** `gui/experiment_control_window.py` (`_apply_selected_experiment_control_step`)
+**Symptom:** the maintainer reported that double-clicking a step on the timeline applied it to the
+real devices even when the experiment plan wasn't running, holding, or paused - moving pumps/valves/
+the M-switch into an "awkward state" with no Stop control available to undo it (Stop is gated on
+`_plan_running`/`_plan_holding`/`_plan_paused`, none of which a bare double-click outside those
+states ever sets).
+**Root cause:** `_apply_selected_experiment_control_step` (wired to the timeline widget's
+`step_double_activated` signal) had three correctly-gated branches for running/holding/paused, but
+its fallback (none of the three) called `_jump_to_experiment_control_step(row)` *and* separately
+`self._apply_step_to_pump_async(steps[row], start=True)` - an extra, unconditional hardware action
+`_jump_to_experiment_control_step`'s own idle branch never takes on its own (it only selects the
+row).
+**Fix:** removed the extra `_apply_step_to_pump_async` call from the idle fallback - double-clicking
+a step while idle now only selects/highlights it (matching `_jump_to_experiment_control_step`'s own
+idle behavior), never touches hardware. The three active-state branches are untouched.
+**Effort:** Trivial (one line removed)
+**Risk:** Low - `_apply_selected_experiment_control_step` has exactly one caller
+(`step_double_activated`), so this couldn't affect any other code path.
+
+### C11 — 2026-07-23 follow-up: sensorgram overlay labels ignored the timeline widget's label mode
+**Files:** `gui/experiment_control_window.py` (`_emit_experimental_control_state`, new
+`_experiment_control_step_label_for_overlay`)
+**Symptom:** the maintainer noticed the sensorgram's step-overlay labels never matched the
+experiment-control panel's own timeline (`PumpPlanTimelineWidget`) - the timeline can show either
+each step's comment or its color's palette name (toggled via the small button in its corner,
+`_label_mode` - `"comment"` vs `"color_name"`), but the sensorgram overlay always showed the
+comment, regardless of that setting.
+**Root cause:** `_emit_experimental_control_state` (which builds the payload
+`record_sensorgram_control_step_event` reads its `label` field from) hardcoded
+`str(step.description or "").strip()` - never consulting
+`self._experiment_control_timeline_label_mode` (the window's own persisted setting, pushed down to
+`self.timeline_widget.set_label_mode(...)` whenever it changes) or the timeline widget's existing
+color-name resolution logic at all.
+**Fix:** new `_experiment_control_step_label_for_overlay(step)` delegates directly to
+`self.timeline_widget._step_label_text(step)` - the exact method the timeline widget itself uses to
+decide what to draw - so the two can never drift out of sync again; falls back to
+`step.description` only if the timeline widget isn't built yet or its label resolution raises.
+`_emit_experimental_control_state` now calls this instead of hardcoding the description.
+**Note:** originally resolved once at record time, not retroactively - see C12 immediately below,
+which the maintainer asked for after finding that choice didn't match the timeline widget's own
+live-updating behavior.
+**Effort:** Small (~15 lines: one new delegating method, one call-site swap)
+**Risk:** Low - `PumpPlanTimelineWidget._step_label_text` is pure logic (reads only
+`_label_mode`/`_color_palette_entries`, both already kept in sync with the window's own settings),
+reused as-is rather than reimplemented.
+
+### C12 — 2026-07-23 follow-up: overlay labels didn't update live when the label-mode switch was toggled mid-measurement
+**Files:** `gui/main_window_sensorgram_overlay.py` (new
+`_refresh_sensorgram_control_step_event_labels`), `gui/experiment_control_window.py`
+(`_cycle_experiment_control_timeline_label_mode`)
+**Symptom:** the maintainer asked to check for "some block or not good wiring" after finding that
+toggling the timeline's comment/color-name switch during a measurement had no visible effect on the
+sensorgram overlay - the timeline widget itself updates instantly (it resolves its label fresh on
+every repaint), so the overlay's lack of a live response looked broken by comparison.
+**Root cause:** C11 deliberately resolved each event's label once, at record time - deliberate, but
+wrong once compared directly against the timeline widget's own always-fresh behavior, which is what
+the maintainer (reasonably) expected parity with. Toggling only pushed the new mode into
+`self.timeline_widget` (via `_update_experiment_control_timeline_label_mode`); nothing told the
+sensorgram overlay's events to reflect it, and nothing re-synced the overlay either, so even the
+next natural sync (driven by the plot's own tick/view-range cadence) would have kept showing the
+stale label until a fresh step transition happened to overwrite it.
+**Fix:** two parts, mirroring how C7 already keeps `elapsed_s` fresh instead of trusting a
+record-time value:
+- New `_refresh_sensorgram_control_step_event_labels`, called from `sync_sensorgram_control_step_overlay`
+  right alongside the existing elapsed_s rebase, re-resolves every event's label via
+  `_experiment_control_step_label_for_overlay` (C11) against whichever step it points to and the
+  *current* label mode - every sync, not just at record time. Events without a resolvable
+  `step_index` (the C9 STOP-boundary marker on a legacy path, or a malformed payload) are left
+  untouched.
+- `_cycle_experiment_control_timeline_label_mode` now also triggers an immediate
+  `_sync_sensorgram_control_step_overlay()` (via `recording_controller`) right after updating the
+  timeline widget, so the overlay updates the instant the toggle is clicked instead of waiting for
+  the next incidental sync.
+**Effort:** Small (~50 lines: one new refresh function, one call-site addition, one sync trigger)
+**Risk:** Low - the refresh is a no-op for any event whose step can't be resolved, and reuses
+`_experiment_control_step_label_for_overlay`'s existing exception handling; verified live in the
+running app (toggling mid-measurement, with no new step transition, visibly changed an
+already-drawn segment's label from `"-"` to a resolved color name).
+
 ---
 
 ## Performance fixes

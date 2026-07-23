@@ -21,6 +21,7 @@ from lspr_app.domain.pump_plan import (
     recompute_plan_timing,
     to_core_experiment_plan,
 )
+from lspr_app.gui.experiment_control_builders import direction_glyph
 from lspr_app.gui.ui_helpers import make_compact_spinbox
 
 
@@ -606,6 +607,59 @@ class ExperimentPlanValveDelegate(_BaseFlowDelegate):
                 current = str(index.data(Qt.ItemDataRole.EditRole) or index.data(Qt.ItemDataRole.DisplayRole) or "Open").strip().lower()
                 next_value = "Close" if current != "close" else "Open"
                 return bool(model.setData(index, next_value, Qt.ItemDataRole.EditRole))
+        return False
+
+
+class ExperimentPlanDirectionDelegate(_BaseFlowDelegate):
+    """Click (or scroll - see _cycle_plan_table_cell_by_wheel) to toggle
+    CW/CCW, drawn as the same rotation-arrow glyph as the manual-control
+    panel's direction buttons (create_direction_button in
+    experiment_control_builders.py) instead of plain "CW"/"CCW" text."""
+
+    def createEditor(self, parent, option, index):  # type: ignore[override]
+        _ = parent, option, index
+        return None
+
+    def paint(self, painter: QPainter, option, index) -> None:  # pragma: no cover - GUI runtime path
+        direction = str(index.data(Qt.ItemDataRole.EditRole) or "CW").strip().upper()
+        direction = "CCW" if direction == "CCW" else "CW"
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        bg_brush = index.data(Qt.ItemDataRole.BackgroundRole)
+        if isinstance(bg_brush, QBrush):
+            painter.fillRect(option.rect, bg_brush)
+            bg_color = bg_brush.color()
+        else:
+            bg_color = QColor(self._window._theme_palette().get("bg", "#f4f6f8"))
+            painter.fillRect(option.rect, bg_color)
+
+        fg_brush = index.data(Qt.ItemDataRole.ForegroundRole)
+        if isinstance(fg_brush, QBrush) and fg_brush.color().isValid():
+            text_color = fg_brush.color()
+        else:
+            text_color = QColor(_contrast_text_color(bg_color.name()))
+
+        font = painter.font()
+        font.setPointSizeF(max(font.pointSizeF(), 10.0) * 1.2)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QPen(text_color))
+        painter.drawText(option.rect, Qt.AlignmentFlag.AlignCenter, direction_glyph(direction))
+        painter.restore()
+
+    def _toggle(self, model, index: QModelIndex) -> bool:
+        current = str(index.data(Qt.ItemDataRole.EditRole) or "CW").strip().upper()
+        next_value = "CW" if current == "CCW" else "CCW"
+        return bool(model.setData(index, next_value, Qt.ItemDataRole.EditRole))
+
+    def editorEvent(self, event, model, option, index):  # type: ignore[override]
+        if event.type() == QEvent.Type.MouseButtonRelease and getattr(event, "button", lambda: None)() == Qt.MouseButton.LeftButton:
+            return self._toggle(model, index)
+        if event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if key in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                return self._toggle(model, index)
         return False
 
 
