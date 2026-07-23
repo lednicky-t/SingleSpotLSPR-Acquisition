@@ -3197,8 +3197,19 @@ class ExperimentControlWindow(QWidget):
             active_row = self._plan_active_row
             if active_row is not None and 0 <= active_row < len(steps):
                 step = steps[active_row]
-                step_left_s = max(step.end_s - self._plan_elapsed_s, 0.0)
-                plan_left_s = max(total_end_s - self._plan_elapsed_s, 0.0)
+                # step.end_s/total_end_s are plan-cumulative positions, but
+                # _plan_elapsed_s is step-relative (it resets to 0 at every
+                # step transition - see _advance_experiment_control_progress/
+                # _jump_to_experiment_control_step). Subtracting it straight
+                # from a cumulative value only happened to look right for
+                # the first step (where cumulative and step-relative
+                # coincide); from the second step on, "Plan left" barely
+                # moved. step.start_s + _plan_elapsed_s is the plan-cumulative
+                # elapsed position - the same combination
+                # _timeline_progress_for_display already uses correctly.
+                plan_elapsed_s = float(step.start_s) + max(float(self._plan_elapsed_s), 0.0)
+                step_left_s = max(float(step.duration_s) - self._plan_elapsed_s, 0.0)
+                plan_left_s = max(total_end_s - plan_elapsed_s, 0.0)
                 details.append(f"Step left: {self._format_duration_for_status(step_left_s)}")
                 details.append(f"Plan left: {self._format_duration_for_status(plan_left_s)}")
         elif steps:
@@ -5049,6 +5060,15 @@ class ExperimentControlWindow(QWidget):
         target = min(max(row + delta, 0), len(steps) - 1)
         if self._plan_running or self._plan_holding or self._plan_paused:
             if running:
+                # Mirrors _jump_to_experiment_control_step's reset - without
+                # it, the new step's elapsed/ETA tracking kept accumulating
+                # from wherever the previous step left off instead of
+                # restarting at 0 (elapsed = _plan_resume_elapsed_s + time
+                # since _plan_started_monotonic, neither of which this used
+                # to touch).
+                self._plan_elapsed_s = 0.0
+                self._plan_resume_elapsed_s = 0.0
+                self._plan_started_monotonic = monotonic()
                 self._set_experiment_control_runtime_row(
                     target,
                     event="step_jump",

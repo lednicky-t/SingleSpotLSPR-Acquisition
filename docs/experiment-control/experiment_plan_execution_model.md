@@ -303,3 +303,29 @@ For now, the intended meaning is:
 - `STOP` equals full termination
 
 The table and bar remain plan selectors, while the recorded runtime sequence is built live from the actual experiment.
+
+## Known Issues Fixed
+
+### 2026-07-23 — step navigation via Next/Previous didn't reset the per-step elapsed-time clock
+
+Found while investigating a related sensorgram time-anchor bug (see
+`../sensorgram_improvements.md`, C1-C8) - the maintainer noticed a plan step's elapsed/ETA display
+kept counting up from wherever the *previous* step had left off after pressing Next, instead of
+restarting at 0 for the new step.
+
+`gui/experiment_control_window.py`'s `_move_to_relative_experiment_control_step` (the Next/Previous
+buttons) jumps to a new step but was missing the `_plan_elapsed_s` / `_plan_resume_elapsed_s` /
+`_plan_started_monotonic` reset that its sibling function, `_jump_to_experiment_control_step`
+(clicking a step directly), already performed correctly. Fixed by adding the same reset to both
+functions so every "jump to step N while running" path behaves identically.
+
+### 2026-07-23 — "Step left" / "Plan left" status-line ETA was wrong from the second step onward
+
+Independent of the navigation bug above (present even via normal auto-advance, on any plan with 2+
+steps) - `_refresh_status_line`'s ETA math subtracted the step-relative `_plan_elapsed_s` (resets to
+0 at every step transition) directly from `step.end_s`/`total_end_s`, which are plan-cumulative
+positions. This only produced a correct result on the first step (where the two happen to coincide,
+since `step.start_s == 0`); from the second step onward "Plan left" barely decreased and "Step left"
+was overestimated. Fixed by computing the plan-cumulative elapsed position as
+`step.start_s + _plan_elapsed_s` first - the same combination `_timeline_progress_for_display`
+already used correctly - before comparing against the cumulative totals.
