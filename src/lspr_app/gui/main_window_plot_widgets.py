@@ -125,26 +125,32 @@ class TimedPlotWidget(pg.PlotWidget):
             setattr(owner, total_name, float(getattr(owner, total_name, 0.0) or 0.0) + elapsed_ms)
             current_max = float(getattr(owner, max_name, 0.0) or 0.0)
             setattr(owner, max_name, max(current_max, elapsed_ms))
-            events = getattr(owner, "_plot_paint_events", None)
-            if events is not None:
-                now = perf_counter()
-                events.append((now, prefix, float(elapsed_ms)))
-                recent_values = [value for ts, name, value in events if name == prefix and (now - float(ts)) <= 10.0]
-                recent_count_name = f"_{prefix}_paint_recent_count"
-                recent_total_name = f"_{prefix}_paint_recent_total_ms"
-                recent_max_name = f"_{prefix}_paint_recent_max_ms"
-                recent_avg_name = f"_{prefix}_paint_recent_avg_ms"
-                if recent_values:
-                    recent_total_ms = float(sum(recent_values))
-                    setattr(owner, recent_count_name, len(recent_values))
-                    setattr(owner, recent_total_name, recent_total_ms)
-                    setattr(owner, recent_max_name, max(recent_values))
-                    setattr(owner, recent_avg_name, recent_total_ms / len(recent_values))
-                else:
-                    setattr(owner, recent_count_name, 0)
-                    setattr(owner, recent_total_name, 0.0)
-                    setattr(owner, recent_max_name, 0.0)
-                    setattr(owner, recent_avg_name, 0.0)
+            # The rolling "last 10 seconds" stats below rescan the whole shared
+            # paint-event deque (up to 2000 entries) on every single paint of
+            # every plot. That's only useful while the diagnostics panel is
+            # actually open, so skip it otherwise — count/total/max above stay
+            # live regardless, they're just O(1).
+            if bool(getattr(owner, "_diagnostics_panel_enabled", False)):
+                events = getattr(owner, "_plot_paint_events", None)
+                if events is not None:
+                    now = perf_counter()
+                    events.append((now, prefix, float(elapsed_ms)))
+                    recent_values = [value for ts, name, value in events if name == prefix and (now - float(ts)) <= 10.0]
+                    recent_count_name = f"_{prefix}_paint_recent_count"
+                    recent_total_name = f"_{prefix}_paint_recent_total_ms"
+                    recent_max_name = f"_{prefix}_paint_recent_max_ms"
+                    recent_avg_name = f"_{prefix}_paint_recent_avg_ms"
+                    if recent_values:
+                        recent_total_ms = float(sum(recent_values))
+                        setattr(owner, recent_count_name, len(recent_values))
+                        setattr(owner, recent_total_name, recent_total_ms)
+                        setattr(owner, recent_max_name, max(recent_values))
+                        setattr(owner, recent_avg_name, recent_total_ms / len(recent_values))
+                    else:
+                        setattr(owner, recent_count_name, 0)
+                        setattr(owner, recent_total_name, 0.0)
+                        setattr(owner, recent_max_name, 0.0)
+                        setattr(owner, recent_avg_name, 0.0)
             notify_startup_paint = getattr(owner, "_notify_startup_plot_painted", None)
             if callable(notify_startup_paint):
                 notify_startup_paint(prefix)

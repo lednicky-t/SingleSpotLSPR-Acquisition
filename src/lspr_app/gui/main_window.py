@@ -2838,7 +2838,7 @@ class MainWindow(QMainWindow):
             self._log_warning("Experiment control window is unavailable for step navigation.")
             return
         if hasattr(self._experiment_control_window, "_move_to_relative_experiment_control_step"):
-            self._experiment_control_window._move_to_relative_experiment_control_step(delta)  # noqa: SLF001
+            self._experiment_control_window._move_to_relative_experiment_control_step(delta)
             direction = "next" if delta > 0 else "previous"
             self.status_label.setText(f"Moved to {direction} pump-plan step.")
             self._log_info(f"Moved to {direction} pump-plan step.")
@@ -2854,7 +2854,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Experiment control action is unavailable.")
             self._log_warning(f"Experiment control action '{method_name}' is unavailable.")
             return False
-        method()  # noqa: SLF001
+        method()
         return True
 
     def _toggle_flow_run_hold(self) -> None:

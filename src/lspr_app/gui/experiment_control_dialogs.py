@@ -859,7 +859,7 @@ class ExperimentControlDialogs:
                 else "Switch-rotary-valve-first mode disabled. Pump and valve can apply without waiting."
             )
             try:
-                setattr(self._parent, "_wait_for_mswitch_first", bool(checked))
+                self._parent._wait_for_mswitch_first = bool(checked)
             except Exception:
                 pass
 

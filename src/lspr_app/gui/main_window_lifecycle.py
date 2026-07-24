@@ -28,11 +28,11 @@ from lspr_app.storage.app_config import save_app_setting
 
 
 def restore_ui_state_for(window) -> None:
-    setattr(window, "_restoring_ui_state", True)
+    window._restoring_ui_state = True
     try:
         restore_ui_state(window)
     finally:
-        setattr(window, "_restoring_ui_state", False)
+        window._restoring_ui_state = False
 
 
 def save_ui_state_for(window) -> None:

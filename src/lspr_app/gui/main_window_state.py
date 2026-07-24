@@ -647,50 +647,12 @@ def set_top_content_mode(window, mode: str, *, save: bool = True) -> None:
         window._schedule_ui_state_persist()
 
 
-def restore_ui_state(window) -> None:
-    ui_state = window._ui_state
-    if not ui_state:
-        return
-
+def _restore_window_geometry(window, ui_state: dict[str, object]) -> None:
+    """Restore saved window size/position, clamped to the current screen."""
     width = ui_state.get("width")
     height = ui_state.get("height")
     x_pos = ui_state.get("x")
     y_pos = ui_state.get("y")
-    splitter_sizes = ui_state.get("splitter_sizes")
-    plot_splitter_sizes = ui_state.get("plot_splitter_sizes")
-    sensorgram_header_splitter_sizes = ui_state.get("sensorgram_header_splitter_sizes")
-    session_stats_splitter_sizes = ui_state.get("session_stats_splitter_sizes")
-    maximized = ui_state.get("maximized")
-    top_view_mode = ui_state.get("top_view_mode")
-    sensorgram_time_axis_mode = ui_state.get("sensorgram_time_axis_mode")
-    metric_display_points = ui_state.get("metric_display_points")
-    sensorgram_compression_recent_tail_points = ui_state.get("sensorgram_compression_recent_tail_points")
-    metric_autoscale_follow_latest_buffer_fraction = ui_state.get("metric_autoscale_follow_latest_buffer_fraction")
-    metric_autoscale_min_interval_s = ui_state.get("metric_autoscale_min_interval_s")
-    metric_autoscale_throttle_mode = ui_state.get("metric_autoscale_throttle_mode")
-    metric_autoscale_skip_tiny_changes_enabled = ui_state.get("metric_autoscale_skip_tiny_changes_enabled")
-    sensorgram_metric_colors = ui_state.get("sensorgram_metric_colors")
-    sensorgram_metric_envelope_overlay_enabled = ui_state.get("sensorgram_metric_envelope_overlay_enabled")
-    sensorgram_metric_envelope_overlay_alpha = ui_state.get("sensorgram_metric_envelope_overlay_alpha")
-    sensorgram_control_step_overlay_enabled = ui_state.get("sensorgram_control_step_overlay_enabled")
-    sensorgram_control_step_overlay_style = ui_state.get("sensorgram_control_step_overlay_style")
-    sensorgram_control_step_overlay_position = ui_state.get("sensorgram_control_step_overlay_position")
-    sensorgram_control_step_overlay_opacity = ui_state.get("sensorgram_control_step_overlay_opacity")
-    sensorgram_control_step_overlay_bar_height_px = ui_state.get("sensorgram_control_step_overlay_bar_height_px")
-    diagnostics_panel_visible = ui_state.get("diagnostics_panel_visible")
-    sensorgram_line_mode = ui_state.get("sensorgram_line_mode")
-    sensorgram_line_width_px = ui_state.get("sensorgram_line_width_px")
-    plot_antialias_enabled = ui_state.get("plot_antialias_enabled")
-    sensorgram_frozen = ui_state.get("sensorgram_frozen")
-    left_controls_visible = ui_state.get("left_controls_visible")
-    sensorgram_visible = ui_state.get("sensorgram_visible")
-    sensorgram_visible_modes = ui_state.get("sensorgram_visible_modes")
-    sensorgram_primary_mode = ui_state.get("sensorgram_primary_mode")
-    trace_stats_metric_name = ui_state.get("trace_stats_metric_name")
-    residual_y_range = ui_state.get("residual_y_range")
-    residual_visible = bool(ui_state.get("show_residual", False))
-    layout_presets = ui_state.get("layout_presets")
-    layout_preset_selected = ui_state.get("layout_preset_selected")
 
     if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
         app = QApplication.instance()
@@ -719,6 +681,15 @@ def restore_ui_state(window) -> None:
                     screen_geometry.y() + screen_geometry.height() - window.height() - margin,
                 )
         window.move(x_pos, y_pos)
+
+
+def _restore_splitter_sizes(window, ui_state: dict[str, object]) -> None:
+    """Restore saved splitter handle positions across the main window."""
+    splitter_sizes = ui_state.get("splitter_sizes")
+    plot_splitter_sizes = ui_state.get("plot_splitter_sizes")
+    sensorgram_header_splitter_sizes = ui_state.get("sensorgram_header_splitter_sizes")
+    session_stats_splitter_sizes = ui_state.get("session_stats_splitter_sizes")
+
     if (
         isinstance(splitter_sizes, list)
         and len(splitter_sizes) == 2
@@ -744,6 +715,15 @@ def restore_ui_state(window) -> None:
         and getattr(window, "session_stats_splitter", None) is not None
     ):
         window.session_stats_splitter.setSizes(session_stats_splitter_sizes)
+
+
+def _restore_top_view_and_panel_visibility(window, ui_state: dict[str, object]) -> None:
+    """Restore which top-level view (spectra vs. experiment control) is active, and the
+    visibility of the left controls panel and the sensorgram block."""
+    top_view_mode = ui_state.get("top_view_mode")
+    left_controls_visible = ui_state.get("left_controls_visible")
+    sensorgram_visible = ui_state.get("sensorgram_visible")
+
     if isinstance(top_view_mode, str):
         mode = normalize_top_content_mode(top_view_mode)
         if mode == "experimental_control" and not bool(getattr(window, "_ui_startup_ready", False)):
@@ -760,6 +740,16 @@ def restore_ui_state(window) -> None:
         window._left_controls_scroll.setVisible(left_controls_visible)
     if isinstance(sensorgram_visible, bool):
         window._sensorgram_block.setVisible(sensorgram_visible)
+
+
+def _restore_sensorgram_metric_state(window, ui_state: dict[str, object]) -> None:
+    """Restore which sensorgram metrics are shown, which is primary, their colors,
+    and which metric the stats readout tracks."""
+    sensorgram_visible_modes = ui_state.get("sensorgram_visible_modes")
+    sensorgram_primary_mode = ui_state.get("sensorgram_primary_mode")
+    trace_stats_metric_name = ui_state.get("trace_stats_metric_name")
+    sensorgram_metric_colors = ui_state.get("sensorgram_metric_colors")
+
     have_new_metric_state = False
     if isinstance(sensorgram_visible_modes, list):
         visible = [normalize_sensorgram_metric_name(mode) for mode in sensorgram_visible_modes]
@@ -804,6 +794,14 @@ def restore_ui_state(window) -> None:
         current_stats = normalize_sensorgram_metric_name(trace_stats_metric_name)
         if current_stats in sensorgram_metric_order(window):
             window._trace_stats_metric_name = current_stats
+
+
+def _restore_sensorgram_time_axis_and_density(window, ui_state: dict[str, object]) -> None:
+    """Restore the sensorgram's time-axis mode and its display/compression point budgets."""
+    sensorgram_time_axis_mode = ui_state.get("sensorgram_time_axis_mode")
+    metric_display_points = ui_state.get("metric_display_points")
+    sensorgram_compression_recent_tail_points = ui_state.get("sensorgram_compression_recent_tail_points")
+
     if isinstance(sensorgram_time_axis_mode, str):
         from lspr_app.gui.main_window_sensorgram import normalize_sensorgram_time_axis_mode
 
@@ -814,6 +812,15 @@ def restore_ui_state(window) -> None:
         window._plot_display_points = max(int(metric_display_points), 1)
     if isinstance(sensorgram_compression_recent_tail_points, (int, float)) and int(sensorgram_compression_recent_tail_points) >= 0:
         window._sensorgram_compression_recent_tail_points = int(sensorgram_compression_recent_tail_points)
+
+
+def _restore_metric_autoscale_settings(window, ui_state: dict[str, object]) -> None:
+    """Restore the sensorgram's autoscale-follow-latest tuning parameters."""
+    metric_autoscale_follow_latest_buffer_fraction = ui_state.get("metric_autoscale_follow_latest_buffer_fraction")
+    metric_autoscale_min_interval_s = ui_state.get("metric_autoscale_min_interval_s")
+    metric_autoscale_throttle_mode = ui_state.get("metric_autoscale_throttle_mode")
+    metric_autoscale_skip_tiny_changes_enabled = ui_state.get("metric_autoscale_skip_tiny_changes_enabled")
+
     if isinstance(metric_autoscale_follow_latest_buffer_fraction, (int, float)):
         window._metric_autoscale_follow_latest_buffer_fraction = max(float(metric_autoscale_follow_latest_buffer_fraction), 0.0)
     if isinstance(metric_autoscale_min_interval_s, (int, float)):
@@ -830,6 +837,13 @@ def restore_ui_state(window) -> None:
                 "yes",
                 "on",
             }
+
+
+def _restore_sensorgram_envelope_overlay(window, ui_state: dict[str, object]) -> None:
+    """Restore the metric envelope (min/max band) overlay's visibility and opacity."""
+    sensorgram_metric_envelope_overlay_enabled = ui_state.get("sensorgram_metric_envelope_overlay_enabled")
+    sensorgram_metric_envelope_overlay_alpha = ui_state.get("sensorgram_metric_envelope_overlay_alpha")
+
     if isinstance(sensorgram_metric_envelope_overlay_enabled, (bool, str)):
         if isinstance(sensorgram_metric_envelope_overlay_enabled, bool):
             window._sensorgram_metric_envelope_overlay_enabled = bool(sensorgram_metric_envelope_overlay_enabled)
@@ -847,6 +861,16 @@ def restore_ui_state(window) -> None:
                     band.setVisible(bool(window._sensorgram_metric_envelope_overlay_enabled))
     if isinstance(sensorgram_metric_envelope_overlay_alpha, (int, float)):
         window._sensorgram_metric_envelope_overlay_alpha = max(min(int(sensorgram_metric_envelope_overlay_alpha), 100), 0)
+
+
+def _restore_sensorgram_control_step_overlay(window, ui_state: dict[str, object]) -> None:
+    """Restore the control-step (flow plan) overlay drawn on top of the sensorgram."""
+    sensorgram_control_step_overlay_enabled = ui_state.get("sensorgram_control_step_overlay_enabled")
+    sensorgram_control_step_overlay_style = ui_state.get("sensorgram_control_step_overlay_style")
+    sensorgram_control_step_overlay_position = ui_state.get("sensorgram_control_step_overlay_position")
+    sensorgram_control_step_overlay_opacity = ui_state.get("sensorgram_control_step_overlay_opacity")
+    sensorgram_control_step_overlay_bar_height_px = ui_state.get("sensorgram_control_step_overlay_bar_height_px")
+
     if isinstance(sensorgram_control_step_overlay_enabled, (bool, str)):
         if isinstance(sensorgram_control_step_overlay_enabled, bool):
             window._sensorgram_control_step_overlay_enabled = bool(sensorgram_control_step_overlay_enabled)
@@ -889,22 +913,39 @@ def restore_ui_state(window) -> None:
             window._sync_sensorgram_control_step_overlay()
         except Exception:
             pass
-    if isinstance(diagnostics_panel_visible, (bool, str)):
-        if isinstance(diagnostics_panel_visible, bool):
-            visible = bool(diagnostics_panel_visible)
-        else:
-            visible = str(diagnostics_panel_visible).strip().lower() in {"1", "true", "yes", "on"}
-        if hasattr(window, "_set_diagnostics_panel_visible"):
-            try:
-                window._set_diagnostics_panel_visible(visible)
-            except Exception:
-                pass
-        elif hasattr(window, "_log_section"):
-            window._log_section.setVisible(visible)
-        elif hasattr(window, "log_terminal"):
-            window.log_terminal.setVisible(visible)
-        if hasattr(window, "_apply_metric_color_styles"):
-            apply_metric_color_styles_for(window)
+
+
+def _restore_diagnostics_panel_visibility(window, ui_state: dict[str, object]) -> None:
+    """Restore whether the diagnostics/log panel is shown."""
+    diagnostics_panel_visible = ui_state.get("diagnostics_panel_visible")
+    if not isinstance(diagnostics_panel_visible, (bool, str)):
+        return
+
+    if isinstance(diagnostics_panel_visible, bool):
+        visible = bool(diagnostics_panel_visible)
+    else:
+        visible = str(diagnostics_panel_visible).strip().lower() in {"1", "true", "yes", "on"}
+    if hasattr(window, "_set_diagnostics_panel_visible"):
+        try:
+            window._set_diagnostics_panel_visible(visible)
+        except Exception:
+            pass
+    elif hasattr(window, "_log_section"):
+        window._log_section.setVisible(visible)
+    elif hasattr(window, "log_terminal"):
+        window.log_terminal.setVisible(visible)
+    if hasattr(window, "_apply_metric_color_styles"):
+        apply_metric_color_styles_for(window)
+
+
+def _restore_sensorgram_render_settings(window, ui_state: dict[str, object]) -> None:
+    """Restore how the sensorgram line is drawn (step mode, width, antialiasing) and
+    whether it's frozen."""
+    sensorgram_line_mode = ui_state.get("sensorgram_line_mode")
+    sensorgram_line_width_px = ui_state.get("sensorgram_line_width_px")
+    plot_antialias_enabled = ui_state.get("plot_antialias_enabled")
+    sensorgram_frozen = ui_state.get("sensorgram_frozen")
+
     if isinstance(sensorgram_line_mode, str):
         window._sensorgram_line_step_mode = window._normalize_sensorgram_line_mode(sensorgram_line_mode)
     if isinstance(sensorgram_line_width_px, (int, float)) and float(sensorgram_line_width_px) > 0:
@@ -922,6 +963,13 @@ def restore_ui_state(window) -> None:
     if isinstance(sensorgram_frozen, bool):
         window._sensorgram_frozen = bool(sensorgram_frozen)
         window._update_sensorgram_freeze_button_icon()
+
+
+def _restore_residual_view_range(window, ui_state: dict[str, object]) -> None:
+    """Restore the residual plot's saved Y-axis range, if it's currently shown."""
+    residual_y_range = ui_state.get("residual_y_range")
+    residual_visible = bool(ui_state.get("show_residual", False))
+
     if (
         isinstance(residual_y_range, list)
         and len(residual_y_range) == 2
@@ -934,6 +982,16 @@ def restore_ui_state(window) -> None:
             if residual_visible and hasattr(window, "residual_view"):
                 window.residual_view.setYRange(y_min, y_max, padding=0.0)
                 window._residual_axis_autoscaled = True
+
+
+def _restore_maximized_and_layout_presets(window, ui_state: dict[str, object]) -> None:
+    """Restore the maximized flag and the saved layout presets, then apply the
+    selected preset (this runs last since it can override splitter/visibility
+    state set by the earlier restore steps)."""
+    maximized = ui_state.get("maximized")
+    layout_presets = ui_state.get("layout_presets")
+    layout_preset_selected = ui_state.get("layout_preset_selected")
+
     window._start_maximized = bool(maximized)
     if isinstance(layout_presets, dict):
         window._layout_presets = {
@@ -959,6 +1017,34 @@ def restore_ui_state(window) -> None:
         except Exception:
             window._sync_view_actions()
     window._sync_view_actions()
+
+
+def restore_ui_state(window) -> None:
+    """Reapply the saved UI state (window geometry, splitters, sensorgram settings,
+    overlays, layout presets, etc.) to *window* at startup.
+
+    Split into one function per settings group below - each restores an
+    independent slice of ``ui_state`` and is called here in the same order the
+    original single function used to apply it in, since a couple of later
+    steps (layout presets, in particular) intentionally override state set by
+    earlier ones.
+    """
+    ui_state = window._ui_state
+    if not ui_state:
+        return
+
+    _restore_window_geometry(window, ui_state)
+    _restore_splitter_sizes(window, ui_state)
+    _restore_top_view_and_panel_visibility(window, ui_state)
+    _restore_sensorgram_metric_state(window, ui_state)
+    _restore_sensorgram_time_axis_and_density(window, ui_state)
+    _restore_metric_autoscale_settings(window, ui_state)
+    _restore_sensorgram_envelope_overlay(window, ui_state)
+    _restore_sensorgram_control_step_overlay(window, ui_state)
+    _restore_diagnostics_panel_visibility(window, ui_state)
+    _restore_sensorgram_render_settings(window, ui_state)
+    _restore_residual_view_range(window, ui_state)
+    _restore_maximized_and_layout_presets(window, ui_state)
 
     binder = getattr(window, "_ui_binder", None)
     if binder is not None:

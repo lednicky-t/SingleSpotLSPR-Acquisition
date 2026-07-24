@@ -789,7 +789,7 @@ class SessionDiagnosticsSnapshot:
             f"  Acquisition overhead: {_timing_plain_text(getattr(window, '_last_overhead_ms', None))}",
             f"  Frame spacing: {_timing_plain_text(getattr(window, '_last_spacing_ms', None))}",
             f"  Effective source rate: {_format_rate(getattr(window, '_effective_raw_rate_hz', None))}",
-            f"  Dropped frames: {('-' if getattr(window, '_live_display_dropped_frames', None) is None else str(max(int(getattr(window, '_live_display_dropped_frames')), 0)))}",
+            f"  Dropped frames: {('-' if getattr(window, '_live_display_dropped_frames', None) is None else str(max(int(window._live_display_dropped_frames), 0)))}",
         ]
         device_timing_lines: list[str] = []
         _device_service = getattr(window, "_device_comm_service", None)
@@ -866,7 +866,7 @@ class SessionDiagnosticsSnapshot:
             headroom_text=(
                 "-"
                 if getattr(window, "_processing_headroom_ratio", None) is None
-                else f"{float(getattr(window, '_processing_headroom_ratio')):.2f}x"
+                else f"{float(window._processing_headroom_ratio):.2f}x"
             ),
             acquisition_latency_text=_timing_plain_text(getattr(window, "_last_elapsed_ms", None)),
             acquisition_overhead_text=_timing_plain_text(getattr(window, "_last_overhead_ms", None)),
@@ -875,7 +875,7 @@ class SessionDiagnosticsSnapshot:
             dropped_frames_text=(
                 "-"
                 if getattr(window, "_live_display_dropped_frames", None) is None
-                else str(max(int(getattr(window, "_live_display_dropped_frames")), 0))
+                else str(max(int(window._live_display_dropped_frames), 0))
             ),
             raw_acquired_text=raw_acquired_text,
             raw_recording_enqueued_text=raw_recording_enqueued_text,

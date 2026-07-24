@@ -123,7 +123,7 @@ class ExperimentControlTableView(QTableView):
             return
         self.setCurrentIndex(model.index(row, column))
 
-    def selectRow(self, row: int) -> None:  # noqa: N802 - Qt API compatibility
+    def selectRow(self, row: int) -> None:  # Qt API compatibility, not our naming convention
         model = self.model()
         selection_model = self.selectionModel()
         if model is None or selection_model is None:

@@ -33,7 +33,7 @@ def _patch_svg_exporter() -> None:
     fn_module = importlib.import_module("pyqtgraph.functions")
     transformCoordinates = fn_module.transformCoordinates
 
-    def _fixed_correctCoordinates(node, defs, item, options):  # noqa: N802
+    def _fixed_correctCoordinates(node, defs, item, options):  # matches pyqtgraph's original camelCase name
         # Fix gradients in defs (unchanged from original).
         for d in defs:
             if d.tagName == "linearGradient":
@@ -207,7 +207,7 @@ def _patch_matplotlib_exporter() -> None:
 
     original_export = mod.MatplotlibExporter.export
 
-    def _guarded_export(self, fileName=None):  # noqa: N803
+    def _guarded_export(self, fileName=None):  # matches pyqtgraph's original camelCase signature
         try:
             import matplotlib  # noqa: F401
         except ImportError:

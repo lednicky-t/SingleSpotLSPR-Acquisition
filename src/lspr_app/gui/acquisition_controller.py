@@ -750,26 +750,19 @@ def handle_acquisition_error(window, source_epoch: int, message: str) -> None:
     window._show_error(message)
 
 
-def start_live_acquisition(window) -> None:
-    if window._busy or window._live_active:
-        return
-    if window._live_worker is not None and window._live_worker.is_alive():
-        return
+def _reset_live_frame_telemetry(window) -> None:
+    """Reset the per-frame timing/paint/refresh telemetry shared by live-acquisition start and stop.
 
-    window._live_active = True
-    window._display_window_ms = 1000.0 / max(window.live_rate_spin.value(), 1e-9)
-    window._live_ui_refresh_delay_ms = max(int(round(window._display_window_ms)), 16)
-    window._raw_last_finish_ts = None
-    window._raw_last_sample_index = None
-    window._last_display_average_count = None
-    window._last_display_period_ms = None
+    Session-total counters (``_raw_acquired_count``, ``_processing_completed_count``,
+    etc.) are deliberately NOT reset here - only ``start_live_acquisition`` zeroes
+    those, so they stay visible as a final tally after ``stop_live_acquisition``.
+    """
     window._last_plot_refresh_ms = None
     window._last_plot_refresh_gap_ms = None
     window._last_plot_refresh_finished_at = None
     window._actual_plot_refresh_rate_hz = None
     window._plot_refresh_timestamps = []
     window._plot_refresh_requested_at = None
-    window._last_plot_refresh_delay_ms = None
     window._last_spectrum_curve_update_ms = None
     window._last_spectrum_fit_update_ms = None
     window._last_spectrum_marker_update_ms = None
@@ -821,15 +814,32 @@ def start_live_acquisition(window) -> None:
     window._last_log_buffer_flush_ms = None
     window._last_log_buffer_delay_ms = None
     window._last_log_buffer_total_ms = None
-    window._log_buffer_requested_at = None
     window._live_result_requested_at = None
     window._live_result_requested_delay_ms = None
-    window._live_processed_requested_at = None
-    window._live_processed_requested_delay_ms = None
     window._last_ui_heartbeat_delay_ms = None
     window._ui_heartbeat_max_delay_ms = None
     window._last_ui_heartbeat_total_ms = None
     window._live_plot_update_counter = 0
+    window._last_live_processing_perf = None
+
+
+def start_live_acquisition(window) -> None:
+    if window._busy or window._live_active:
+        return
+    if window._live_worker is not None and window._live_worker.is_alive():
+        return
+
+    window._live_active = True
+    window._display_window_ms = 1000.0 / max(window.live_rate_spin.value(), 1e-9)
+    window._live_ui_refresh_delay_ms = max(int(round(window._display_window_ms)), 16)
+    window._raw_last_finish_ts = None
+    window._raw_last_sample_index = None
+    window._last_display_average_count = None
+    window._last_display_period_ms = None
+    window._last_plot_refresh_delay_ms = None
+    window._log_buffer_requested_at = None
+    window._live_processed_requested_at = None
+    window._live_processed_requested_delay_ms = None
     window._live_display_dropped_frames = 0
     window._raw_acquired_count = 0
     window._raw_recording_enqueued_count = 0
@@ -843,9 +853,9 @@ def start_live_acquisition(window) -> None:
     window._processing_replaced_count = 0
     window._processing_completed_count = 0
     window._processing_displayed_count = 0
+    _reset_live_frame_telemetry(window)
     window._live_display_started_at = perf_counter()
     window._live_trace_started_at = datetime.now(timezone.utc)
-    window._last_live_processing_perf = None
     if hasattr(window, "_plot_view_cache") and hasattr(window._plot_view_cache, "clear_live_absolute_metric_cache"):
         window._plot_view_cache.clear_live_absolute_metric_cache()
     window._reset_live_accumulator()
@@ -921,73 +931,10 @@ def stop_live_acquisition(window, message: str = "Live acquisition stopped.") ->
         window._live_recording_timer.stop()
     window._ui_task_scheduler.cancel("live_visual_refresh")
     window._ui_task_scheduler.cancel("live_acquisition")
-    window._live_result_requested_at = None
-    window._live_result_requested_delay_ms = None
     window._live_display_started_at = None
     window._live_trace_started_at = None
     window._trace_display_cursor_s = 0.0
-    window._last_live_processing_perf = None
-    window._last_plot_refresh_ms = None
-    window._last_plot_refresh_gap_ms = None
-    window._last_plot_refresh_finished_at = None
-    window._actual_plot_refresh_rate_hz = None
-    window._plot_refresh_timestamps = []
-    window._plot_refresh_requested_at = None
-    window._last_spectrum_curve_update_ms = None
-    window._last_spectrum_fit_update_ms = None
-    window._last_spectrum_marker_update_ms = None
-    window._last_spectrum_residual_update_ms = None
-    window._last_sensorgram_render_ms = None
-    window._last_metric_autoscale_ms = None
-    window._last_metric_plot_disabled_fast_path = False
-    window._last_metric_render_series_export_ms = None
-    window._last_metric_render_setdata_calls = None
-    window._last_metric_render_setdata_skips = None
-    window._last_metric_view_cache_modes = {}
-    window._plot_display_points = max(int(getattr(window, "_plot_display_points", 512)), 1)
-    window._trace_plot_paint_count = 0
-    window._trace_plot_paint_total_ms = None
-    window._trace_plot_paint_max_ms = None
-    window._spectrum_plot_paint_count = 0
-    window._spectrum_plot_paint_total_ms = None
-    window._spectrum_plot_paint_max_ms = None
-    window._last_deferred_ui_refresh_ms = None
-    window._last_deferred_ui_refresh_total_ms = None
-    window._last_deferred_display_refresh_ms = None
-    window._last_deferred_stats_refresh_ms = None
-    window._display_refresh_requested_at = None
-    window._stats_refresh_requested_at = None
-    window._last_deferred_ui_live_estimate_ms = None
-    window._last_deferred_ui_telemetry_ms = None
-    window._last_deferred_ui_trace_plot_ms = None
-    window._last_deferred_ui_summary_ms = None
-    window._last_deferred_ui_stats_ms = None
-    window._last_stats_refresh_delay_ms = None
-    window._last_processing_ms = None
-    window._last_processing_queue_wait_ms = None
-    window._processing_rate_hz = None
-    window._processing_headroom_ratio = None
-    window._last_live_acquisition_flush_ms = None
-    window._last_live_processed_flush_ms = None
-    window._last_live_visual_refresh_ms = None
-    window._live_visual_refresh_count = 0
-    window._live_visual_refresh_in_progress = False
-    window._live_mode_deferred_display_flush_count = 0
-    window._live_mode_deferred_metric_flush_count = 0
-    window._live_mode_deferred_stats_flush_count = 0
-    window._last_live_result_poll_delay_ms = None
-    window._last_live_processed_poll_delay_ms = None
-    window._last_summary_refresh_ms = None
-    window._last_session_summary_refresh_total_ms = None
-    window._last_session_stats_refresh_ms = None
-    window._last_session_stats_refresh_total_ms = None
-    window._last_log_buffer_flush_ms = None
-    window._last_log_buffer_delay_ms = None
-    window._last_log_buffer_total_ms = None
-    window._last_ui_heartbeat_delay_ms = None
-    window._ui_heartbeat_max_delay_ms = None
-    window._last_ui_heartbeat_total_ms = None
-    window._live_plot_update_counter = 0
+    _reset_live_frame_telemetry(window)
     window._reset_live_accumulator()
     window._live_result_queue_max_depth = None
     window._live_processed_queue_max_depth = None

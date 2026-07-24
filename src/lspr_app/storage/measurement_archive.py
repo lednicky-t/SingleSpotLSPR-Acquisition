@@ -95,11 +95,11 @@ def ensure_session_writer(window: Any, spectrum: Any = None) -> Any:
     setattr(window, _SESSION_WRITER_ATTR, writer)
     # Keep backwards-compat aliases so reload tasks and plot-settings code keep working
     setattr(window, _WRITER_ATTR, writer)
-    setattr(window, "_metric_archive_path", path)
+    window._metric_archive_path = path
     # Stable anchor for this session file's t_ms column for the rest of its
     # lifetime (see append_processed_trace_history) - set once, here, not
     # touched again until close_session_writer clears it for the next file.
-    setattr(window, "_metric_archive_started_at", started_at)
+    window._metric_archive_started_at = started_at
 
     try:
         session = getattr(window, "_session", None)
@@ -137,7 +137,7 @@ def close_session_writer(window: Any) -> None:
     setattr(window, _WRITER_PATH_ATTR, None)
     # Clear the t_ms anchor too, so the next session file (ensure_session_writer)
     # gets its own fresh one instead of inheriting this file's.
-    setattr(window, "_metric_archive_started_at", None)
+    window._metric_archive_started_at = None
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +161,7 @@ def ensure_temp_measurement_writer(window: Any) -> Any:
     writer = _FallbackTempMeasurementWriter.open(path)
 
     setattr(window, _WRITER_ATTR, writer)
-    setattr(window, "_metric_archive_path", path)
+    window._metric_archive_path = path
     setattr(window, _WRITER_TEMP_ATTR, True)
     return writer
 

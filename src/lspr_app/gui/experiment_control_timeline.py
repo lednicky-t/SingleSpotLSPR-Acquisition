@@ -6,8 +6,11 @@ line that shows elapsed time, ETA and step count.
 
 Public API used by ``ExperimentControlWindow``
 ----------------------------------------------
-``set_steps(steps, selected_row, progress_s, runtime_s, step_runtime_s)``
-    Replace the displayed steps and repaint.
+``set_steps(steps, selected_row, progress_s, runtime_s, step_runtime_s, already_normalized=False)``
+    Replace the displayed steps and repaint. Pass ``already_normalized=True``
+    when the caller has already run the steps through
+    ``recompute_plan_timing`` (e.g. ``ExperimentControlWindow._read_experiment_control_steps``)
+    to skip a redundant recompute/deepcopy pass on every call.
 ``set_progress(progress_s)``
     Update the progress cursor without replacing steps.
 ``set_theme(theme_mode)``
@@ -199,12 +202,17 @@ class PumpPlanTimelineWidget(QWidget):
         progress_s: float | None = None,
         runtime_s: float | None = None,
         step_runtime_s: float | None = None,
+        *,
+        already_normalized: bool = False,
     ) -> None:
         """Replace the displayed steps and repaint.
 
         Timing is recomputed via :func:`~lspr_app.domain.pump_plan.recompute_plan_timing`
         so cumulative ``start_s`` / ``end_s`` are always consistent with the
-        current step durations.
+        current step durations, unless *already_normalized* is ``True`` — pass
+        that when the caller ran the steps through ``recompute_plan_timing``
+        itself moments ago (e.g. every experiment-control progress tick), so
+        this doesn't deepcopy and retime every step a second time.
 
         Args:
             steps: New plan steps (mutated in-place only to add timing fields).
@@ -213,8 +221,10 @@ class PumpPlanTimelineWidget(QWidget):
                 hides the cursor.
             runtime_s: Total plan elapsed seconds (for the status line).
             step_runtime_s: Current-step elapsed seconds (for the status line).
+            already_normalized: Skip ``recompute_plan_timing`` when the caller
+                guarantees *steps* already has consistent timing fields.
         """
-        self._steps = recompute_plan_timing(steps)
+        self._steps = steps if already_normalized else recompute_plan_timing(steps)
         self._selected_row = selected_row
         self._progress_s = progress_s
         self._runtime_s = runtime_s

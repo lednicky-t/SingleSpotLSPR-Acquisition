@@ -26,23 +26,23 @@ class ExperimentControlController(QObject):
 
     def toggle_run_hold(self, *_args) -> None:
         if hasattr(self.window, "_toggle_experiment_control_run_hold"):
-            self.window._toggle_experiment_control_run_hold()  # noqa: SLF001
+            self.window._toggle_experiment_control_run_hold()
 
     def toggle_hold(self, *_args) -> None:
         if hasattr(self.window, "_toggle_experiment_control_hold"):
-            self.window._toggle_experiment_control_hold()  # noqa: SLF001
+            self.window._toggle_experiment_control_hold()
 
     def toggle_pause(self, *_args) -> None:
         if hasattr(self.window, "_toggle_experiment_control_pause"):
-            self.window._toggle_experiment_control_pause()  # noqa: SLF001
+            self.window._toggle_experiment_control_pause()
 
     def stop(self, *_args) -> None:
         if hasattr(self.window, "_stop_experiment_control"):
-            self.window._stop_experiment_control()  # noqa: SLF001
+            self.window._stop_experiment_control()
 
     def move_relative(self, delta: int, *_args) -> None:
         if hasattr(self.window, "_move_to_relative_experiment_control_step"):
-            self.window._move_to_relative_experiment_control_step(int(delta))  # noqa: SLF001
+            self.window._move_to_relative_experiment_control_step(int(delta))
 
     def refresh_devices(self, *_args) -> bool:
         return self.backend.refresh_devices()

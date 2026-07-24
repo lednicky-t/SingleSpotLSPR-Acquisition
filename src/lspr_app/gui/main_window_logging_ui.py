@@ -32,7 +32,7 @@ def apply_text_widget_font_size_for(
     except Exception:
         pass
     try:
-        setattr(widget, "_panel_font_size_pt", new_size)
+        widget._panel_font_size_pt = new_size
     except Exception:
         pass
 
@@ -86,7 +86,7 @@ class LogTerminalTextEdit(QTextEdit):
             self.setFont(font)
             self.document().setDefaultFont(font)
             try:
-                setattr(self, "_panel_font_size_pt", new_size)
+                self._panel_font_size_pt = new_size
             except Exception:
                 pass
             event.accept()

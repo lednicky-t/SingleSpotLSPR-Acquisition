@@ -2384,6 +2384,11 @@ class ExperimentControlWindow(QWidget):
             self._timeline_progress_for_display(),
             self._plan_runtime_for_display(),
             self._step_runtime_for_display(),
+            # `steps` is always the return value of `_read_experiment_control_steps()`
+            # from every caller of this method, which already ran it through
+            # `recompute_plan_timing` — skip the widget's own redundant pass so the
+            # 150ms (or 50ms) progress tick doesn't deepcopy every step twice.
+            already_normalized=True,
         )
         self._ensure_experiment_control_plan_row_visible(
             plan_row if (self._plan_running or self._plan_holding or self._plan_paused) else self._selected_experiment_control_row(),
@@ -2607,7 +2612,7 @@ class ExperimentControlWindow(QWidget):
             return True
         controller = getattr(self, "recording_controller", None)
         if controller is not None and hasattr(controller, "_handle_flow_recording_control"):
-            return bool(controller._handle_flow_recording_control(action))  # noqa: SLF001
+            return bool(controller._handle_flow_recording_control(action))
         self.recording_control_requested.emit(action)
         return True
 
