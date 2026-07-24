@@ -5,6 +5,7 @@ from copy import deepcopy
 from PyQt6.QtCore import QAbstractTableModel, QEvent, QModelIndex, Qt, QTimer
 from PyQt6.QtGui import QColor, QBrush, QFontMetrics, QPainter, QPen
 from PyQt6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDoubleSpinBox,
     QLineEdit,
@@ -835,9 +836,147 @@ class ExperimentPlanColorDelegate(_BaseFlowDelegate):
         model.setData(index, color, Qt.ItemDataRole.EditRole)
 
 
+_PUMP_DISPLAY_OVERFLOW_COLOR = "#c97a7a"
+
+
+def _draw_split_comment_text(
+    painter: QPainter,
+    rect,
+    text: str,
+    limit: int,
+    fits_color: QColor,
+    overflow_color: QColor,
+    alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+) -> None:
+    """Paint *text* with the part past *limit* characters in *overflow_color* and
+    the rest in *fits_color*, side by side from rect's left edge. Shared by the
+    plan table's Comment cell paint() and the inline editor's live paintEvent
+    (below) so the two stay visually identical."""
+    fits_text = text[:limit]
+    overflow_text = text[limit:]
+    painter.setPen(QPen(fits_color))
+    painter.drawText(rect, alignment, fits_text)
+    if overflow_text:
+        fits_width = QFontMetrics(painter.font()).horizontalAdvance(fits_text)
+        painter.setPen(QPen(overflow_color))
+        painter.drawText(rect.adjusted(fits_width, 0, 0, 0), alignment, overflow_text)
+
+
+class _HighlightingCommentLineEdit(QLineEdit):
+    """A QLineEdit that live-splits its own text at the pump display's
+    16-character limit while the user is actively typing, the same way a
+    committed cell is painted by ExperimentPlanCommentDelegate.paint() - see
+    "16-character limit highlight" in pump_control_guide.md.
+
+    Only takes over painting while the full text fits the field without
+    horizontal scrolling: QLineEdit's internal scroll offset isn't public
+    API, so re-deriving it for the custom-painted case isn't attempted here.
+    Once a comment is long enough to need scrolling, this falls back to
+    normal single-color native rendering while you're actively editing it -
+    the split still applies correctly once the edit is committed, since the
+    plan table's own cell painting (unlike this inline editor) has no such
+    limitation.
+    """
+
+    def __init__(
+        self,
+        parent=None,
+        *,
+        highlight_active: bool = False,
+        bg_color: QColor = QColor("#f4f6f8"),
+        fits_color: QColor = QColor("#1d2733"),
+        overflow_color: QColor = QColor(_PUMP_DISPLAY_OVERFLOW_COLOR),
+        selection_color: QColor = QColor("#dbeafe"),
+    ) -> None:
+        super().__init__(parent)
+        self._highlight_active = highlight_active
+        self._bg_color = QColor(bg_color)
+        self._fits_color = QColor(fits_color)
+        self._overflow_color = QColor(overflow_color)
+        self._selection_color = QColor(selection_color)
+        self._cursor_blink_visible = True
+        app = QApplication.instance()
+        blink_ms = max(int(app.cursorFlashTime() // 2), 250) if app is not None else 500
+        self._blink_timer = QTimer(self)
+        self._blink_timer.setInterval(blink_ms)
+        self._blink_timer.timeout.connect(self._toggle_cursor_blink)
+        self.cursorPositionChanged.connect(lambda *_args: self.update())
+        self.selectionChanged.connect(self.update)
+        self.textChanged.connect(lambda *_args: self.update())
+
+    def _toggle_cursor_blink(self) -> None:
+        self._cursor_blink_visible = not self._cursor_blink_visible
+        self.update()
+
+    def focusInEvent(self, event) -> None:  # type: ignore[override]
+        super().focusInEvent(event)
+        self._cursor_blink_visible = True
+        self._blink_timer.start()
+
+    def focusOutEvent(self, event) -> None:  # type: ignore[override]
+        self._blink_timer.stop()
+        self._cursor_blink_visible = False
+        super().focusOutEvent(event)
+        self.update()
+
+    def _text_rect(self):
+        return self.rect().adjusted(4, 0, -4, 0)
+
+    def _fits_without_scrolling(self) -> bool:
+        return QFontMetrics(self.font()).horizontalAdvance(self.text()) <= self._text_rect().width()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]  # pragma: no cover - GUI runtime path
+        text = self.text()
+        if not self._highlight_active or len(text) <= PUMP_DISPLAY_MAX_LENGTH or not self._fits_without_scrolling():
+            super().paintEvent(event)
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.fillRect(self.rect(), self._bg_color)
+
+        metrics = QFontMetrics(self.font())
+        rect = self._text_rect()
+
+        sel_start = self.selectionStart()
+        if sel_start >= 0:
+            sel_end = sel_start + len(self.selectedText())
+            x1 = rect.left() + metrics.horizontalAdvance(text[:sel_start])
+            x2 = rect.left() + metrics.horizontalAdvance(text[:sel_end])
+            painter.fillRect(x1, rect.top(), x2 - x1, rect.height(), self._selection_color)
+
+        _draw_split_comment_text(painter, rect, text, PUMP_DISPLAY_MAX_LENGTH, self._fits_color, self._overflow_color)
+
+        if self.hasFocus() and self._cursor_blink_visible:
+            cursor_x = rect.left() + metrics.horizontalAdvance(text[: self.cursorPosition()])
+            painter.setPen(QPen(self._fits_color))
+            painter.drawLine(cursor_x, rect.top() + 1, cursor_x, rect.bottom() - 1)
+
+        painter.end()
+
+
 class ExperimentPlanCommentDelegate(_BaseFlowDelegate):
     def createEditor(self, parent, option, index):  # type: ignore[override]
-        editor = QLineEdit(parent)
+        background = index.data(Qt.ItemDataRole.BackgroundRole)
+        if isinstance(background, QBrush) and background.color().isValid():
+            bg_color = background.color().name()
+        else:
+            bg_color = self._window._theme_palette().get("bg", "#f4f6f8")
+        fg_color = self._window._theme_palette().get("fg", "#1d2733")
+        selection_color = self._window._theme_palette().get("selection", "#dbeafe")
+        highlight_active = bool(
+            getattr(self._window, "_pump_display_enabled", False)
+            and getattr(self._window, "_pump_display_highlight_enabled", False)
+        )
+
+        editor = _HighlightingCommentLineEdit(
+            parent,
+            highlight_active=highlight_active,
+            bg_color=QColor(bg_color),
+            fits_color=QColor(fg_color),
+            overflow_color=QColor(_PUMP_DISPLAY_OVERFLOW_COLOR),
+            selection_color=QColor(selection_color),
+        )
         editor.setFrame(False)
         editor.setAutoFillBackground(True)
         editor.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -846,12 +985,6 @@ class ExperimentPlanCommentDelegate(_BaseFlowDelegate):
         self._match_editor_height(editor, option)
         self._prepare_editor(editor, index)
 
-        background = index.data(Qt.ItemDataRole.BackgroundRole)
-        if isinstance(background, QBrush) and background.color().isValid():
-            bg_color = background.color().name()
-        else:
-            bg_color = self._window._theme_palette().get("bg", "#f4f6f8")
-        fg_color = self._window._theme_palette().get("fg", "#1d2733")
         editor.setStyleSheet(
             "QLineEdit {"
             f" background: {bg_color};"
@@ -889,19 +1022,16 @@ class ExperimentPlanCommentDelegate(_BaseFlowDelegate):
             super().paint(painter, option, index)
             return
 
-        model = index.model()
-        step = model.step_at(index.row()) if hasattr(model, "step_at") else None
-        highlight = bool(step is not None and step.show_on_pump_display and step.highlight_pump_display_limit)
+        highlight = bool(
+            getattr(self._window, "_pump_display_enabled", False)
+            and getattr(self._window, "_pump_display_highlight_enabled", False)
+        )
         text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
 
         if not highlight or len(text) <= PUMP_DISPLAY_MAX_LENGTH:
             super().paint(painter, option, index)
             return
 
-        # Same 16-character split and overflow color as the pump-display settings
-        # popup's live preview (experiment_control_dialogs.py) so the two stay
-        # visually consistent, drawn directly here rather than reusing the base
-        # paint() since two colors need two drawText calls side by side.
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
@@ -918,19 +1048,10 @@ class ExperimentPlanCommentDelegate(_BaseFlowDelegate):
             fits_color = fg_brush.color()
         else:
             fits_color = QColor(_contrast_text_color(bg_color.name()))
-        overflow_color = QColor("#c97a7a")
 
-        fits_text = text[:PUMP_DISPLAY_MAX_LENGTH]
-        overflow_text = text[PUMP_DISPLAY_MAX_LENGTH:]
         rect = option.rect.adjusted(4, 0, -4, 0)
-        fits_width = QFontMetrics(painter.font()).horizontalAdvance(fits_text)
-
-        painter.setPen(QPen(fits_color))
-        painter.drawText(rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, fits_text)
-
-        painter.setPen(QPen(overflow_color))
-        painter.drawText(
-            rect.adjusted(fits_width, 0, 0, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, overflow_text
+        _draw_split_comment_text(
+            painter, rect, text, PUMP_DISPLAY_MAX_LENGTH, fits_color, QColor(_PUMP_DISPLAY_OVERFLOW_COLOR)
         )
 
         painter.restore()

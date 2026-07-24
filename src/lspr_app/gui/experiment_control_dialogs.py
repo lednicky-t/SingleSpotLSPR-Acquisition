@@ -679,25 +679,29 @@ class ExperimentControlDialogs:
             return None
         return result, result_colors
 
-    def edit_step_pump_display_settings(
+    def edit_pump_display_settings(
         self,
         comment_edit: QLineEdit,
         current_enabled: bool,
         current_highlight_enabled: bool = False,
         anchor: QWidget | None = None,
     ) -> tuple[bool, bool] | None:
-        """Popup for the step editor's Comment field: toggle sending the comment to the
-        pump's own display, with a live preview of what fits inside its 16-character limit,
-        and a second toggle to mirror that same 16-character split as a live color highlight
-        directly in the plan table's Comment cell.
+        """Global pump-display settings popup, opened from the step editor's Comment
+        field gear icon: toggle sending every step's comment to the pump's own display
+        as each step is applied, with a live preview of what fits inside its
+        16-character limit, and a second toggle to mirror that same 16-character split
+        as a live color highlight in the plan table's Comment column (all rows).
 
-        *comment_edit* is read live while the dialog is open (its ``textChanged`` signal
-        drives the preview), so edits made in the main editor update the preview immediately.
-        Returns ``(show_on_pump_display, highlight_pump_display_limit)`` on Apply, or ``None``
-        if the dialog was cancelled/closed. The second value is always ``False`` when the
-        first is ``False`` - the highlight toggle is disabled and force-unchecked whenever
-        "Show comment on pump display" is off, since there's nothing to highlight a limit for
-        if the comment isn't going to the pump at all.
+        These settings apply to the whole plan, not just one step - there is no
+        per-step override. *comment_edit* is only used as a scratch field for the
+        preview below (read live via its ``textChanged`` signal); it is not tied to
+        any particular step.
+
+        Returns ``(pump_display_enabled, pump_display_highlight_enabled)`` on Apply,
+        or ``None`` if the dialog was cancelled/closed. The second value is always
+        ``False`` when the first is ``False`` - the highlight toggle is disabled and
+        force-unchecked whenever "Show step comments on pump display" is off, since
+        there's nothing to highlight a limit for if nothing is being sent to the pump.
         """
         dialog = QDialog(self._parent)
         dialog.setObjectName("commentDisplayDialog")
@@ -751,13 +755,13 @@ class ExperimentControlDialogs:
             """ % self._theme_palette
         )
 
-        top_label = QLabel("Pump display")
+        top_label = QLabel("Pump display (all steps)")
         top_label.setObjectName("commentDisplayTitle")
-        top_label.setToolTip("Send this step's comment to the pump's own display while it runs.")
+        top_label.setToolTip("Send each step's comment to the pump's own display as that step runs.")
         layout.addWidget(top_label)
 
-        checkbox = QCheckBox("Show comment on pump display")
-        checkbox.setToolTip("When this step is applied to the pump, send its comment to the pump's display.")
+        checkbox = QCheckBox("Show step comments on pump display")
+        checkbox.setToolTip("When any step is applied to the pump, send that step's comment to the pump's display.")
         checkbox.setChecked(bool(current_enabled))
         layout.addWidget(checkbox)
 
@@ -765,9 +769,9 @@ class ExperimentControlDialogs:
         highlight_row.setContentsMargins(18, 0, 0, 0)
         highlight_checkbox = QCheckBox("Highlight the 16-character limit in the plan table")
         highlight_checkbox.setToolTip(
-            "Color the part of this step's comment past 16 characters in the plan table's "
+            "Color the part of each step's comment past 16 characters in the plan table's "
             "Comment column, live, the same way the preview below does. Only available "
-            "while \"Show comment on pump display\" is on."
+            "while \"Show step comments on pump display\" is on."
         )
         highlight_checkbox.setChecked(bool(current_highlight_enabled) and bool(current_enabled))
         highlight_checkbox.setEnabled(bool(current_enabled))

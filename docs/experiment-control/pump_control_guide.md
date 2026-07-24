@@ -62,12 +62,12 @@ The experiment plan uses these structures:
   - `valve`
   - `switch_position`
   - `description`
-  - `show_on_pump_display` - see [Pump Display](#pump-display) below. **Not yet verified against
-    real hardware** - see that section before relying on it.
-  - `highlight_pump_display_limit` - see [Pump Display](#pump-display) below. GUI-only, no
-    hardware dependency. Always `False` when `show_on_pump_display` is `False` (enforced at
-    the data-model boundary, not just in the GUI).
   - `channels`
+
+  Whether to send `description` to the pump's display, and whether to live-highlight the
+  16-character limit in the plan table, are **not** `PumpPlanStep` fields - they're global
+  `ExperimentControlWindow` settings that apply to every step. See
+  [Pump Display](#pump-display) below.
 
 ## Connection Flow
 
@@ -189,11 +189,21 @@ If you change this encoding, verify it against the pump manual and a real contro
 pump's screen yet. Treat this feature as unverified until someone checks it against
 hardware and this note is updated or removed.**
 
-Each `PumpPlanStep` has a `show_on_pump_display: bool` field. When a step with this set to
-`True` is applied to the pump (channel start/stop/configure - see "Apply channel" above),
-its `description` is sent to the pump's own display. When a step has it set to `False`, the
-display is explicitly cleared (empty string sent) rather than left showing the previous
-step's text.
+This is a **global** setting, not a per-step field: `ExperimentControlWindow._pump_display_enabled`
+(a plain instance attribute, not part of `PumpPlanStep` or the exported plan/HDF5 data - it's
+pure app/session UI state, saved and restored the same way as other window preferences via
+`save_ui_state()`/`_restore_experiment_control_state()`). When it's on, *every* step, as it's
+applied to the pump (channel start/stop/configure - see "Apply channel" above), sends its
+`description` to the pump's own display. When it's off, the display is explicitly cleared
+(empty string sent) rather than left showing the previous step's text. There is no per-step
+override - flipping the setting affects the whole plan.
+
+It was originally a per-step field; it was changed to global because that's what actually
+matched the intended workflow (one on/off choice for the whole run, not toggled step by step),
+and because it also removed a fragile write-back path (the popup had to reach into whichever
+row was currently selected and mutate that row's step object directly - easy to get wrong, and
+the source of an earlier "toggling this silently does nothing" bug). A global boolean has
+nothing to write back to.
 
 - `RegloICCClient.set_display_text(text)` sends `0DA{text}\r` - the manual's `DA`
   ("write letters to the pump to display while under external control") command, addressed
@@ -205,35 +215,48 @@ step's text.
   GUI's live preview so the two can't drift apart.
 - Dispatch happens in `experiment_control_window.py`'s `_plan_step_commands` (via a
   `pump.set_display` command) for normal step transitions, and in
-  `_push_step_pump_display_now` for an immediate push when the setting is toggled on the
-  step that's currently applied to hardware (added specifically so toggling it gives
-  instant feedback instead of silently waiting for the next step transition).
+  `_push_step_pump_display_now` for an immediate push when the setting is toggled while a
+  step is currently applied to hardware (added specifically so toggling it gives instant
+  feedback instead of silently waiting for the next step transition).
+- The settings popup (gear icon next to the step editor row's Comment field, opened via
+  `_edit_pump_display_settings` -> `ExperimentControlDialogs.edit_pump_display_settings`)
+  looks like it's per-step because of where it's anchored in the UI, but it edits the two
+  global booleans regardless of which row is selected - its title and checkbox wording say
+  "all steps" / "each step" to make that explicit.
 
 ### 16-character limit highlight (table-cell preview)
 
-`PumpPlanStep.highlight_pump_display_limit: bool` is a second, GUI-only toggle nested under
-`show_on_pump_display` in the pump-display settings popup. It does not affect what gets sent
-to hardware at all - it only controls how the step's comment is *drawn* in the plan table's
-Comment column:
+`ExperimentControlWindow._pump_display_highlight_enabled` is a second, GUI-only global toggle
+nested under `_pump_display_enabled` in the pump-display settings popup. It does not affect
+what gets sent to hardware at all - it only controls how comments are *drawn*:
 
-- When on (and `show_on_pump_display` is also on), `ExperimentPlanCommentDelegate.paint()`
-  in `gui/flow_plan_model.py` splits the cell's text at the 16th character and paints the
-  overflow in `#c97a7a` (the same reddish color and same split point as the popup's own live
-  preview), live, as soon as the model's data changes.
-- Turning `show_on_pump_display` off always forces this back off too - checked in the popup
-  (`experiment_control_dialogs.py`), and enforced again at the data-model boundary in
-  `to_core_experiment_step`/`from_core_experiment_step` (`domain/pump_plan.py`), so a step
-  can never persist with the highlight on but the display send off.
+- **Committed cells:** when on (and `_pump_display_enabled` is also on),
+  `ExperimentPlanCommentDelegate.paint()` in `gui/flow_plan_model.py` splits every row's
+  Comment cell text at the 16th character and paints the overflow in `#c97a7a` (the same
+  reddish color and split point as the popup's own live preview).
+- **While actively typing:** the inline cell editor (`_HighlightingCommentLineEdit`, also in
+  `gui/flow_plan_model.py`) does the same split live, character by character, via a custom
+  `paintEvent` - but only while the full text still fits the field without needing horizontal
+  scroll. `QLineEdit`'s internal scroll offset isn't public API, so this doesn't attempt to
+  reproduce it; once a comment is long enough to need scrolling, the editor falls back to
+  plain native single-color rendering until the edit is committed, at which point the
+  cell's own painting (which has no such limitation) takes back over. Both paint paths share
+  the actual split/color logic via `_draw_split_comment_text()` so they can't drift apart.
+- Turning `_pump_display_enabled` off always forces this back off too - checked in the popup
+  (`experiment_control_dialogs.py`), and both flags are session UI state only (see above),
+  not exported plan/HDF5 data.
 - The split is done on the raw comment text as typed (character count), not on the
   ASCII-sanitized text used for the actual hardware send - so if a comment contains
   non-printable-ASCII characters, the on-screen split point and the pump's actual truncation
   point can differ slightly. This only matters for non-ASCII comments, which are already
   outside what the pump display itself supports (see `sanitize_pump_display_text` above).
 
-**What's confirmed:** the full software round-trip (checkbox -> per-step field -> HDF5
-persistence -> command dispatch -> `0DA<text>\r` sent over the serial port) works, and the
-exact command sent has a unit test (`tests/unit/test_pump_display.py`) checking it against
-a fake serial port.
+**What's confirmed:** the full software round-trip (checkbox -> global window state -> command
+dispatch -> `0DA<text>\r` sent over the serial port) works, and the exact command sent has a
+unit test (`tests/unit/test_pump_display.py`) checking it against a fake serial port. The
+Comment-cell and inline-editor coloring is covered by
+`tests/integration/test_pump_display_global_highlight.py` (pixel-level checks against a
+rendered `QPixmap`).
 
 **What's NOT confirmed:** whether `DA` is actually the right command for this pump model's
 display, whether address `0` is correct for a single non-daisy-chained USB-connected pump,
