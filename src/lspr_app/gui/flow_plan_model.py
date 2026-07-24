@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 from PyQt6.QtCore import QAbstractTableModel, QEvent, QModelIndex, Qt, QTimer
-from PyQt6.QtGui import QColor, QBrush, QPainter, QPen
+from PyQt6.QtGui import QColor, QBrush, QFontMetrics, QPainter, QPen
 from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -21,6 +21,7 @@ from lspr_app.domain.pump_plan import (
     recompute_plan_timing,
     to_core_experiment_plan,
 )
+from lspr_app.device.reglo_icc import PUMP_DISPLAY_MAX_LENGTH
 from lspr_app.gui.experiment_control_builders import direction_glyph
 from lspr_app.gui.ui_helpers import make_compact_spinbox
 
@@ -882,3 +883,54 @@ class ExperimentPlanCommentDelegate(_BaseFlowDelegate):
             model.setData(index, editor.text(), Qt.ItemDataRole.EditRole)
             return
         super().setModelData(editor, model, index)
+
+    def paint(self, painter: QPainter, option, index) -> None:  # pragma: no cover - GUI runtime path
+        if hasattr(self._window, "_plan_table_is_editing") and self._window._plan_table_is_editing(index.row(), index.column()):
+            super().paint(painter, option, index)
+            return
+
+        model = index.model()
+        step = model.step_at(index.row()) if hasattr(model, "step_at") else None
+        highlight = bool(step is not None and step.show_on_pump_display and step.highlight_pump_display_limit)
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+
+        if not highlight or len(text) <= PUMP_DISPLAY_MAX_LENGTH:
+            super().paint(painter, option, index)
+            return
+
+        # Same 16-character split and overflow color as the pump-display settings
+        # popup's live preview (experiment_control_dialogs.py) so the two stay
+        # visually consistent, drawn directly here rather than reusing the base
+        # paint() since two colors need two drawText calls side by side.
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        bg_brush = index.data(Qt.ItemDataRole.BackgroundRole)
+        if isinstance(bg_brush, QBrush):
+            painter.fillRect(option.rect, bg_brush)
+            bg_color = bg_brush.color()
+        else:
+            bg_color = QColor(self._window._theme_palette().get("bg", "#f4f6f8"))
+            painter.fillRect(option.rect, bg_color)
+
+        fg_brush = index.data(Qt.ItemDataRole.ForegroundRole)
+        if isinstance(fg_brush, QBrush) and fg_brush.color().isValid():
+            fits_color = fg_brush.color()
+        else:
+            fits_color = QColor(_contrast_text_color(bg_color.name()))
+        overflow_color = QColor("#c97a7a")
+
+        fits_text = text[:PUMP_DISPLAY_MAX_LENGTH]
+        overflow_text = text[PUMP_DISPLAY_MAX_LENGTH:]
+        rect = option.rect.adjusted(4, 0, -4, 0)
+        fits_width = QFontMetrics(painter.font()).horizontalAdvance(fits_text)
+
+        painter.setPen(QPen(fits_color))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, fits_text)
+
+        painter.setPen(QPen(overflow_color))
+        painter.drawText(
+            rect.adjusted(fits_width, 0, 0, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, overflow_text
+        )
+
+        painter.restore()

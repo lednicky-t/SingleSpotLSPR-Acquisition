@@ -451,6 +451,7 @@ class ExperimentControlWindow(QWidget):
         self.step_comment_display_button.setIconSize(QSize(20, 20))
         self.step_comment_display_button.setToolTip("Show this step's comment on the pump display, and preview the 16-character limit.")
         self.step_comment_display_button.setProperty("show_on_pump_display", False)
+        self.step_comment_display_button.setProperty("highlight_pump_display_limit", False)
         self.step_comment_edit = QLineEdit(self)
         self.step_comment_edit.setPlaceholderText("Comment")
         self.step_comment_edit.setToolTip("Free-text note for the step. It is shown in the timeline when there is enough space.")
@@ -2183,22 +2184,29 @@ class ExperimentControlWindow(QWidget):
     def _edit_step_pump_display_settings(self, anchor: QWidget | None = None) -> None:
         dialogs = ExperimentControlDialogs(self, self._theme_palette(), self._contrast_text_color, self._tint_icon)
         current_enabled = bool(self.step_comment_display_button.property("show_on_pump_display"))
-        updated = dialogs.edit_step_pump_display_settings(self.step_comment_edit, current_enabled, anchor)
+        current_highlight_enabled = bool(self.step_comment_display_button.property("highlight_pump_display_limit"))
+        updated = dialogs.edit_step_pump_display_settings(
+            self.step_comment_edit, current_enabled, current_highlight_enabled, anchor
+        )
         if updated is None:
             return
-        self.step_comment_display_button.setProperty("show_on_pump_display", bool(updated))
+        show_enabled, highlight_enabled = updated
+        self.step_comment_display_button.setProperty("show_on_pump_display", bool(show_enabled))
+        self.step_comment_display_button.setProperty("highlight_pump_display_limit", bool(highlight_enabled))
         self._update_step_comment_display_button_icon()
         # The step editor row only feeds *new* steps added via the "+" button - editing an
         # already-existing row's other fields (comment text, valve, etc.) happens directly in
         # the plan table's own cells, not through this editor row. So a selected existing row
-        # needs its show_on_pump_display written back here explicitly, touching only that one
-        # field, or toggling this for an existing step would silently do nothing.
+        # needs its show_on_pump_display/highlight_pump_display_limit written back here
+        # explicitly, touching only those fields, or toggling this for an existing step would
+        # silently do nothing.
         row = self._selected_experiment_control_row()
         edited_step: PumpPlanStep | None = None
         if row is not None:
             steps = self._read_experiment_control_steps()
             if 0 <= row < len(steps):
-                steps[row].show_on_pump_display = bool(updated)
+                steps[row].show_on_pump_display = bool(show_enabled)
+                steps[row].highlight_pump_display_limit = bool(highlight_enabled)
                 self._populate_experiment_control_table(steps, selected_row=row)
                 edited_step = steps[row]
         self.save_ui_state()
@@ -4716,6 +4724,7 @@ class ExperimentControlWindow(QWidget):
             switch_position=self._current_switch_position_from_editor(),
             description=self.step_comment_edit.text().strip(),
             show_on_pump_display=bool(self.step_comment_display_button.property("show_on_pump_display")),
+            highlight_pump_display_limit=bool(self.step_comment_display_button.property("highlight_pump_display_limit")),
             channels=[
                 PumpChannelStep(
                     flow_ul_min=max(round(self.manual_flow_spins[index].value()), 0),
@@ -4743,6 +4752,9 @@ class ExperimentControlWindow(QWidget):
             self._updating_switch_editor = False
         self.step_comment_edit.setText(step.description)
         self.step_comment_display_button.setProperty("show_on_pump_display", bool(step.show_on_pump_display))
+        self.step_comment_display_button.setProperty(
+            "highlight_pump_display_limit", bool(step.highlight_pump_display_limit)
+        )
         self._update_step_comment_display_button_icon()
         for index, channel in enumerate(step.channels):
             self.manual_flow_spins[index].setValue(max(round(float(channel.flow_ul_min)), 0))
@@ -5483,6 +5495,7 @@ class ExperimentControlWindow(QWidget):
                     "switch_position": int(step.switch_position),
                     "description": step.description,
                     "show_on_pump_display": bool(step.show_on_pump_display),
+                    "highlight_pump_display_limit": bool(step.highlight_pump_display_limit),
                     "channels": [
                         {
                             "flow_ul_min": float(channel.flow_ul_min),
@@ -5526,6 +5539,7 @@ class ExperimentControlWindow(QWidget):
                     switch_position=max(min(_safe_int(raw_step.get("switch_position", 1), 1), 12), 1),
                     description=str(raw_step.get("description", "") or ""),
                     show_on_pump_display=bool(raw_step.get("show_on_pump_display", False)),
+                    highlight_pump_display_limit=bool(raw_step.get("highlight_pump_display_limit", False)),
                     channels=channels,
                 )
             )
@@ -5570,6 +5584,12 @@ class ExperimentControlWindow(QWidget):
         saved_show_on_pump_display = state.get("editor_show_on_pump_display")
         if isinstance(saved_show_on_pump_display, bool):
             self.step_comment_display_button.setProperty("show_on_pump_display", saved_show_on_pump_display)
+        saved_highlight_pump_display_limit = state.get("editor_highlight_pump_display_limit")
+        if isinstance(saved_highlight_pump_display_limit, bool):
+            self.step_comment_display_button.setProperty(
+                "highlight_pump_display_limit", saved_highlight_pump_display_limit
+            )
+        if isinstance(saved_show_on_pump_display, bool) or isinstance(saved_highlight_pump_display_limit, bool):
             self._update_step_comment_display_button_icon()
 
         editor_channels = state.get("editor_channels")
@@ -5888,6 +5908,9 @@ class ExperimentControlWindow(QWidget):
                     "editor_switch_position": self._current_switch_position_from_editor(),
                     "editor_comment": self.step_comment_edit.text(),
                     "editor_show_on_pump_display": bool(self.step_comment_display_button.property("show_on_pump_display")),
+                    "editor_highlight_pump_display_limit": bool(
+                        self.step_comment_display_button.property("highlight_pump_display_limit")
+                    ),
                     "valve_state_labels": dict(self._valve_state_labels),
                     "valve_state_colors": dict(self._valve_state_colors),
                     "switch_solution_mode": self._switch_solution_mode,

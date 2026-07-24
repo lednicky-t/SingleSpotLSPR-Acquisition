@@ -64,6 +64,9 @@ The experiment plan uses these structures:
   - `description`
   - `show_on_pump_display` - see [Pump Display](#pump-display) below. **Not yet verified against
     real hardware** - see that section before relying on it.
+  - `highlight_pump_display_limit` - see [Pump Display](#pump-display) below. GUI-only, no
+    hardware dependency. Always `False` when `show_on_pump_display` is `False` (enforced at
+    the data-model boundary, not just in the GUI).
   - `channels`
 
 ## Connection Flow
@@ -205,6 +208,27 @@ step's text.
   `_push_step_pump_display_now` for an immediate push when the setting is toggled on the
   step that's currently applied to hardware (added specifically so toggling it gives
   instant feedback instead of silently waiting for the next step transition).
+
+### 16-character limit highlight (table-cell preview)
+
+`PumpPlanStep.highlight_pump_display_limit: bool` is a second, GUI-only toggle nested under
+`show_on_pump_display` in the pump-display settings popup. It does not affect what gets sent
+to hardware at all - it only controls how the step's comment is *drawn* in the plan table's
+Comment column:
+
+- When on (and `show_on_pump_display` is also on), `ExperimentPlanCommentDelegate.paint()`
+  in `gui/flow_plan_model.py` splits the cell's text at the 16th character and paints the
+  overflow in `#c97a7a` (the same reddish color and same split point as the popup's own live
+  preview), live, as soon as the model's data changes.
+- Turning `show_on_pump_display` off always forces this back off too - checked in the popup
+  (`experiment_control_dialogs.py`), and enforced again at the data-model boundary in
+  `to_core_experiment_step`/`from_core_experiment_step` (`domain/pump_plan.py`), so a step
+  can never persist with the highlight on but the display send off.
+- The split is done on the raw comment text as typed (character count), not on the
+  ASCII-sanitized text used for the actual hardware send - so if a comment contains
+  non-printable-ASCII characters, the on-screen split point and the pump's actual truncation
+  point can differ slightly. This only matters for non-ASCII comments, which are already
+  outside what the pump display itself supports (see `sanitize_pump_display_text` above).
 
 **What's confirmed:** the full software round-trip (checkbox -> per-step field -> HDF5
 persistence -> command dispatch -> `0DA<text>\r` sent over the serial port) works, and the

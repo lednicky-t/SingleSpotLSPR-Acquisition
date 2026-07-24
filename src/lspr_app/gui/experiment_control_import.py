@@ -288,6 +288,9 @@ def build_experiment_plan_steps_from_hdf5_rows(columns: list[str], rows: list[li
             color = "#4E79A7"
         description = _experiment_plan_cell(row, column_map.get("description"), "").strip()
         show_on_pump_display = _experiment_plan_cell(row, column_map.get("show_on_pump_display"), "0").strip() in {"1", "true", "True"}
+        highlight_pump_display_limit = show_on_pump_display and _experiment_plan_cell(
+            row, column_map.get("highlight_pump_display_limit"), "0"
+        ).strip() in {"1", "true", "True"}
         switch_text = _experiment_plan_cell(row, column_map.get("switch_position"), "")
         if not switch_text:
             switch_text = _experiment_plan_cell(row, column_map.get("solution"), "")
@@ -301,6 +304,7 @@ def build_experiment_plan_steps_from_hdf5_rows(columns: list[str], rows: list[li
                 switch_position=switch_position,
                 description=description,
                 show_on_pump_display=show_on_pump_display,
+                highlight_pump_display_limit=highlight_pump_display_limit,
                 channels=channels,
             )
         )

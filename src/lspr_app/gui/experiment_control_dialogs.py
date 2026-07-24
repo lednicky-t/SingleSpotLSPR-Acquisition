@@ -683,14 +683,21 @@ class ExperimentControlDialogs:
         self,
         comment_edit: QLineEdit,
         current_enabled: bool,
+        current_highlight_enabled: bool = False,
         anchor: QWidget | None = None,
-    ) -> bool | None:
+    ) -> tuple[bool, bool] | None:
         """Popup for the step editor's Comment field: toggle sending the comment to the
-        pump's own display, with a live preview of what fits inside its 16-character limit.
+        pump's own display, with a live preview of what fits inside its 16-character limit,
+        and a second toggle to mirror that same 16-character split as a live color highlight
+        directly in the plan table's Comment cell.
 
         *comment_edit* is read live while the dialog is open (its ``textChanged`` signal
         drives the preview), so edits made in the main editor update the preview immediately.
-        Returns the new enabled state on Apply, or ``None`` if the dialog was cancelled/closed.
+        Returns ``(show_on_pump_display, highlight_pump_display_limit)`` on Apply, or ``None``
+        if the dialog was cancelled/closed. The second value is always ``False`` when the
+        first is ``False`` - the highlight toggle is disabled and force-unchecked whenever
+        "Show comment on pump display" is off, since there's nothing to highlight a limit for
+        if the comment isn't going to the pump at all.
         """
         dialog = QDialog(self._parent)
         dialog.setObjectName("commentDisplayDialog")
@@ -754,6 +761,26 @@ class ExperimentControlDialogs:
         checkbox.setChecked(bool(current_enabled))
         layout.addWidget(checkbox)
 
+        highlight_row = QHBoxLayout()
+        highlight_row.setContentsMargins(18, 0, 0, 0)
+        highlight_checkbox = QCheckBox("Highlight the 16-character limit in the plan table")
+        highlight_checkbox.setToolTip(
+            "Color the part of this step's comment past 16 characters in the plan table's "
+            "Comment column, live, the same way the preview below does. Only available "
+            "while \"Show comment on pump display\" is on."
+        )
+        highlight_checkbox.setChecked(bool(current_highlight_enabled) and bool(current_enabled))
+        highlight_checkbox.setEnabled(bool(current_enabled))
+        highlight_row.addWidget(highlight_checkbox)
+        layout.addLayout(highlight_row)
+
+        def _sync_highlight_checkbox_enabled(show_enabled: bool) -> None:
+            highlight_checkbox.setEnabled(show_enabled)
+            if not show_enabled:
+                highlight_checkbox.setChecked(False)
+
+        checkbox.toggled.connect(_sync_highlight_checkbox_enabled)
+
         caption = QLabel(f"Preview - the pump display fits {PUMP_DISPLAY_MAX_LENGTH} characters:")
         caption.setObjectName("commentDisplayCaption")
         layout.addWidget(caption)
@@ -794,11 +821,12 @@ class ExperimentControlDialogs:
         button_row.addWidget(apply_button)
         layout.addLayout(button_row)
 
-        result: bool | None = None
+        result: tuple[bool, bool] | None = None
 
         def _apply() -> None:
             nonlocal result
-            result = checkbox.isChecked()
+            show_enabled = checkbox.isChecked()
+            result = (show_enabled, show_enabled and highlight_checkbox.isChecked())
             dialog.accept()
 
         apply_button.clicked.connect(_apply)
