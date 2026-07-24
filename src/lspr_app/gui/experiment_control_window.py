@@ -109,6 +109,8 @@ from lspr_app.gui.experiment_control_step_runner import (
     _StepApplyRunnable,
 )
 from lspr_app.gui.icon_helpers import flow_tabler_icon, tint_tabler_icon, transport_icon
+from lspr_app.gui.panel_help import make_help_button
+from lspr_app.gui.panel_help_text import EXPERIMENT_CONTROL_BODY, EXPERIMENT_CONTROL_TITLE, EXPERIMENT_CONTROL_TOOLTIP
 from lspr_app.gui.ui_helpers import make_compact_spinbox
 from lspr_app.storage.app_config import load_app_setting, save_app_setting, save_window_ui_state
 from lspr_io import (
@@ -441,6 +443,14 @@ class ExperimentControlWindow(QWidget):
         self.step_switch_settings_button.setIcon(tint_tabler_icon(flow_tabler_icon("settings"), QColor("#f0f3f7")))
         self.step_switch_settings_button.setIconSize(QSize(20, 20))
         self.step_switch_settings_button.setToolTip("Edit the switch solution labels.")
+        self.step_comment_display_button = QToolButton(self)
+        self.step_comment_display_button.setObjectName("flowCommentDisplayButton")
+        self.step_comment_display_button.setAutoRaise(True)
+        self.step_comment_display_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.step_comment_display_button.setIcon(tint_tabler_icon(flow_tabler_icon("settings"), QColor("#f0f3f7")))
+        self.step_comment_display_button.setIconSize(QSize(20, 20))
+        self.step_comment_display_button.setToolTip("Show this step's comment on the pump display, and preview the 16-character limit.")
+        self.step_comment_display_button.setProperty("show_on_pump_display", False)
         self.step_comment_edit = QLineEdit(self)
         self.step_comment_edit.setPlaceholderText("Comment")
         self.step_comment_edit.setToolTip("Free-text note for the step. It is shown in the timeline when there is enough space.")
@@ -650,6 +660,9 @@ class ExperimentControlWindow(QWidget):
         self._update_experiment_control_view_mode_button()
         editor_header_row_layout.addWidget(self._experiment_control_view_mode_button)
         editor_header_row_layout.addStretch(1)
+        editor_header_row_layout.addWidget(
+            make_help_button(EXPERIMENT_CONTROL_TOOLTIP, title=EXPERIMENT_CONTROL_TITLE, body=EXPERIMENT_CONTROL_BODY)
+        )
         editor_header_row_layout.addWidget(editor_hide_button)
         editor_header_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         editor_header_row.setLayout(editor_header_row_layout)
@@ -790,7 +803,15 @@ class ExperimentControlWindow(QWidget):
         matrix.addWidget(switch_widget, 1, ACTIVE_PUMP_CHANNELS + 6)
         matrix.addWidget(color_header_widget, 0, ACTIVE_PUMP_CHANNELS + 7)
         matrix.addWidget(color_widget, 1, ACTIVE_PUMP_CHANNELS + 7)
-        matrix.addWidget(comment_label, 0, ACTIVE_PUMP_CHANNELS + 8)
+        comment_header_widget = QWidget(self)
+        comment_header_layout = QHBoxLayout()
+        comment_header_layout.setContentsMargins(0, 0, 0, 0)
+        comment_header_layout.setSpacing(2)
+        comment_header_layout.addWidget(comment_label)
+        comment_header_layout.addWidget(self.step_comment_display_button)
+        comment_header_layout.addStretch(1)
+        comment_header_widget.setLayout(comment_header_layout)
+        matrix.addWidget(comment_header_widget, 0, ACTIVE_PUMP_CHANNELS + 8)
         matrix.addWidget(self.step_comment_edit, 1, ACTIVE_PUMP_CHANNELS + 8)
         self.step_comment_edit.setMinimumWidth(300)
 
@@ -936,6 +957,7 @@ class ExperimentControlWindow(QWidget):
         self.step_valve_settings_button.clicked.connect(lambda _checked=False, btn=self.step_valve_settings_button: self._edit_valve_state_labels(btn))
         self.step_switch_spin.valueChanged.connect(self._handle_step_switch_spin_changed)
         self.step_switch_settings_button.clicked.connect(lambda _checked=False, btn=self.step_switch_settings_button: self._edit_switch_solution_labels(btn))
+        self.step_comment_display_button.clicked.connect(lambda _checked=False, btn=self.step_comment_display_button: self._edit_step_pump_display_settings(btn))
         self.pause_state_button.clicked.connect(lambda _checked=False, btn=self.pause_state_button: self._edit_pause_state(btn))
         self.step_color_combo.currentIndexChanged.connect(
             lambda *_args: self._handle_color_selection_changed()
@@ -2158,6 +2180,59 @@ class ExperimentControlWindow(QWidget):
         self.save_ui_state()
         return
 
+    def _edit_step_pump_display_settings(self, anchor: QWidget | None = None) -> None:
+        dialogs = ExperimentControlDialogs(self, self._theme_palette(), self._contrast_text_color, self._tint_icon)
+        current_enabled = bool(self.step_comment_display_button.property("show_on_pump_display"))
+        updated = dialogs.edit_step_pump_display_settings(self.step_comment_edit, current_enabled, anchor)
+        if updated is None:
+            return
+        self.step_comment_display_button.setProperty("show_on_pump_display", bool(updated))
+        self._update_step_comment_display_button_icon()
+        # The step editor row only feeds *new* steps added via the "+" button - editing an
+        # already-existing row's other fields (comment text, valve, etc.) happens directly in
+        # the plan table's own cells, not through this editor row. So a selected existing row
+        # needs its show_on_pump_display written back here explicitly, touching only that one
+        # field, or toggling this for an existing step would silently do nothing.
+        row = self._selected_experiment_control_row()
+        edited_step: PumpPlanStep | None = None
+        if row is not None:
+            steps = self._read_experiment_control_steps()
+            if 0 <= row < len(steps):
+                steps[row].show_on_pump_display = bool(updated)
+                self._populate_experiment_control_table(steps, selected_row=row)
+                edited_step = steps[row]
+        self.save_ui_state()
+        # If the edited row is the step currently applied to hardware, push the display
+        # update immediately instead of waiting for the next step transition - otherwise
+        # "Apply" here would silently do nothing until the plan happens to advance again,
+        # which is exactly the confusing behavior that prompted this fix.
+        if (
+            edited_step is not None
+            and self._applied_plan_step is not None
+            and self._applied_plan_step.step == edited_step.step
+        ):
+            self._push_step_pump_display_now(edited_step)
+
+    def _push_step_pump_display_now(self, step: PumpPlanStep) -> None:
+        if not self._service_device_connected("pump"):
+            return
+        pump_label = self._device_label_for("pump")
+        text = str(step.description or "").strip() if step.show_on_pump_display else ""
+        command = _PlannedCommand(pump_label, "pump.set_display", {"text": text}, f"pump.set_display text={text!r}")
+        runnable = _StepApplyRunnable(self._device_comm_service, [command], step, False, [])
+        runnable.signals.done.connect(self._on_step_apply_async_done)
+        device_io_pool().start(runnable)
+
+    def _update_step_comment_display_button_icon(self) -> None:
+        enabled = bool(self.step_comment_display_button.property("show_on_pump_display"))
+        color = QColor("#5fa8ff") if enabled else QColor("#f0f3f7")
+        self.step_comment_display_button.setIcon(tint_tabler_icon(flow_tabler_icon("settings"), color))
+        self.step_comment_display_button.setToolTip(
+            "Pump display: showing this step's comment. Click to configure."
+            if enabled
+            else "Show this step's comment on the pump display, and preview the 16-character limit."
+        )
+
     def _set_direction_button(self, button: QToolButton, direction: str) -> None:
         normalized = "CCW" if str(direction or "").upper() == "CCW" else "CW"
         button.setProperty("direction", normalized)
@@ -2818,7 +2893,8 @@ class ExperimentControlWindow(QWidget):
                 background: rgba(180, 74, 74, 0.18);
             }
             QToolButton#flowSwitchModeButton,
-            QToolButton#flowSwitchSettingsButton {
+            QToolButton#flowSwitchSettingsButton,
+            QToolButton#flowCommentDisplayButton {
                 background: transparent;
                 border: none;
                 padding: 0px;
@@ -2836,12 +2912,14 @@ class ExperimentControlWindow(QWidget):
             }
             QToolButton#flowSwitchModeButton:hover,
             QToolButton#flowSwitchSettingsButton:hover,
-            QToolButton#flowValveSettingsButton:hover {
+            QToolButton#flowValveSettingsButton:hover,
+            QToolButton#flowCommentDisplayButton:hover {
                 background: rgba(127, 127, 127, 0.10);
             }
             QToolButton#flowSwitchModeButton:pressed,
             QToolButton#flowSwitchSettingsButton:pressed,
-            QToolButton#flowValveSettingsButton:pressed {
+            QToolButton#flowValveSettingsButton:pressed,
+            QToolButton#flowCommentDisplayButton:pressed {
                 background: rgba(127, 127, 127, 0.18);
             }
             QLabel#flowHeaderLabel {
@@ -4637,6 +4715,7 @@ class ExperimentControlWindow(QWidget):
             valve=str(self.step_valve_button.property("valve") or "Open"),
             switch_position=self._current_switch_position_from_editor(),
             description=self.step_comment_edit.text().strip(),
+            show_on_pump_display=bool(self.step_comment_display_button.property("show_on_pump_display")),
             channels=[
                 PumpChannelStep(
                     flow_ul_min=max(round(self.manual_flow_spins[index].value()), 0),
@@ -4663,6 +4742,8 @@ class ExperimentControlWindow(QWidget):
         finally:
             self._updating_switch_editor = False
         self.step_comment_edit.setText(step.description)
+        self.step_comment_display_button.setProperty("show_on_pump_display", bool(step.show_on_pump_display))
+        self._update_step_comment_display_button_icon()
         for index, channel in enumerate(step.channels):
             self.manual_flow_spins[index].setValue(max(round(float(channel.flow_ul_min)), 0))
             self._set_direction_button(self.manual_direction_buttons[index], channel.direction)
@@ -4821,6 +4902,15 @@ class ExperimentControlWindow(QWidget):
             _LOGGER.warning("Switch rotary valve command skipped | controller not connected | step=%s switch=%s", step.step, switch_position)
             return []
 
+        def _pump_display_cmd() -> list[_PlannedCommand]:
+            # Always sent (not diffed against the previous step) so a step with the
+            # option off reliably clears whatever the previous step left showing,
+            # instead of leaving a stale comment on the pump's display.
+            if not pump_connected:
+                return []
+            text = str(step.description or "").strip() if step.show_on_pump_display else ""
+            return [_PlannedCommand(pump_label, "pump.set_display", {"text": text}, f"pump.set_display text={text!r}")]
+
         if wait_for_switch_first:
             if pump_connected:
                 commands.extend(_pump_stop_cmds(channels_to_stop))
@@ -4829,11 +4919,13 @@ class ExperimentControlWindow(QWidget):
             if pump_connected:
                 commands.extend(_pump_configure_cmds())
                 commands.extend(_pump_start_cmds(effective_starts_after_switch))
+                commands.extend(_pump_display_cmd())
         else:
             if pump_connected:
                 commands.extend(_pump_stop_cmds(channels_to_stop))
                 commands.extend(_pump_configure_cmds())
                 commands.extend(_pump_start_cmds(channels_to_start))
+                commands.extend(_pump_display_cmd())
             commands.extend(_valve_cmd())
             commands.extend(_switch_cmd())
 
@@ -5390,6 +5482,7 @@ class ExperimentControlWindow(QWidget):
                     "valve": step.valve,
                     "switch_position": int(step.switch_position),
                     "description": step.description,
+                    "show_on_pump_display": bool(step.show_on_pump_display),
                     "channels": [
                         {
                             "flow_ul_min": float(channel.flow_ul_min),
@@ -5432,6 +5525,7 @@ class ExperimentControlWindow(QWidget):
                     valve=str(raw_step.get("valve", "Open") or "Open"),
                     switch_position=max(min(_safe_int(raw_step.get("switch_position", 1), 1), 12), 1),
                     description=str(raw_step.get("description", "") or ""),
+                    show_on_pump_display=bool(raw_step.get("show_on_pump_display", False)),
                     channels=channels,
                 )
             )
@@ -5473,6 +5567,10 @@ class ExperimentControlWindow(QWidget):
         saved_comment = state.get("editor_comment")
         if isinstance(saved_comment, str):
             self.step_comment_edit.setText(saved_comment)
+        saved_show_on_pump_display = state.get("editor_show_on_pump_display")
+        if isinstance(saved_show_on_pump_display, bool):
+            self.step_comment_display_button.setProperty("show_on_pump_display", saved_show_on_pump_display)
+            self._update_step_comment_display_button_icon()
 
         editor_channels = state.get("editor_channels")
         if isinstance(editor_channels, list):
@@ -5789,6 +5887,7 @@ class ExperimentControlWindow(QWidget):
                     "editor_valve": self.step_valve_button.property("valve"),
                     "editor_switch_position": self._current_switch_position_from_editor(),
                     "editor_comment": self.step_comment_edit.text(),
+                    "editor_show_on_pump_display": bool(self.step_comment_display_button.property("show_on_pump_display")),
                     "valve_state_labels": dict(self._valve_state_labels),
                     "valve_state_colors": dict(self._valve_state_colors),
                     "switch_solution_mode": self._switch_solution_mode,

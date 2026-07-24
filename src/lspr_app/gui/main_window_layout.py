@@ -17,6 +17,21 @@ from PyQt6.QtWidgets import (
 
 from lspr_app.gui.main_window_panels import build_spectra_processing_group, configure_spectra_processing_group_controls
 from lspr_app.gui.icon_helpers import flow_tabler_icon, tint_tabler_icon
+from lspr_app.gui.panel_help import make_help_button
+from lspr_app.gui.panel_help_text import (
+    LIGHT_SOURCE_BODY,
+    LIGHT_SOURCE_TITLE,
+    LIGHT_SOURCE_TOOLTIP,
+    LOG_BODY,
+    LOG_TITLE,
+    LOG_TOOLTIP,
+    SESSION_BODY,
+    SESSION_TITLE,
+    SESSION_TOOLTIP,
+    SPECTRA_PROCESSING_BODY,
+    SPECTRA_PROCESSING_TITLE,
+    SPECTRA_PROCESSING_TOOLTIP,
+)
 from lspr_app.gui.widgets import CollapsibleSection, CompactSplitter
 
 
@@ -176,13 +191,22 @@ def build_main_layout_for(window) -> None:
     trace_body_splitter.splitterMoved.connect(lambda *_: window._schedule_ui_state_persist())
     window.sensorgram_header_splitter = trace_body_splitter
 
-    source_section = CollapsibleSection("Light source", source_block, expanded=True)
+    source_section = CollapsibleSection(
+        "Light source",
+        source_block,
+        expanded=True,
+        header_widgets=[make_help_button(LIGHT_SOURCE_TOOLTIP, title=LIGHT_SOURCE_TITLE, body=LIGHT_SOURCE_BODY)],
+    )
     source_section.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
     spectra_processing_section = CollapsibleSection(
         "Spectra Processing",
         spectra_processing_group,
         expanded=False,
-        header_widgets=[window.save_processing_button, window.load_processing_button],
+        header_widgets=[
+            window.save_processing_button,
+            window.load_processing_button,
+            make_help_button(SPECTRA_PROCESSING_TOOLTIP, title=SPECTRA_PROCESSING_TITLE, body=SPECTRA_PROCESSING_BODY),
+        ],
     )
     session_top_row = QHBoxLayout()
     session_top_row.setContentsMargins(0, 0, 0, 0)
@@ -205,7 +229,12 @@ def build_main_layout_for(window) -> None:
     session_layout.addLayout(session_top_row)
     session_layout.addWidget(window.session_summary, 1)
     session_block.setLayout(session_layout)
-    session_section = CollapsibleSection("Session", session_block, expanded=False)
+    session_section = CollapsibleSection(
+        "Session",
+        session_block,
+        expanded=False,
+        header_widgets=[make_help_button(SESSION_TOOLTIP, title=SESSION_TITLE, body=SESSION_BODY)],
+    )
 
     log_header_row = QHBoxLayout()
     log_header_row.setContentsMargins(0, 0, 0, 0)
@@ -226,7 +255,12 @@ def build_main_layout_for(window) -> None:
     log_layout.addLayout(log_header_row)
     log_layout.addWidget(window.log_terminal)
     log_block.setLayout(log_layout)
-    log_section = CollapsibleSection("Log", log_block, expanded=True)
+    log_section = CollapsibleSection(
+        "Log",
+        log_block,
+        expanded=True,
+        header_widgets=[make_help_button(LOG_TOOLTIP, title=LOG_TITLE, body=LOG_BODY)],
+    )
     log_section.setVisible(bool(getattr(window, "_diagnostics_panel_enabled", False)))
 
     window._source_section = source_section
@@ -386,6 +420,7 @@ def build_main_layout_for(window) -> None:
     footer_bar.setSpacing(6)
     footer_bar.addWidget(window.status_label, 1)
     footer_bar.addWidget(window.live_estimate, 1)
+    footer_bar.addWidget(window.status_help_button, 0, Qt.AlignmentFlag.AlignVCenter)
     footer_bar.addWidget(window.telemetry_label, 2)
     # Keep the detailed telemetry available for diagnostics exports, but remove it from the visible footer.
     window.telemetry_label.setVisible(False)

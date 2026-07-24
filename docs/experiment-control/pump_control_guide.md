@@ -62,6 +62,8 @@ The experiment plan uses these structures:
   - `valve`
   - `switch_position`
   - `description`
+  - `show_on_pump_display` - see [Pump Display](#pump-display) below. **Not yet verified against
+    real hardware** - see that section before relying on it.
   - `channels`
 
 ## Connection Flow
@@ -178,6 +180,50 @@ Converts:
 
 If you change this encoding, verify it against the pump manual and a real controller before deploying.
 
+## Pump Display
+
+**Status: implemented per the manual, but NOT confirmed to actually show text on a real
+pump's screen yet. Treat this feature as unverified until someone checks it against
+hardware and this note is updated or removed.**
+
+Each `PumpPlanStep` has a `show_on_pump_display: bool` field. When a step with this set to
+`True` is applied to the pump (channel start/stop/configure - see "Apply channel" above),
+its `description` is sent to the pump's own display. When a step has it set to `False`, the
+display is explicitly cleared (empty string sent) rather than left showing the previous
+step's text.
+
+- `RegloICCClient.set_display_text(text)` sends `0DA{text}\r` - the manual's `DA`
+  ("write letters to the pump to display while under external control") command, addressed
+  to pump 0 since this is a per-pump, not per-channel, parameter.
+- `sanitize_pump_display_text(text, max_length=16)` (module-level function in
+  `reglo_icc.py`) filters to printable ASCII (0x20-0x7E) and truncates to 16 characters
+  first, per the manual's `String` data type rules (section 14.6.13: printable ASCII only,
+  no embedded `[CR]`) and the `D`/`DA` commands' own `<17 characters` limit. Reused by the
+  GUI's live preview so the two can't drift apart.
+- Dispatch happens in `experiment_control_window.py`'s `_plan_step_commands` (via a
+  `pump.set_display` command) for normal step transitions, and in
+  `_push_step_pump_display_now` for an immediate push when the setting is toggled on the
+  step that's currently applied to hardware (added specifically so toggling it gives
+  instant feedback instead of silently waiting for the next step transition).
+
+**What's confirmed:** the full software round-trip (checkbox -> per-step field -> HDF5
+persistence -> command dispatch -> `0DA<text>\r` sent over the serial port) works, and the
+exact command sent has a unit test (`tests/unit/test_pump_display.py`) checking it against
+a fake serial port.
+
+**What's NOT confirmed:** whether `DA` is actually the right command for this pump model's
+display, whether address `0` is correct for a single non-daisy-chained USB-connected pump,
+and whether the pump needs to be in some particular mode (see commands `A`/`B` in the
+manual - "Set control from the pump user interface" / "Disable pump user interface") for a
+`DA` write to be visible on-screen at all. Nothing in the manual's worked-examples section
+(section 18) shows a `D`/`DA` example, only the summary command table, so this was
+implemented from the table specification alone. First real test attempt (pump physically
+connected) showed no visible text on the display; the command send itself did not error.
+Next time hardware is available: enable diagnostics/log panel, toggle the setting on the
+currently-applied step, and check the log for `pump.set_display` - "Step command OK" or
+"Step command failed | ... | error=...". If it logs OK but nothing shows, the command
+letter/target field is the likely culprit, not the dispatch plumbing.
+
 ## Important Safety Rules
 
 These are the rules the app currently follows and new code should preserve them:
@@ -272,6 +318,17 @@ If re-initialization causes problems:
 - Make sure the code does not reconnect an already connected pump.
 - Make sure the old serial port is closed before opening a new one.
 - Make sure startup and manual HW init are not running at the same time.
+
+If the pump display does not show the step comment (see "Pump Display" above - this is a
+known unverified area, not necessarily a new bug):
+
+- Confirm the toggle is actually set on the row (icon should tint blue) and that row is the
+  one currently applied to hardware, or that the plan has advanced to it since.
+- Check the log for a `pump.set_display` line - "OK" vs "failed" tells you whether the
+  command reached the pump and was acknowledged.
+- If it logs OK but the screen doesn't change, the issue is almost certainly which display
+  field/command the real hardware expects, not the app's dispatch logic - re-check the `DA`
+  command choice and the `A`/`B` (user-interface control) commands against the manual.
 
 ## Files to Read Next
 

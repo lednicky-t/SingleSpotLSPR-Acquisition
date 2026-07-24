@@ -287,6 +287,7 @@ def build_experiment_plan_steps_from_hdf5_rows(columns: list[str], rows: list[li
         if color and not QColor(color).isValid():
             color = "#4E79A7"
         description = _experiment_plan_cell(row, column_map.get("description"), "").strip()
+        show_on_pump_display = _experiment_plan_cell(row, column_map.get("show_on_pump_display"), "0").strip() in {"1", "true", "True"}
         switch_text = _experiment_plan_cell(row, column_map.get("switch_position"), "")
         if not switch_text:
             switch_text = _experiment_plan_cell(row, column_map.get("solution"), "")
@@ -299,6 +300,7 @@ def build_experiment_plan_steps_from_hdf5_rows(columns: list[str], rows: list[li
                 valve=str(valve or "Open"),
                 switch_position=switch_position,
                 description=description,
+                show_on_pump_display=show_on_pump_display,
                 channels=channels,
             )
         )

@@ -32,6 +32,22 @@ class RegloICCError(DeviceError):
     pass
 
 
+PUMP_DISPLAY_MAX_LENGTH = 16
+
+
+def sanitize_pump_display_text(text: str, max_length: int = PUMP_DISPLAY_MAX_LENGTH) -> str:
+    """Reduce *text* to what the pump's display protocol will actually accept.
+
+    Per the Reglo ICC manual's ``String`` data type (used by the ``D``/``DA``
+    display-write commands): only printable ASCII (0x20-0x7E) is allowed, and
+    the request delimiter (carriage return) cannot appear in the value. The
+    physical display is also a single ~16-character line, so the result is
+    truncated to *max_length*.
+    """
+    cleaned = "".join(ch for ch in str(text or "") if 0x20 <= ord(ch) <= 0x7E)
+    return cleaned[: max(int(max_length), 0)]
+
+
 def is_probable_reglo_port(port: PumpPort) -> bool:
     description = port.description.upper()
     hwid = port.hwid.upper()
@@ -143,6 +159,9 @@ class RegloICCClient(DeviceDriver):
                 start=bool(payload.get("start", False)),
             )
             return None
+        if command_type == "pump.set_display":
+            self.set_display_text(str(payload.get("text", "")))
+            return None
         if command_type in {"pump.query", "raw.query"}:
             return self.query(str(payload.get("command", "")))
         raise RegloICCError(f"Unsupported command type {command.command_type!r} for {type(self).__name__}.")
@@ -208,6 +227,23 @@ class RegloICCClient(DeviceDriver):
     def stop_channels(self, channels: list[int]) -> None:
         for channel in channels:
             self.stop_channel(channel)
+
+    def set_display_text(self, text: str) -> None:
+        """Write *text* to the pump's display while it's under remote control.
+
+        Uses the ``DA`` (write letters) command, addressed to pump 0 since
+        this is a per-pump, not per-channel, parameter. *text* is sanitized
+        to printable ASCII and truncated to 16 characters first - see
+        :func:`sanitize_pump_display_text`.
+
+        UNVERIFIED against real hardware as of the commit that added this: the
+        command sends and gets acknowledged (`*`), but no text has yet been
+        confirmed visible on a physical pump's screen. See "Pump Display" in
+        docs/experiment-control/pump_control_guide.md before assuming this
+        works or debugging "why doesn't the pump show my comment" reports.
+        """
+        sanitized = sanitize_pump_display_text(text)
+        self._expect_status(f"0DA{sanitized}")
 
     def configure_channel(
         self,

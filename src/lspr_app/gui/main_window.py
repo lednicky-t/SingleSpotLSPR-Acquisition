@@ -318,6 +318,8 @@ from lspr_app.gui.acquisition_controller import (
     update_measurement_toggle_button,
     update_window_mode_label,
 )
+from lspr_app.gui.panel_help import make_help_button
+from lspr_app.gui.panel_help_text import STATUS_READOUTS_BODY, STATUS_READOUTS_TITLE
 from lspr_app.gui.shortcut_help import build_shortcuts_help_text
 from lspr_app.gui.spectrum_plot_controller import (
     autoscale_residual_axis,
@@ -990,6 +992,12 @@ class MainWindow(QMainWindow):
         self.live_estimate.setToolTip(
             "src = source acquisition rate; disp = GUI display rate; proc = processing time per spectrum; "
             "head = display-period / processing-time; skip = dropped GUI updates per second."
+        )
+        self.status_help_button = make_help_button(
+            "Status readouts glossary (src/disp/proc/head/skip, spacing/rate/ovh).",
+            title=STATUS_READOUTS_TITLE,
+            body=STATUS_READOUTS_BODY,
+            parent=self,
         )
         self.spectrometer_stats_label = QLabel(self)
         self.spectrometer_stats_label.setWordWrap(False)
@@ -2744,20 +2752,7 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
 
     def _show_quick_help_dialog(self) -> None:
-        QMessageBox.information(
-            self,
-            "Quick help",
-            "Status readouts:\n"
-            "src = source acquisition rate\n"
-            "disp = GUI display refresh rate\n"
-            "proc = processing time per spectrum\n"
-            "head = display-period / processing-time\n"
-            "skip = dropped GUI updates per second\n"
-            "acq = acquisition latency\n"
-            "gap = interval between source frames\n"
-            "ovh = acquisition latency minus expected budget\n"
-            "show = last displayed frame/window summary",
-        )
+        QMessageBox.information(self, STATUS_READOUTS_TITLE, STATUS_READOUTS_BODY)
 
     def _show_sensorgram_plot_settings_dialog(self) -> None:
         show_sensorgram_plot_settings_dialog_for(self)
@@ -2785,18 +2780,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Diagnostics legend",
-            f"{self._diagnostics.startup_summary_text()}\n\n"
-            "Status strip:\n"
-            "src = source acquisition rate\n"
-            "disp = GUI display refresh rate\n"
-            "proc = processing time per spectrum\n"
-            "head = display-period / processing-time\n"
-            "skip = dropped GUI updates per second\n\n"
-            "Telemetry strip:\n"
-            "acq = acquisition latency\n"
-            "gap = interval between source frames\n"
-            "ovh = acquisition latency minus expected budget\n"
-            "show = last displayed frame/window summary",
+            f"{self._diagnostics.startup_summary_text()}\n\n{STATUS_READOUTS_BODY}",
         )
 
     def _show_device_manager_dialog(self) -> None:

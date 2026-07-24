@@ -28,6 +28,7 @@ class PumpPlanStep:
     valve: str = ""
     switch_position: int = 1
     description: str = ""
+    show_on_pump_display: bool = False
     channels: list[PumpChannelStep] = field(
         default_factory=lambda: [PumpChannelStep() for _ in range(ACTIVE_PUMP_CHANNELS)]
     )
@@ -44,6 +45,7 @@ def to_core_experiment_step(step: PumpPlanStep) -> CoreExperimentPlanStep:
         devices={
             "valve": str(step.valve or ""),
             "switch_position": int(step.switch_position),
+            "show_on_pump_display": bool(step.show_on_pump_display),
             "channels": [
                 {
                     "flow_ul_min": float(channel.flow_ul_min),
@@ -71,6 +73,7 @@ def from_core_experiment_step(core_step: CoreExperimentPlanStep, template: PumpP
             base.switch_position = max(min(int(core_step.devices.get("switch_position", base.switch_position)), 12), 1)
         except (TypeError, ValueError):
             base.switch_position = 1
+        base.show_on_pump_display = bool(core_step.devices.get("show_on_pump_display", base.show_on_pump_display))
         channels = core_step.devices.get("channels", [])
         if isinstance(channels, list):
             for index, channel_payload in enumerate(channels[: len(base.channels)]):

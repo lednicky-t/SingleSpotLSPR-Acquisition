@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import csv
+from html import escape as _html_escape
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QSize, QEvent, QModelIndex
 from PyQt6.QtGui import QColor, QIcon, QCursor, QGuiApplication
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QColorDialog,
     QDialog,
     QFileDialog,
@@ -27,6 +29,7 @@ from PyQt6.QtWidgets import (
 
 from tablerqicon import TablerQIcon
 
+from lspr_app.device.reglo_icc import PUMP_DISPLAY_MAX_LENGTH, sanitize_pump_display_text
 from lspr_app.domain.pump_plan import ACTIVE_PUMP_CHANNELS, PumpPlanStep
 from lspr_app.gui.experiment_control_plan_view import (
     build_experiment_control_pause_model,
@@ -675,6 +678,141 @@ class ExperimentControlDialogs:
         if result is None or result_colors is None:
             return None
         return result, result_colors
+
+    def edit_step_pump_display_settings(
+        self,
+        comment_edit: QLineEdit,
+        current_enabled: bool,
+        anchor: QWidget | None = None,
+    ) -> bool | None:
+        """Popup for the step editor's Comment field: toggle sending the comment to the
+        pump's own display, with a live preview of what fits inside its 16-character limit.
+
+        *comment_edit* is read live while the dialog is open (its ``textChanged`` signal
+        drives the preview), so edits made in the main editor update the preview immediately.
+        Returns the new enabled state on Apply, or ``None`` if the dialog was cancelled/closed.
+        """
+        dialog = QDialog(self._parent)
+        dialog.setObjectName("commentDisplayDialog")
+        dialog.setWindowTitle("Pump display")
+        dialog.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        dialog.setStyleSheet(
+            """
+            QDialog {
+                background: %(bg)s;
+                color: %(fg)s;
+            }
+            QDialog#commentDisplayDialog {
+                border: 1px solid #58a06a;
+                border-radius: 10px;
+            }
+            QLabel#commentDisplayTitle {
+                color: %(fg)s;
+                font-size: 10px;
+                font-weight: 700;
+            }
+            QLabel#commentDisplayCaption {
+                color: %(fg)s;
+                font-size: 9px;
+            }
+            QLabel#commentDisplayPreview {
+                background: %(button)s;
+                border: 1px solid %(border)s;
+                border-radius: 6px;
+                padding: 4px 6px;
+                font-family: Consolas, monospace;
+                font-size: 12px;
+            }
+            QCheckBox {
+                color: %(fg)s;
+                font-size: 10px;
+            }
+            QPushButton#commentDisplayAction {
+                background: %(button)s;
+                color: %(fg)s;
+                border: 1px solid %(border)s;
+                border-radius: 7px;
+                padding: 1px 7px;
+            }
+            QPushButton#commentDisplayAction:hover {
+                background: %(button_hover)s;
+                border-color: %(border_hover)s;
+            }
+            """ % self._theme_palette
+        )
+
+        top_label = QLabel("Pump display")
+        top_label.setObjectName("commentDisplayTitle")
+        top_label.setToolTip("Send this step's comment to the pump's own display while it runs.")
+        layout.addWidget(top_label)
+
+        checkbox = QCheckBox("Show comment on pump display")
+        checkbox.setToolTip("When this step is applied to the pump, send its comment to the pump's display.")
+        checkbox.setChecked(bool(current_enabled))
+        layout.addWidget(checkbox)
+
+        caption = QLabel(f"Preview - the pump display fits {PUMP_DISPLAY_MAX_LENGTH} characters:")
+        caption.setObjectName("commentDisplayCaption")
+        layout.addWidget(caption)
+
+        preview = QLabel()
+        preview.setObjectName("commentDisplayPreview")
+        preview.setTextFormat(Qt.TextFormat.RichText)
+        preview.setMinimumWidth(230)
+        layout.addWidget(preview)
+
+        fg_color = str(self._theme_palette.get("fg", "#e6ebf1"))
+        muted_color = str(self._theme_palette.get("muted", "#8a98a8"))
+        overflow_color = "#c97a7a"
+
+        def _refresh_preview() -> None:
+            # Unbounded sanitize first (character filtering only) so the overflow
+            # portion of the preview isn't silently dropped before it can be shown
+            # in the "won't fit" color - only the final display send truncates.
+            sanitized = sanitize_pump_display_text(comment_edit.text(), max_length=1000)
+            if not sanitized:
+                preview.setText(f'<span style="color:{muted_color};">(empty)</span>')
+                return
+            fits = sanitized[:PUMP_DISPLAY_MAX_LENGTH]
+            overflow = sanitized[PUMP_DISPLAY_MAX_LENGTH:]
+            html = f'<span style="color:{fg_color};">{_html_escape(fits)}</span>'
+            if overflow:
+                html += f'<span style="color:{overflow_color};">{_html_escape(overflow)}</span>'
+            preview.setText(html)
+
+        _refresh_preview()
+        comment_edit.textChanged.connect(_refresh_preview)
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.addStretch(1)
+        apply_button = QPushButton("Apply")
+        apply_button.setObjectName("commentDisplayAction")
+        button_row.addWidget(apply_button)
+        layout.addLayout(button_row)
+
+        result: bool | None = None
+
+        def _apply() -> None:
+            nonlocal result
+            result = checkbox.isChecked()
+            dialog.accept()
+
+        apply_button.clicked.connect(_apply)
+        self._position_dialog_near_anchor(dialog, anchor)
+        dialog.adjustSize()
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+        finally:
+            try:
+                comment_edit.textChanged.disconnect(_refresh_preview)
+            except (TypeError, RuntimeError):
+                pass
+        return result
 
     def edit_switch_solution_labels(self, current_labels: list[str], anchor: QWidget | None = None) -> list[str] | None:
         dialog = QDialog(self._parent)

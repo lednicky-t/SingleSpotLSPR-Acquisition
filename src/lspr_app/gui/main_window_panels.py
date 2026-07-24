@@ -12,7 +12,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
-from lspr_ui import make_info_button
+from lspr_app.gui.panel_help import make_help_button
+from lspr_app.gui.panel_help_text import SIMULATION_BODY, SIMULATION_TITLE, SIMULATION_TOOLTIP
 
 SPECTRA_PROCESSING_SECTION_H_SPACING = 6
 SPECTRA_PROCESSING_SECTION_V_SPACING = 1
@@ -76,13 +77,7 @@ def build_simulation_page(window) -> QWidget:
     simulation_info_row = QHBoxLayout()
     simulation_info_row.setContentsMargins(0, 0, 0, 0)
     simulation_info_row.setSpacing(2)
-    simulation_info_row.addWidget(
-        make_info_button(
-            "Synthetic spectrum controls used in Simulation mode. "
-            "These settings shape the generated display data, including the primary and secondary peaks, "
-            "and do not affect spectrometer hardware."
-        )
-    )
+    simulation_info_row.addWidget(make_help_button(SIMULATION_TOOLTIP, title=SIMULATION_TITLE, body=SIMULATION_BODY))
     simulation_info_row.addStretch(1)
     simulation_layout.addLayout(simulation_info_row, 0, 0, 1, 2)
 
@@ -229,7 +224,7 @@ def configure_spectra_processing_group_controls(window) -> None:
     window.range_min_spin.setFixedWidth(range_width)
     window.range_max_spin.setFixedWidth(range_width)
 
-    res_width = max(int(round(range_width * 0.80)), 46)
+    res_width = max(window.analysis_resolution_spin.sizeHint().width(), range_width)
     window.analysis_resolution_spin.setFixedWidth(res_width)
 
     # fit window: practical max 3 digits
