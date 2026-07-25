@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QStyledItemDelegate,
     QStyle,
+    QStyleFactory,
     QStyleOptionViewItem,
     QTableView,
 )
@@ -85,6 +86,24 @@ def configure_experiment_control_plan_view(window, table, model: ExperimentPlanT
         plan_palette.setColor(group, QPalette.ColorRole.HighlightedText, QColor(window._theme_palette()["fg"]))
     table.setPalette(plan_palette)
     table.viewport().setPalette(plan_palette)
+    # The native "windows11" QStyle (Qt's default on Windows 11) draws its own
+    # accent-colored "current item" indicator for QAbstractItemView.SelectItems
+    # selection - a short vertical bar at the left edge of whichever cell is
+    # current, e.g. in edit mode. It's issued by the style's own C++ item-view
+    # drawing, not through anything QStyledItemDelegate.paint() controls, so
+    # clearing QStyleOptionViewItem.state flags in the delegates above (as
+    # _NoFocusItemDelegate/_BaseFlowDelegate already do) cannot suppress it.
+    # Fusion is a pure Qt-drawn style with no such native decoration, and
+    # everything about this table's appearance is already controlled by its
+    # own QSS/palette/delegates, so switching just this widget to Fusion has
+    # no other visible effect. The style instance must be kept referenced
+    # (QWidget.setStyle() does not take ownership) or it would be garbage
+    # collected out from under the table.
+    fusion_style = QStyleFactory.create("Fusion")
+    if fusion_style is not None:
+        table.setStyle(fusion_style)
+        window._plan_table_style_refs = getattr(window, "_plan_table_style_refs", [])
+        window._plan_table_style_refs.append(fusion_style)
     table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
     if hasattr(window, "_schedule_visible_experiment_control_rows_load"):
