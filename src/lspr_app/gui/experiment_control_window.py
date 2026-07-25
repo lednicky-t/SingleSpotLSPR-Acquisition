@@ -4052,6 +4052,128 @@ class ExperimentControlWindow(QWidget):
             return "comment"
         return None
 
+    def _experiment_control_channel_field(self, column: int) -> tuple[int, int] | None:
+        """Return ``(channel_index, field)`` for a flow/direction/tube column, else
+        ``None``. ``field`` is 0 for flow, 1 for direction, 2 for tube diameter -
+        matching the column layout ``_flow_rate_column``/``_direction_column``/
+        ``_tube_column`` build (three columns per channel, flow first)."""
+        flow_start = self._flow_rate_column(0)
+        if flow_start <= column < flow_start + ACTIVE_PUMP_CHANNELS * 3:
+            offset = column - flow_start
+            return offset // 3, offset % 3
+        return None
+
+    def _experiment_control_read_cell_value(self, row: int, column: int) -> object:
+        """Read the raw value backing a plan-table cell, for the copy side of
+        cell copy/paste (see ExperimentControlEditingController.copy_selection).
+        Mirrors ExperimentPlanTableModel.data()'s EditRole values so a copied
+        value round-trips identically to what editing the cell directly would
+        produce."""
+        steps = self._read_experiment_control_steps()
+        if row < 0 or row >= len(steps):
+            return None
+        step = steps[row]
+        kind = self._experiment_control_column_kind(column)
+        if kind == "duration":
+            return self._seconds_to_display(step.duration_s)
+        if kind == "time":
+            seconds = step.start_s if column == 2 else step.end_s
+            return self._seconds_to_display(seconds)
+        channel_field = self._experiment_control_channel_field(column)
+        if channel_field is not None:
+            channel_index, field = channel_field
+            if channel_index >= len(step.channels):
+                return None
+            channel = step.channels[channel_index]
+            if field == 0:
+                return float(channel.flow_ul_min)
+            if field == 1:
+                return "CCW" if str(channel.direction or "").upper() == "CCW" else "CW"
+            tube_values = self._tube_mm_values()
+            return float(tube_values[channel_index]) if channel_index < len(tube_values) else 0.25
+        if kind == "valve":
+            return "Close" if str(step.valve or "").strip().lower() == "close" else "Open"
+        if kind == "switch":
+            return int(step.switch_position)
+        if kind == "color":
+            return str(step.color or "#4E79A7")
+        if kind == "comment":
+            return str(step.description or "")
+        return None
+
+    def _experiment_control_value_to_text(self, kind: str | None, value: object) -> str:
+        """Render a copied cell value as plain text for the clipboard's
+        tab-separated representation (so a copied block can also be pasted into
+        an external spreadsheet, not just back into this app)."""
+        if value is None:
+            return ""
+        if kind in {"duration", "time", "flow", "tube"}:
+            try:
+                return f"{float(value):g}"
+            except (TypeError, ValueError):
+                return str(value)
+        if kind == "switch":
+            try:
+                return str(int(value))
+            except (TypeError, ValueError):
+                return str(value)
+        return str(value)
+
+    def _experiment_control_write_row_value(self, steps: list[PumpPlanStep], row: int, column: int, value: object) -> bool:
+        """Write a copied value into ``steps[row]`` at ``column``, for the paste
+        side of cell copy/paste. Mutates the given step in place and returns
+        whether the write applied; callers (ExperimentControlEditingController.
+        paste_selection) treat ``False`` as "incompatible cell, skip it" -
+        matches the parsing/clamping rules ExperimentPlanTableModel.setData()
+        uses for the same columns, so pasting behaves like typing the same
+        value directly into the cell."""
+        if row < 0 or row >= len(steps):
+            return False
+        step = steps[row]
+        kind = self._experiment_control_column_kind(column)
+        if kind == "duration":
+            try:
+                step.duration_s = max(self._display_to_seconds(float(value)), 0.0)
+            except (TypeError, ValueError):
+                return False
+            return True
+        channel_field = self._experiment_control_channel_field(column)
+        if channel_field is not None:
+            channel_index, field = channel_field
+            if channel_index >= len(step.channels):
+                return False
+            if field == 0:
+                try:
+                    step.channels[channel_index].flow_ul_min = max(round(float(value)), 0)
+                except (TypeError, ValueError):
+                    return False
+                return True
+            if field == 1:
+                step.channels[channel_index].direction = "CCW" if str(value).upper() == "CCW" else "CW"
+                return True
+            # field == 2 (tube diameter) isn't a per-step value - it's a single
+            # shared setting per channel (the manual_tube_spins row, applied to
+            # every step), so there is nothing on this step to write into.
+            # Copy-only, same as the Step# and time columns below.
+            return False
+        if kind == "valve":
+            step.valve = "Close" if str(value).strip().lower() == "close" else "Open"
+            return True
+        if kind == "switch":
+            try:
+                step.switch_position = max(min(int(value), 12), 1)
+            except (TypeError, ValueError):
+                step.switch_position = 1
+            return True
+        if kind == "color":
+            color = QColor(str(value or "").strip())
+            step.color = color.name().upper() if color.isValid() else "#4E79A7"
+            return True
+        if kind == "comment":
+            step.description = str(value or "").strip()
+            return True
+        return False
+
     def _update_experiment_control_edit_mode_button(self) -> None:
         controller = getattr(self, "_experiment_control_edit_controller", None)
         if controller is not None:

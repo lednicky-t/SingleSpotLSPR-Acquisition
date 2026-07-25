@@ -212,6 +212,20 @@ class ExperimentControlEditingController(QObject):
         self._window._update_experiment_control_edit_mode_button()
         self._sync_overlay()
 
+    def _runtime_row(self) -> int | None:
+        active_row = self._table.property("experiment_control_runtime_row")
+        if not isinstance(active_row, int):
+            active_row = getattr(self._window, "_plan_active_row", None)
+        return active_row if isinstance(active_row, int) else None
+
+    def _runtime_active(self) -> bool:
+        return bool(
+            self._runtime_row() is not None
+            or getattr(self._window, "_plan_running", False)
+            or getattr(self._window, "_plan_holding", False)
+            or getattr(self._window, "_plan_paused", False)
+        )
+
     def _release_table_focus_if_runtime_active(self) -> None:
         if not self._runtime_active():
             return
