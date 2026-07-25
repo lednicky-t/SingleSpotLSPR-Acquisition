@@ -23,6 +23,7 @@ from PyQt6.QtGui import (
     QKeySequence,
     QTransform,
     QShortcut,
+    QUndoStack,
 )
 from PyQt6.QtWidgets import (
     QAbstractSpinBox,
@@ -80,6 +81,7 @@ from lspr_app.gui.main_window_headers import (
 from lspr_app.gui.main_window_runtime_state import UiRefreshState
 from lspr_app.gui.sensorgram_display_state import SensorgramDisplayState
 from lspr_app.gui.ui_persistence import UIPersistenceBinder
+from lspr_app.gui.undo_support import DEFAULT_UNDO_HISTORY_SIZE, push_snapshot
 from lspr_app.gui.icon_helpers import (
     dark_icon,
     reference_icon,
@@ -625,6 +627,8 @@ class MainWindow(QMainWindow):
         if self._theme_mode != "dark":
             self._theme_mode = "dark"
             save_app_setting("theme_mode", self._theme_mode)
+        self.undo_stack = QUndoStack(self)
+        self.undo_stack.setUndoLimit(int(load_app_setting("undo_history_size", DEFAULT_UNDO_HISTORY_SIZE)))
         self._suspend_processing_autosave = False
         self._suspend_acquisition_autosave = False
         self._ui_state_persistence_enabled = True
@@ -1526,9 +1530,27 @@ class MainWindow(QMainWindow):
         self.averages_spin.valueChanged.connect(self._handle_live_setting_change)
         self.correct_dark_check.toggled.connect(self._handle_live_setting_change)
         self.correct_nonlinearity_check.toggled.connect(self._handle_live_setting_change)
+        # Undo tracking (debounced - see _track_acquisition_setting_for_undo).
+        self.integration_spin.valueChanged.connect(self._track_acquisition_setting_for_undo)
+        self.averages_spin.valueChanged.connect(self._track_acquisition_setting_for_undo)
+        self.correct_dark_check.toggled.connect(self._track_acquisition_setting_for_undo)
+        self.correct_nonlinearity_check.toggled.connect(self._track_acquisition_setting_for_undo)
         self.show_residual_button.toggled.connect(lambda _checked: self._schedule_acquisition_state_persist())
         self.freeze_plots_button.toggled.connect(lambda _checked: self._schedule_acquisition_state_persist())
         self.trace_noise_window_spin.valueChanged.connect(self._handle_processing_setting_change)
+        self.trace_noise_window_spin.valueChanged.connect(self._track_processing_setting_for_undo)
+        # Undo history baseline: captured now, after saved settings were applied to the
+        # widgets above (line 1518-1519) and their live signals were just connected, so
+        # it reflects the actual starting values - not dataclass defaults - and the first
+        # real edit diffs against what's really on screen.
+        self._acquisition_settings_undo_baseline = self._current_settings()
+        self._processing_settings_undo_baseline = self._current_processing_settings()
+        self._acquisition_undo_commit_timer = QTimer(self)
+        self._acquisition_undo_commit_timer.setSingleShot(True)
+        self._acquisition_undo_commit_timer.timeout.connect(self._commit_acquisition_undo)
+        self._processing_undo_commit_timer = QTimer(self)
+        self._processing_undo_commit_timer.setSingleShot(True)
+        self._processing_undo_commit_timer.timeout.connect(self._commit_processing_undo)
         self._update_live_estimate()
         self._refresh_spectrometer_stats()
         self._refresh_telemetry()
@@ -2047,6 +2069,11 @@ class MainWindow(QMainWindow):
         if hasattr(self, "live_rate_spin"):
             self.live_rate_spin.setValue(self._default_live_rate_hz)
 
+    def _set_undo_history_size(self, size: int) -> None:
+        size = max(int(size), 1)
+        save_app_setting("undo_history_size", size)
+        self.undo_stack.setUndoLimit(size)
+
     def _set_gui_log_level(self, level: int) -> None:
         self._gui_log_min_level = int(level)
         save_app_setting("gui_log_min_level", self._gui_log_min_level)
@@ -2339,6 +2366,21 @@ class MainWindow(QMainWindow):
         self.poly_order_spin.valueChanged.connect(self._handle_processing_setting_change)
         self.fit_window_spin.valueChanged.connect(self._handle_processing_setting_change)
         self.analysis_resolution_spin.currentIndexChanged.connect(self._handle_processing_setting_change)
+        # Undo tracking: a second listener alongside each of the above, debounced
+        # (see _track_processing_setting_for_undo) so a spinbox drag or a burst of
+        # wheel-scroll ticks becomes one undo step, not one per tick.
+        self.range_min_spin.valueChanged.connect(self._track_processing_setting_for_undo)
+        self.range_max_spin.valueChanged.connect(self._track_processing_setting_for_undo)
+        self.baseline_method_combo.currentTextChanged.connect(self._track_processing_setting_for_undo)
+        self.smoothing_method_combo.currentTextChanged.connect(self._track_processing_setting_for_undo)
+        self.smoothing_window_spin.valueChanged.connect(self._track_processing_setting_for_undo)
+        self.temporal_smoothing_spin.valueChanged.connect(self._track_processing_setting_for_undo)
+        self.crop_method_combo.currentTextChanged.connect(self._track_processing_setting_for_undo)
+        self.crop_fraction_spin.valueChanged.connect(self._track_processing_setting_for_undo)
+        self.fit_method_combo.currentTextChanged.connect(self._track_processing_setting_for_undo)
+        self.poly_order_spin.valueChanged.connect(self._track_processing_setting_for_undo)
+        self.fit_window_spin.valueChanged.connect(self._track_processing_setting_for_undo)
+        self.analysis_resolution_spin.currentIndexChanged.connect(self._track_processing_setting_for_undo)
 
     def _current_settings(self) -> AcquisitionSettings:
         return AcquisitionSettings(
@@ -3257,6 +3299,68 @@ class MainWindow(QMainWindow):
         self._update_trace_stats()
         self._schedule_processing_refresh()
         self._request_deferred_ui_refresh(summary=True)
+
+    def _track_acquisition_setting_for_undo(self) -> None:
+        # Debounced rather than committed on every valueChanged/toggled firing:
+        # a spinbox drag or a burst of wheel-scroll ticks should become one undo
+        # step, not one per tick. Restarting the timer on every change means the
+        # undo step is only recorded once the user pauses. _suspend_acquisition_autosave
+        # is also true while _apply_acquisition_settings_for_undo (undo/redo replay)
+        # or a bulk state restore is setting these same widgets, so neither creates
+        # a new undo entry from its own writes.
+        if self._suspend_acquisition_autosave:
+            return
+        self._acquisition_undo_commit_timer.start(600)
+
+    def _commit_acquisition_undo(self) -> None:
+        current = self._current_settings()
+        push_snapshot(
+            self.undo_stack,
+            "Acquisition settings",
+            self._acquisition_settings_undo_baseline,
+            current,
+            apply=self._apply_acquisition_settings_for_undo,
+        )
+        self._acquisition_settings_undo_baseline = current
+
+    def _apply_acquisition_settings_for_undo(self, settings: AcquisitionSettings) -> None:
+        self._suspend_acquisition_autosave = True
+        try:
+            self.integration_spin.setValue(settings.integration_time_ms)
+            self.averages_spin.setValue(settings.averages)
+            self.correct_dark_check.setChecked(settings.correct_dark_counts)
+            self.correct_nonlinearity_check.setChecked(settings.correct_nonlinearity)
+        finally:
+            self._suspend_acquisition_autosave = False
+        # Now push the restored values live/to disk exactly once, the same way a
+        # real edit would (suspend was on above just to stop the per-widget
+        # signals below from recording a redundant undo entry for this replay).
+        self._handle_live_setting_change()
+
+    def _track_processing_setting_for_undo(self) -> None:
+        if self._suspend_processing_autosave:
+            return
+        self._processing_undo_commit_timer.start(600)
+
+    def _commit_processing_undo(self) -> None:
+        current = self._current_processing_settings()
+        push_snapshot(
+            self.undo_stack,
+            "Processing settings",
+            self._processing_settings_undo_baseline,
+            current,
+            apply=self._apply_processing_settings_for_undo,
+        )
+        self._processing_settings_undo_baseline = current
+
+    def _apply_processing_settings_for_undo(self, settings: ProcessingSettings) -> None:
+        # apply_processing_settings_to_widgets() already sets/clears
+        # _suspend_processing_autosave around the widget writes; calling the real
+        # change handler afterward (suspend now back off) persists, pushes to the
+        # live processing worker, and refreshes the plot - the same effects a
+        # live edit has, replayed once instead of per-field.
+        self._apply_processing_settings_to_widgets(settings)
+        self._handle_processing_setting_change()
 
     def _apply_sensorgram_time_axis_mode(self, *, redraw: bool = True) -> None:
         apply_sensorgram_time_axis_mode(self, redraw=redraw)

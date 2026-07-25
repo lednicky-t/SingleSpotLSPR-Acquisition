@@ -10,9 +10,12 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
+
+from lspr_app.gui.undo_support import DEFAULT_UNDO_HISTORY_SIZE
 
 _GUI_LOG_LEVELS = [
     ("Errors only", logging.ERROR),
@@ -99,6 +102,13 @@ class PreferencesDialog(QDialog):
             "Enable the sensorgram metric line plot. "
             "Disable to reduce rendering load when the sensorgram is not needed."
         )
+        self.undo_history_size_spin = QSpinBox()
+        self.undo_history_size_spin.setRange(1, 1000)
+        self.undo_history_size_spin.setToolTip(
+            "How many Ctrl+Z steps are kept in the undo history (experiment plan edits, "
+            "and acquisition/processing setting changes). Takes effect on the next change; "
+            "existing history isn't trimmed retroactively."
+        )
 
         # Developer
         self.processing_debug_check = QCheckBox("Processing debug mode")
@@ -157,6 +167,7 @@ class PreferencesDialog(QDialog):
         performance_layout.addRow(self.log_buffering_check)
         performance_layout.addRow(self.gui_housekeeping_check)
         performance_layout.addRow(self.metric_plot_check)
+        performance_layout.addRow("Undo history size", self.undo_history_size_spin)
 
         # ── Developer ─────────────────────────────────────────────────────────
         developer_box = QGroupBox("Developer")
@@ -207,6 +218,9 @@ class PreferencesDialog(QDialog):
         self.log_buffering_check.setChecked(bool(getattr(self._window, "_log_buffering_enabled", True)))
         self.gui_housekeeping_check.setChecked(bool(getattr(self._window, "_gui_housekeeping_enabled", True)))
         self.metric_plot_check.setChecked(bool(getattr(self._window, "_metric_plot_enabled", True)))
+        undo_stack = getattr(self._window, "undo_stack", None)
+        current_limit = undo_stack.undoLimit() if undo_stack is not None else 0
+        self.undo_history_size_spin.setValue(current_limit if current_limit > 0 else DEFAULT_UNDO_HISTORY_SIZE)
 
         self.processing_debug_check.setChecked(bool(getattr(self._window, "_processing_debug_mode_enabled", False)))
 
@@ -249,6 +263,8 @@ class PreferencesDialog(QDialog):
             self._window._set_gui_housekeeping_enabled(self.gui_housekeeping_check.isChecked())
         if hasattr(self._window, "_set_metric_plot_enabled"):
             self._window._set_metric_plot_enabled(self.metric_plot_check.isChecked())
+        if hasattr(self._window, "_set_undo_history_size"):
+            self._window._set_undo_history_size(self.undo_history_size_spin.value())
 
         if hasattr(self._window, "_set_processing_debug_mode_enabled"):
             self._window._set_processing_debug_mode_enabled(self.processing_debug_check.isChecked())

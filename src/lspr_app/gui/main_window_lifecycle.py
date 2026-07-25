@@ -150,6 +150,7 @@ def ensure_experiment_control_panel_for(window) -> None:
                 auto_connect_devices=profile.scan_devices,
                 show_runtime_controls=profile.show_runtime_controls,
                 parent=getattr(window, "_top_content_stack", window),
+                undo_stack=getattr(window, "undo_stack", None),
             )
             window._experiment_control_window.setVisible(False)
             window._experiment_control_window.availability_changed.connect(window._handle_flow_availability_changed)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 
 from PyQt6.QtCore import QEvent, QModelIndex, QObject, QTimer, Qt, QMimeData, QItemSelectionModel, QRect
 from PyQt6.QtGui import QColor, QPainter, QPen, QKeySequence
@@ -12,6 +13,7 @@ from PyQt6.QtWidgets import (
 )
 
 from lspr_app.domain.pump_plan import duplicate_plan_step
+from lspr_app.gui.undo_support import push_snapshot
 
 
 class _SelectionOverlay(QWidget):
@@ -401,6 +403,7 @@ class ExperimentControlEditingController(QObject):
         steps = self._window._read_experiment_control_steps()
         if not steps:
             return
+        before_steps = deepcopy(steps)
         rows_to_refresh: set[int] = set()
         skipped_incompatible = False
         single_value = len(cells) == 1
@@ -446,7 +449,14 @@ class ExperimentControlEditingController(QObject):
             if skipped_incompatible:
                 self._window._set_status_message("Paste skipped incompatible cells.")
             return
-        self._window._populate_experiment_control_table(steps, selected_row=min(rows_to_refresh))
+        anchor_row = min(rows_to_refresh)
+        push_snapshot(
+            self._window.undo_stack,
+            "Paste",
+            before_steps,
+            steps,
+            apply=lambda s, row=anchor_row: self._window._populate_experiment_control_table(s, selected_row=row),
+        )
         self._select_rows(sorted(rows_to_refresh))
         self._window.save_ui_state()
         self._window._set_status_message(
@@ -464,11 +474,18 @@ class ExperimentControlEditingController(QObject):
         target = min(max(first_row + delta, 0), len(steps) - (last_row - first_row + 1))
         if target == first_row:
             return
+        before_steps = deepcopy(steps)
         block = [steps[row] for row in range(first_row, last_row + 1)]
         remaining = steps[:first_row] + steps[last_row + 1 :]
         target = min(max(target, 0), len(remaining))
         steps = remaining[:target] + block + remaining[target:]
-        self._window._populate_experiment_control_table(steps, selected_row=target)
+        push_snapshot(
+            self._window.undo_stack,
+            "Move step" if len(block) == 1 else "Move steps",
+            before_steps,
+            steps,
+            apply=lambda s, row=target: self._window._populate_experiment_control_table(s, selected_row=row),
+        )
         self._select_rows(list(range(target, target + len(block))))
         self.clear_copied_selection()
         self._window.save_ui_state()
@@ -482,12 +499,19 @@ class ExperimentControlEditingController(QObject):
         if not rows or not steps:
             self._window._show_info("Select a plan row to duplicate.")
             return
+        before_steps = deepcopy(steps)
         first_row = rows[0]
         last_row = rows[-1]
         duplicates = [duplicate_plan_step(steps[row]) for row in range(first_row, last_row + 1)]
         insert_at = last_row + 1
         steps = steps[:insert_at] + duplicates + steps[insert_at:]
-        self._window._populate_experiment_control_table(steps, selected_row=insert_at)
+        push_snapshot(
+            self._window.undo_stack,
+            "Duplicate step" if len(duplicates) == 1 else "Duplicate steps",
+            before_steps,
+            steps,
+            apply=lambda s, row=insert_at: self._window._populate_experiment_control_table(s, selected_row=row),
+        )
         self._select_rows(list(range(insert_at, insert_at + len(duplicates))))
         self.clear_copied_selection()
 
@@ -498,11 +522,18 @@ class ExperimentControlEditingController(QObject):
         if not rows or not steps:
             self._window._show_info("Select a plan row to remove.")
             return
+        before_steps = deepcopy(steps)
         first_row = rows[0]
         last_row = rows[-1]
         del steps[first_row : last_row + 1]
         replacement_row = min(first_row, len(steps) - 1) if steps else None
-        self._window._populate_experiment_control_table(steps, selected_row=replacement_row)
+        push_snapshot(
+            self._window.undo_stack,
+            "Remove step" if last_row == first_row else "Remove steps",
+            before_steps,
+            steps,
+            apply=lambda s, row=replacement_row: self._window._populate_experiment_control_table(s, selected_row=row),
+        )
         self.clear_copied_selection()
 
     def _index_from_mouse_event(self, obj: object, event) -> QModelIndex | None:

@@ -149,6 +149,7 @@ def update_plan_table_height(window) -> None:
 def configure_experiment_control_plan_table(window) -> ExperimentPlanTableModel:
     table = window.plan_table
     model = ExperimentPlanTableModel(list(window.PLAN_COLUMNS), window)
+    model.set_undo_stack(getattr(window, "undo_stack", None))
     window._plan_model = model
     table.setModel(model)
     configure_experiment_control_plan_view(window, table, model)

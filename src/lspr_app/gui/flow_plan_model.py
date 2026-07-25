@@ -25,6 +25,7 @@ from lspr_app.domain.pump_plan import (
 from lspr_app.device.reglo_icc import PUMP_DISPLAY_MAX_LENGTH
 from lspr_app.gui.experiment_control_builders import direction_glyph
 from lspr_app.gui.ui_helpers import make_compact_spinbox
+from lspr_app.gui.undo_support import push_snapshot
 
 
 def _safe_color_name(color: str) -> str:
@@ -45,6 +46,7 @@ class ExperimentPlanTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._headers = list(headers)
         self._steps: list[PumpPlanStep] = []
+        self._undo_stack = None
         self._tube_mm_by_channel: list[float] = [0.25] * ACTIVE_PUMP_CHANNELS
         self._switch_solution_labels: list[str] = ["empty"] * 12
         self._color_palette_entries: list[tuple[str, str]] = []
@@ -252,10 +254,12 @@ class ExperimentPlanTableModel(QAbstractTableModel):
             return False
         step = deepcopy(self._steps[row])
         changed = False
+        field_label = "value"
 
         if column == 1:
             step.duration_s = max(self._display_to_seconds(float(value)), 0.0)
             changed = True
+            field_label = "duration"
         else:
             flow_start = 4
             channel_count = ACTIVE_PUMP_CHANNELS
@@ -266,9 +270,11 @@ class ExperimentPlanTableModel(QAbstractTableModel):
                 if field == 0:
                     step.channels[channel_index].flow_ul_min = max(round(float(value)), 0)
                     changed = True
+                    field_label = f"CH{channel_index + 1} flow"
                 elif field == 1:
                     step.channels[channel_index].direction = "CCW" if str(value).upper() == "CCW" else "CW"
                     changed = True
+                    field_label = f"CH{channel_index + 1} direction"
             else:
                 valve_column = flow_start + channel_count * 3
                 switch_column = valve_column + 1
@@ -277,29 +283,52 @@ class ExperimentPlanTableModel(QAbstractTableModel):
                 if column == valve_column:
                     step.valve = "Close" if str(value).strip().lower() == "close" else "Open"
                     changed = True
+                    field_label = "valve"
                 elif column == switch_column:
                     try:
                         step.switch_position = max(min(int(value), 12), 1)
                     except (TypeError, ValueError):
                         step.switch_position = 1
                     changed = True
+                    field_label = "switch"
                 elif column == color_column:
                     color = _safe_color_name(str(value))
                     step.color = color or "#4E79A7"
                     changed = True
+                    field_label = "color"
                 elif column == description_column:
                     step.description = str(value or "").strip()
                     changed = True
+                    field_label = "comment"
 
         if not changed:
             return False
 
-        self._steps[row] = step
-        self._steps = recompute_plan_timing(self._steps)
+        before = deepcopy(self._steps)
+        after = list(self._steps)
+        after[row] = step
+        after = recompute_plan_timing(after)
+
+        if self._undo_stack is not None:
+            push_snapshot(self._undo_stack, f"Edit step {step.step} {field_label}", before, after, apply=self._apply_steps_snapshot)
+        else:
+            self._apply_steps_snapshot(after)
+        return True
+
+    def set_undo_stack(self, undo_stack) -> None:
+        self._undo_stack = undo_stack
+
+    def _apply_steps_snapshot(self, steps: list[PumpPlanStep]) -> None:
+        """Replace the full step list and repaint - the shared apply used both
+        for a normal setData() commit and for undo/redo replay of it, so both
+        paths stay in sync. Deliberately not a full model reset (unlike
+        set_steps()): reusing the model's own index/selection-preserving
+        dataChanged emit keeps the current cell/selection intact across an
+        undo, matching what a live edit already does."""
+        self._steps = steps
         top_left = self.index(0, 0)
         bottom_right = self.index(max(len(self._steps) - 1, 0), max(self.columnCount() - 1, 0))
         self.dataChanged.emit(top_left, bottom_right, [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole, Qt.ItemDataRole.ToolTipRole, Qt.ItemDataRole.TextAlignmentRole])
-        return True
 
     def set_steps(self, steps: list[PumpPlanStep]) -> None:
         self.set_flow_plan(to_core_experiment_plan(steps))

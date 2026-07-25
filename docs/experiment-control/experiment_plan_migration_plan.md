@@ -22,7 +22,9 @@ The long-term goal is a `QTableView` + model/view implementation with delegates 
 - Less memory usage because the view does not own one widget per cell
 - Cleaner separation between data, presentation, and hardware logic
 - Easier caching of derived values such as timing, labels, and color text
-- Better foundation for future features like sorting, filtering, undo/redo, and batch editing
+- Better foundation for future features like sorting, filtering, and batch editing
+  (undo/redo has since been implemented on top of this architecture - see
+  gui/undo_support.py and the "Undo/Redo" section in table_behavior.md)
 
 ## When To Consider Doing It
 

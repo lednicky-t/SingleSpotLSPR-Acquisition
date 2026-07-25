@@ -35,6 +35,17 @@ def build_menu_bar(window) -> QMenuBar:
     exit_action.setShortcut(QKeySequence(QKeySequence.StandardKey.Quit))
     exit_action.triggered.connect(window.close)
 
+    # ── Edit ─────────────────────────────────────────────────────────────────
+    edit_menu = menu_bar.addMenu("Edit")
+    undo_action = window.undo_stack.createUndoAction(menu_bar, "Undo")
+    undo_action.setShortcut(QKeySequence(QKeySequence.StandardKey.Undo))
+    edit_menu.addAction(undo_action)
+    redo_action = window.undo_stack.createRedoAction(menu_bar, "Redo")
+    redo_action.setShortcut(QKeySequence(QKeySequence.StandardKey.Redo))
+    edit_menu.addAction(redo_action)
+    window._undo_action = undo_action
+    window._redo_action = redo_action
+
     # ── View ──────────────────────────────────────────────────────────────────
     view_menu = menu_bar.addMenu("View")
     view_menu_actions = {"top_view": {}}

@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - optional dependency guard
     yaml = None
 
 from PyQt6.QtCore import QByteArray, QRect, QSize, QThreadPool, QTimer, Qt, QEvent, QModelIndex, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap, QUndoStack
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -112,6 +112,7 @@ from lspr_app.gui.icon_helpers import flow_tabler_icon, tint_tabler_icon, transp
 from lspr_app.gui.panel_help import make_help_button
 from lspr_app.gui.panel_help_text import EXPERIMENT_CONTROL_BODY, EXPERIMENT_CONTROL_TITLE, EXPERIMENT_CONTROL_TOOLTIP
 from lspr_app.gui.ui_helpers import make_compact_spinbox
+from lspr_app.gui.undo_support import push_snapshot
 from lspr_app.storage.app_config import load_app_setting, save_app_setting, save_window_ui_state
 from lspr_io import (
     build_legacy_experiment_plan_row_table,
@@ -176,8 +177,14 @@ class ExperimentControlWindow(QWidget):
         capabilities: ExperimentControlCapabilities | None = None,
         backend: ExperimentControlBackend | None = None,
         parent: QWidget | None = None,
+        undo_stack: QUndoStack | None = None,
     ) -> None:
         super().__init__(parent)
+        # Shared with MainWindow when embedded in the real app (see
+        # main_window_lifecycle.py) so Ctrl+Z has one continuous history across
+        # the whole app. Falls back to a private stack so this widget still
+        # works when constructed standalone (tests, tools).
+        self.undo_stack = undo_stack if undo_stack is not None else QUndoStack(self)
         self._bootstrap_t0 = perf_counter()
         self._bootstrap_batches_logged = 0
         self._ui_state = ui_state
@@ -2190,12 +2197,14 @@ class ExperimentControlWindow(QWidget):
 
     def _edit_pump_display_settings(self, anchor: QWidget | None = None) -> None:
         dialogs = ExperimentControlDialogs(self, self._theme_palette(), self._contrast_text_color, self._tint_icon)
-        updated = dialogs.edit_pump_display_settings(
-            self.step_comment_edit, self._pump_display_enabled, self._pump_display_highlight_enabled, anchor
-        )
+        before = (self._pump_display_enabled, self._pump_display_highlight_enabled)
+        updated = dialogs.edit_pump_display_settings(self.step_comment_edit, before[0], before[1], anchor)
         if updated is None:
             return
-        self._pump_display_enabled, self._pump_display_highlight_enabled = updated
+        push_snapshot(self.undo_stack, "Pump display settings", before, updated, apply=self._apply_pump_display_settings)
+
+    def _apply_pump_display_settings(self, value: tuple[bool, bool]) -> None:
+        self._pump_display_enabled, self._pump_display_highlight_enabled = value
         self._update_step_comment_display_button_icon()
         self.save_ui_state()
         # This is a global setting (applies to every step), not a per-row edit, so there's

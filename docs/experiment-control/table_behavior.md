@@ -79,6 +79,25 @@ The table should display the current values immediately after those tools change
 - In edit mode, multi-cell and multi-row selection should still be possible.
 - When the active runtime row is edited during a running measurement, the changed device parameters should take effect immediately and the runtime log should record the change.
 
+## Undo/Redo
+
+- Ctrl+Z / Ctrl+Shift+Z (Edit menu, or the shortcuts) undo and redo cell edits, paste, row
+  add/duplicate/remove/move, and the pump-display settings toggle.
+- This is one shared history for the whole app (see `gui/undo_support.py`), not a table-only
+  feature - the same Ctrl+Z also undoes changes to the main window's always-visible
+  acquisition/processing controls (integration time, averages, dark/nonlinearity correction,
+  wavelength range, baseline, smoothing, fit settings, ...). It's built on Qt's
+  `QUndoStack`/`QUndoCommand`, owned by `MainWindow` (`window.undo_stack`) and shared with the
+  experiment control window and its plan-table model.
+- Each undo/redo command snapshots the whole relevant state (the plan's full step list, or a
+  settings dataclass) before and after, rather than diffing a single field - editing one step's
+  duration recomputes every other step's start/end time, so only a full snapshot guarantees an
+  exact restore.
+- History size is configurable in Preferences ("Undo history size" under Performance, default 50).
+- Continuous controls (spin boxes) debounce: a drag or a burst of wheel-scroll ticks becomes one
+  undo step once you pause, not one per tick. Discrete controls (checkboxes, combo boxes) commit
+  immediately since there's no "drag" to coalesce.
+
 ## Persistence
 
 The table should preserve session state across restarts:
