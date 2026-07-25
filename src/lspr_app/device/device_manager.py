@@ -572,12 +572,14 @@ class DeviceCommunicationService:
     def ensure_default_profiles(self) -> None:
         with self._device_lock("ensure_default_profiles"):
             _default = {"source": "default"}
+            # Only the 3 canonical devices (see device_lifecycle._DEVICE_LABEL) are ever
+            # driven by the experiment-control pump plan / step runner. Extra profiles
+            # (a second pump, a second switch, etc.) are a real but uncommon setup - the
+            # user creates those explicitly via the Device Manager's deep-debug tools,
+            # they are not auto-seeded here.
             defaults = (
                 new_device_profile(label="pump_1", type="pump", driver="reglo_icc", role="sample_pump", display_name="Main Pump", metadata=_default),
-                new_device_profile(label="pump_2", type="pump", driver="reglo_icc", role="aux_pump", display_name="Aux Pump", metadata=_default),
-                new_device_profile(label="pump_3", type="pump", driver="reglo_icc", role="waste_pump", display_name="Waste Pump", metadata=_default),
                 new_device_profile(label="switch_1", type="switch", driver="auto", role="inlet_switch", display_name="Inlet Switch", metadata=_default),
-                new_device_profile(label="switch_2", type="switch", driver="auto", role="outlet_switch", display_name="Outlet Switch", metadata=_default),
                 new_device_profile(label="selector_1", type="selector", driver="amf-mswitch", role="main_selector", display_name="Main Selector", metadata=_default),
             )
             with self._state("ensure_default_profiles_commit"):

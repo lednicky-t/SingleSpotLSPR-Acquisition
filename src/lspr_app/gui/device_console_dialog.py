@@ -31,6 +31,9 @@ from lspr_app.device.probe_diagnostics import snapshot_port_probe_events
 from lspr_app.device.reglo_icc import RegloICCClient, is_probable_reglo_port
 from lspr_app.device.serial_controllers import SerialController, controller_port_priority
 from lspr_app.gui.device_lifecycle_task import DeviceConnectTask, DeviceDisconnectTask, device_io_pool
+from lspr_app.storage.app_config import load_app_setting, save_app_setting
+
+_DEEP_DEBUG_SETTING_KEY = "device_manager_deep_debug"
 
 # Connect/Disconnect for these three labels must go through DeviceLifecycleController,
 # not DeviceCommunicationService directly - it is the single owner of connect/disconnect
@@ -207,13 +210,22 @@ class DeviceManagerDialog(QDialog):
         self._log_output.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
 
         self._build_connected_tab()
-        self._build_profiles_tab()
-        self._build_probe_assign_tab()
-        self._build_command_tab()
         self._build_log_tab()
-        self._build_port_list_tab()
 
         self._connected_tab_index = 0
+
+        # Advanced/developer tools live behind "Deep debug mode" (off by default) -
+        # a raw profile editor, manual port probe/assign, a raw hardware command
+        # console, and the full OS serial-port list are not needed for normal
+        # connect/disconnect use and are easy to misuse (e.g. Commands sends raw
+        # pump/switch commands straight to hardware, bypassing the experiment plan).
+        self._debug_tab_specs = [
+            self._build_profiles_tab(),
+            self._build_probe_assign_tab(),
+            self._build_command_tab(),
+            self._build_port_list_tab(),
+        ]
+        self._debug_tabs_visible = False
 
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(2000)
@@ -222,11 +234,20 @@ class DeviceManagerDialog(QDialog):
 
         self._refresh_button = QPushButton("Refresh all")
         self._refresh_button.clicked.connect(self.refresh_all)
+        self._deep_debug_check = QCheckBox("Deep debug mode", self)
+        self._deep_debug_check.setToolTip(
+            "Show advanced/developer tools: raw profile editor, manual port probe/assign,\n"
+            "a raw hardware command console, and the full serial port list.\n"
+            "Leave this off for normal day-to-day use - these can send commands straight\n"
+            "to hardware and bypass the experiment plan."
+        )
+        self._deep_debug_check.toggled.connect(self._set_deep_debug_enabled)
         self._close_button = QPushButton("Close")
         self._close_button.clicked.connect(self.close)
 
         button_row = QHBoxLayout()
         button_row.addWidget(self._refresh_button)
+        button_row.addWidget(self._deep_debug_check)
         button_row.addStretch(1)
         button_row.addWidget(self._close_button)
 
@@ -235,7 +256,26 @@ class DeviceManagerDialog(QDialog):
         layout.addLayout(button_row)
         self.setLayout(layout)
 
+        self._deep_debug_check.setChecked(bool(load_app_setting(_DEEP_DEBUG_SETTING_KEY, False)))
+
         self.refresh_all()
+
+    def _set_deep_debug_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._debug_tabs_visible:
+            return
+        self._debug_tabs_visible = enabled
+        if enabled:
+            for page, title in self._debug_tab_specs:
+                self._tabs.addTab(page, title)
+            self.refresh_profiles()
+            self.refresh_port_list()
+        else:
+            for page, _title in self._debug_tab_specs:
+                index = self._tabs.indexOf(page)
+                if index != -1:
+                    self._tabs.removeTab(index)
+        save_app_setting(_DEEP_DEBUG_SETTING_KEY, enabled)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -300,7 +340,7 @@ class DeviceManagerDialog(QDialog):
         page = self._wrap_layout(layout)
         self._tabs.addTab(page, "Connected devices")
 
-    def _build_profiles_tab(self) -> None:
+    def _build_profiles_tab(self) -> tuple[QWidget, str]:
         self._profiles_table.setHorizontalHeaderLabels(
             ["Label", "Type", "Driver", "Endpoint", "Role", "Display name", "Enabled", "Fingerprint"]
         )
@@ -360,9 +400,9 @@ class DeviceManagerDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(self._profiles_table, 1)
         page = self._wrap_layout(layout)
-        self._tabs.addTab(page, "Profiles")
+        return page, "Profiles"
 
-    def _build_port_list_tab(self) -> None:
+    def _build_port_list_tab(self) -> tuple[QWidget, str]:
         self._port_list_table.setHorizontalHeaderLabels(["Port", "Description", "HWID", "Assignment", "Owner", "Last probe"])
         self._port_list_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._port_list_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -379,9 +419,9 @@ class DeviceManagerDialog(QDialog):
         layout.addLayout(row)
         layout.addWidget(self._port_list_table, 1)
         page = self._wrap_layout(layout)
-        self._tabs.addTab(page, "Port list")
+        return page, "Port list"
 
-    def _build_probe_assign_tab(self) -> None:
+    def _build_probe_assign_tab(self) -> tuple[QWidget, str]:
         self._probe_port_combo = QComboBox(self)
         self._probe_type_combo = QComboBox(self)
         for label, value in (
@@ -417,9 +457,9 @@ class DeviceManagerDialog(QDialog):
         layout.addLayout(row)
         layout.addWidget(self._probe_result, 1)
         page = self._wrap_layout(layout)
-        self._tabs.addTab(page, "Probe / assign")
+        return page, "Probe / assign"
 
-    def _build_command_tab(self) -> None:
+    def _build_command_tab(self) -> tuple[QWidget, str]:
         self._command_label_combo = QComboBox(self)
         self._command_type_combo = QComboBox(self)
         self._command_payload = QLineEdit(self)
@@ -456,7 +496,7 @@ class DeviceManagerDialog(QDialog):
         layout.addWidget(self._send_command_button)
         layout.addWidget(self._command_result, 1)
         page = self._wrap_layout(layout)
-        self._tabs.addTab(page, "Commands")
+        return page, "Commands"
 
     def _build_log_tab(self) -> None:
         self._log_refresh_button = QPushButton("Refresh")
