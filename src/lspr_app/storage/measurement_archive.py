@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import h5py
 import numpy as np
 
 from lspr_app.storage.output_paths import recording_experiment_base_dir_for
@@ -140,117 +138,6 @@ def close_session_writer(window: Any) -> None:
     window._metric_archive_started_at = None
 
 
-# ---------------------------------------------------------------------------
-# Legacy helpers — kept for backwards compatibility
-# ---------------------------------------------------------------------------
-
-def ensure_temp_measurement_path(window: Any) -> Path:
-    """Return the session file path (legacy name kept for callers that use it)."""
-    return _session_file_path(window)
-
-
-def ensure_temp_measurement_writer(window: Any) -> Any:
-    """Return the session writer if one already exists, otherwise fall back to the
-    lightweight metric-only writer so callers that invoke this before a spectrum
-    is available still get *something* usable."""
-    writer = getattr(window, _SESSION_WRITER_ATTR, None) or getattr(window, _WRITER_ATTR, None)
-    if writer is not None:
-        return writer
-
-    path = _session_file_path(window)
-    writer = _FallbackTempMeasurementWriter.open(path)
-
-    setattr(window, _WRITER_ATTR, writer)
-    window._metric_archive_path = path
-    setattr(window, _WRITER_TEMP_ATTR, True)
-    return writer
-
-
 def close_temp_measurement_writer(window: Any) -> None:
     """Close the session writer (legacy name)."""
     close_session_writer(window)
-
-
-def metric_archive_path(window: Any) -> Path:
-    return _session_file_path(window)
-
-
-@dataclass
-class _FallbackTempMeasurementWriter:
-    path: Path
-    handle: h5py.File
-
-    @classmethod
-    def open(cls, path: Path) -> "_FallbackTempMeasurementWriter":
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = h5py.File(path, "a")
-        processed = handle.require_group("processed").require_group("metrics")
-        if "acquired_at_unix_ms" not in processed:
-            processed.create_dataset("acquired_at_unix_ms", shape=(0,), maxshape=(None,), dtype="f8")
-        handle.require_group("raw").require_group("events")
-        handle.require_group("device_state")
-        handle.require_group("control")
-        return cls(path=path, handle=handle)
-
-    def _append_generic_event(self, group_path: str, payload: dict[str, Any]) -> None:
-        group = self.handle.require_group(group_path)
-        dataset_name = "events"
-        if dataset_name not in group:
-            dt = h5py.string_dtype(encoding="utf-8")
-            group.create_dataset(dataset_name, shape=(0,), maxshape=(None,), dtype=dt)
-        ds = group[dataset_name]
-        row = np.array([str(payload)], dtype=ds.dtype)
-        size = int(ds.shape[0])
-        ds.resize((size + 1,))
-        ds[size] = row[0]
-
-    def append_metrics(self, rows: list[dict[str, Any]]) -> None:
-        metrics = self.handle["processed"]["metrics"]
-        for row in rows:
-            if not isinstance(row, dict):
-                try:
-                    row = dict(row)
-                except Exception:
-                    row = {}
-            acquired_at_unix_ms = row.get("acquired_at_unix_ms")
-            if acquired_at_unix_ms is None:
-                # Legacy callers may still pass the removed relative t_ms;
-                # accept it as a best-effort fallback rather than dropping
-                # the row's timing entirely.
-                acquired_at_unix_ms = row.get("t_ms")
-            if acquired_at_unix_ms is None:
-                acquired_at_unix_ms = float(metrics["acquired_at_unix_ms"].shape[0]) * 1000.0
-            ds = metrics["acquired_at_unix_ms"]
-            size = int(ds.shape[0])
-            ds.resize((size + 1,))
-            ds[size] = float(acquired_at_unix_ms)
-            for key, value in row.items():
-                if key in {"t_ms", "acquired_at_unix_ms", "sample_index"}:
-                    continue
-                if key not in metrics:
-                    metrics.create_dataset(key, shape=(0,), maxshape=(None,), dtype="f8")
-                ds_key = metrics[key]
-                ds_size = int(ds_key.shape[0])
-                ds_key.resize((ds_size + 1,))
-                try:
-                    ds_key[ds_size] = float(np.asarray(value).item())
-                except Exception:
-                    ds_key[ds_size] = np.nan
-        self.handle.flush()
-
-    def append_batch(self, batch: list[Any], *args: Any, **kwargs: Any) -> None:
-        payload = {
-            "kind": "raw_batch",
-            "batch_size": len(batch),
-            "args": [str(arg) for arg in args],
-            "kwargs": {key: str(value) for key, value in kwargs.items()},
-        }
-        self._append_generic_event("raw", payload)
-        self.handle.flush()
-
-    def flush(self) -> None:
-        self.handle.flush()
-
-    def close(self) -> None:
-        self.handle.flush()
-        self.handle.close()

@@ -31,9 +31,6 @@ def apply_sensorgram_metric_selection(window, visible_modes: list[str] | set[str
     window._sensorgram_metric_primary_mode = primary
     current_stats = normalize_sensorgram_metric_name(getattr(window, "_trace_stats_metric_name", ordered[0]))
     window._trace_stats_metric_name = current_stats if current_stats in ordered else ordered[0]
-    from lspr_app.gui.main_window_processing import sync_legacy_metric_widgets_from_state
-
-    sync_legacy_metric_widgets_from_state(window)
     if hasattr(window, "_update_trace_stats"):
         window._update_trace_stats()
     if save:

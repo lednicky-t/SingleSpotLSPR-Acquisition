@@ -227,7 +227,3 @@ def refresh_hw_device_status_strip(window) -> None:
         tooltip = device_status_tooltip(base_text, state, port_name=port_name, detail=detail)
         icon_label.setToolTip(tooltip)
         text_label.setToolTip(tooltip)
-
-
-def sync_window_control_icons(window) -> None:
-    return

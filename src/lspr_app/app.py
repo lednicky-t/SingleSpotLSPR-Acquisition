@@ -6,8 +6,6 @@ import os
 import socket
 import sys
 import traceback
-from contextlib import redirect_stderr, redirect_stdout
-from io import StringIO
 from pathlib import Path
 from time import perf_counter
 
@@ -523,24 +521,6 @@ def create_spectrometer(*, force_simulator: bool = False):
         return OceanSpectrometer()
     except (ImportError, SpectrometerError):
         return SimulatedSpectrometer()
-
-
-def discover_pump():
-    from lspr_app.device.reglo_icc import RegloICCClient, is_probable_reglo_port
-
-    sink = StringIO()
-    with redirect_stdout(sink), redirect_stderr(sink):
-        ports = [port for port in RegloICCClient.list_ports() if is_probable_reglo_port(port)]
-        ordered = sorted(
-            ports,
-            key=lambda port: ("265C:0001" not in port.hwid.upper(), port.device),
-        )
-        for port in ordered:
-            try:
-                return RegloICCClient.probe_port(port.device)
-            except Exception:
-                continue
-    return None
 
 
 def _attach_startup_file_logging() -> tuple[logging.Handler | None, DiagnosticsConfig]:

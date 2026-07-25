@@ -4519,19 +4519,6 @@ class ExperimentControlWindow(QWidget):
     def _update_plan_detail_toggle_icon(self) -> None:
         update_plan_detail_toggle_icon(self)
 
-    # Legacy compatibility shims kept while the table restart is being validated.
-    def _set_experiment_control_table_row_items(self, row_index: int, step: PumpPlanStep) -> None:
-        _ = row_index, step
-
-    def _set_experiment_control_table_row_widgets(self, row_index: int, step: PumpPlanStep) -> None:
-        _ = row_index, step
-
-    def _set_experiment_control_table_row(self, row_index: int, step: PumpPlanStep, *, with_widgets: bool = True) -> None:
-        _ = row_index, step, with_widgets
-
-    def _apply_experiment_control_row_background(self, row_index: int) -> None:
-        _ = row_index
-
     def _populate_experiment_control_table(self, steps: list[PumpPlanStep], selected_row: int | None = None) -> None:
         if selected_row is None:
             selected_row = self._selected_experiment_control_row()
@@ -4562,29 +4549,6 @@ class ExperimentControlWindow(QWidget):
             self.plan_table.clearSelection()
         self._fit_plan_table_columns_to_viewport()
         self._update_plan_table_height()
-
-    def _set_item(self, row: int, column: int, text: str, editable: bool = True, selectable: bool = True) -> None:
-        index = self._plan_model.index(row, column)
-        if index.isValid():
-            self._plan_model.setData(index, text, Qt.ItemDataRole.EditRole)
-
-    def _set_time_item(self, row: int, column: int, seconds: float, editable: bool) -> None:
-        _ = editable
-        index = self._plan_model.index(row, column)
-        if index.isValid():
-            self._plan_model.setData(index, self._seconds_to_display(float(seconds)), Qt.ItemDataRole.EditRole)
-
-    def _get_time_item_seconds(self, row: int, column: int) -> float:
-        step = self._plan_model.step_at(row)
-        if step is None:
-            return 0.0
-        if column == 1:
-            return float(step.duration_s)
-        if column == 2:
-            return float(step.start_s)
-        if column == 3:
-            return float(step.end_s)
-        return 0.0
 
     def _read_experiment_control_steps(self) -> list[PumpPlanStep]:
         if self._experiment_control_bootstrap_pending_steps:

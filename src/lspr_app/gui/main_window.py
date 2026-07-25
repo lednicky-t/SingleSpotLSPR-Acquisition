@@ -14,7 +14,6 @@ import numpy as np
 import pyqtgraph as pg
 
 from PyQt6.QtCore import QPoint, QSize, Qt, QThreadPool, QTimer, QUrl, QRectF, pyqtSignal
-from PyQt6.QtCore import QEvent
 from PyQt6.QtGui import (
     QDesktopServices,
     QFont,
@@ -94,7 +93,7 @@ from lspr_app.gui.icon_helpers import (
     transport_icon,
     tint_tabler_icon,
 )
-from lspr_app.gui.main_window_titlebar import build_title_bar, refresh_hw_device_status_strip, sync_window_control_icons
+from lspr_app.gui.main_window_titlebar import build_title_bar, refresh_hw_device_status_strip
 from lspr_app.gui.main_window_panels import (
     build_simulation_page,
     build_spectrometer_page,
@@ -1197,22 +1196,6 @@ class MainWindow(QMainWindow):
         self.analysis_resolution_spin.setToolTip(
             "Resolution used for peak and centroid analysis. Lower values improve sub-sample tracking but cost more CPU."
         )
-        self.metric_mode_combo = QComboBox(self)
-        self.metric_mode_combo.addItems(["smoothed_max", "poly_max", "gaussian_center", "centroid"])
-        self.metric_mode_combo.setToolTip("Choose which spectrum tracking metric is shown in the metric plot and summary.")
-        self.trace_max_check = QCheckBox("Max", self)
-        self.trace_centroid_check = QCheckBox("Centroid", self)
-        self.trace_poly_check = QCheckBox("Poly", self)
-        self.trace_gaussian_check = QCheckBox("Gauss", self)
-        self.trace_max_check.setObjectName("traceMaxCheck")
-        self.trace_centroid_check.setObjectName("traceCentroidCheck")
-        self.trace_poly_check.setObjectName("tracePolyCheck")
-        self.trace_gaussian_check.setObjectName("traceGaussianCheck")
-        self.trace_max_check.setToolTip("Show the smoothed maximum trace metric.")
-        self.trace_centroid_check.setToolTip("Show the centroid trace metric.")
-        self.trace_poly_check.setToolTip("Show the polynomial-fit peak trace metric.")
-        self.trace_gaussian_check.setToolTip("Show the Gaussian-fit peak trace metric.")
-
         self.save_processing_button = self._make_frameless_icon_button(
             storage_save_icon(),
             "Save the current processing configuration to an HDF5 file.",
@@ -2777,7 +2760,6 @@ class MainWindow(QMainWindow):
         self._title_bar_widget = title_widget
         self.setMenuWidget(title_widget)
         refresh_hw_device_status_strip(self)
-        sync_window_control_icons(self)
 
     def _update_window_mode_label(self) -> None:
         update_window_mode_label(self)
@@ -2789,8 +2771,6 @@ class MainWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     def changeEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
-        if event.type() == QEvent.Type.WindowStateChange:
-            sync_window_control_icons(self)
         super().changeEvent(event)
 
     def _show_quick_help_dialog(self) -> None:
@@ -3434,7 +3414,6 @@ class MainWindow(QMainWindow):
             self.showNormal()
         else:
             self.showMaximized()
-        sync_window_control_icons(self)
 
     def _update_freeze_button_icon(self) -> None:
         if not hasattr(self, "freeze_plots_button"):

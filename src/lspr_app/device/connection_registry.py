@@ -65,10 +65,6 @@ def release_port(port: str, owner: str | None = None) -> None:
             _PORT_OWNERS.pop(port_key, None)
 
 
-def clear_port(port: str) -> None:
-    release_port(port, None)
-
-
 def port_owners(port: str) -> tuple[str, ...]:
     port_key = str(port or "").strip()
     if not port_key:
@@ -76,15 +72,6 @@ def port_owners(port: str) -> tuple[str, ...]:
     with _LOCK:
         owners = _PORT_OWNERS.get(port_key, set())
         return tuple(sorted(owners))
-
-
-def port_owner_label(port: str) -> str:
-    owners = port_owners(port)
-    if not owners:
-        return ""
-    if len(owners) == 1:
-        return owners[0]
-    return ", ".join(owners)
 
 
 def snapshot_port_ownership() -> dict[str, str]:

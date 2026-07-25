@@ -133,32 +133,6 @@ def _nearest_sorted_index(values: np.ndarray, target: float) -> int:
     return right_index if right_distance < left_distance else left_index
 
 
-def _peak_preserving_downsample_indices(y: np.ndarray, target_bins: int) -> np.ndarray:
-    if target_bins <= 0 or len(y) == 0:
-        return np.empty(0, dtype=np.int64)
-    if len(y) <= target_bins:
-        return np.arange(len(y), dtype=np.int64)
-
-    bins = max(int(target_bins), 1)
-    edges = np.linspace(0, len(y), num=bins + 1, dtype=np.int64)
-    keep: list[int] = []
-    for start, stop in zip(edges[:-1], edges[1:]):
-        if stop <= start:
-            continue
-        segment = y[start:stop]
-        finite = np.isfinite(segment)
-        if not np.any(finite):
-            keep.append(start + (stop - start - 1) // 2)
-            continue
-        finite_segment = segment[finite]
-        finite_positions = np.flatnonzero(finite) + start
-        keep.append(int(finite_positions[int(np.argmin(finite_segment))]))
-        keep.append(int(finite_positions[int(np.argmax(finite_segment))]))
-    if not keep:
-        return np.arange(len(y), dtype=np.int64)
-    return np.unique(np.asarray(keep, dtype=np.int64))
-
-
 def _curve_data_arrays(curve) -> tuple[np.ndarray, np.ndarray]:
     x_values = getattr(curve, "xData", None)
     y_values = getattr(curve, "yData", None)
@@ -467,36 +441,6 @@ def spectrum_render_cache_key(
         bool(show_gaussian),
         spectrum_tracking_mode,
     )
-
-
-def downsample_sensorgram_history_for_view(
-    history: list[tuple[float, np.ndarray]],
-    *,
-    view_x_min: float | None = None,
-    view_x_max: float | None = None,
-    max_rows: int = 2000,
-    view_height_px: float | None = None,
-    oversample: float = 2.0,
-    minimum_rows: int = 256,
-    enabled: bool = True,
-) -> list[tuple[float, np.ndarray]]:
-    if not history:
-        return history
-    if view_x_min is not None and view_x_max is not None and view_x_max > view_x_min:
-        visible = [item for item in history if view_x_min <= float(item[0]) <= view_x_max]
-        if visible:
-            history = visible
-    if not enabled:
-        return history
-    if view_height_px is not None and view_height_px > 0:
-        target_rows = max(minimum_rows, int(view_height_px * oversample))
-        max_rows = min(max_rows, target_rows)
-    if max_rows <= 0 or len(history) <= max_rows:
-        return history
-
-    indices = np.linspace(0, len(history) - 1, num=max_rows, dtype=np.int64)
-    indices = np.unique(indices)
-    return [history[int(index)] for index in indices]
 
 
 def flush_deferred_ui_refreshes(window) -> None:

@@ -178,8 +178,4 @@ def steps_to_hdf5_rows(
     return table.rows
 
 
-to_core_flow_step = to_core_experiment_step
 from_core_flow_step = from_core_experiment_step
-to_core_flow_plan = to_core_experiment_plan
-recompute_experiment_plan_timing = recompute_plan_timing
-steps_to_experiment_plan_rows = steps_to_hdf5_rows

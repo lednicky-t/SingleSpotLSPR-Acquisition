@@ -136,46 +136,11 @@ def sensorgram_metric_selection(window) -> tuple[list[str], str]:
         visible_set = {normalize_sensorgram_metric_name(mode) for mode in visible_modes}
         visible = [mode for mode in order if mode in visible_set]
     if not visible:
-        visible = [mode for mode in order if mode in selected_trace_metrics_from_legacy_widgets(window)]
-    if not visible:
         visible = [order[0] if order else "smoothed_max"]
     primary = normalize_sensorgram_metric_name(primary_mode)
     if primary not in visible:
         primary = visible[0]
     return visible, primary
-
-
-def selected_trace_metrics_from_legacy_widgets(window) -> list[str]:
-    selected: list[str] = []
-    if getattr(window, "trace_max_check", None) is not None and window.trace_max_check.isChecked():
-        selected.append("smoothed_max")
-    if getattr(window, "trace_centroid_check", None) is not None and window.trace_centroid_check.isChecked():
-        selected.append("centroid")
-    if getattr(window, "trace_poly_check", None) is not None and window.trace_poly_check.isChecked():
-        selected.append("poly_max")
-    if getattr(window, "trace_gaussian_check", None) is not None and window.trace_gaussian_check.isChecked():
-        selected.append("gaussian_center")
-    return selected or ["smoothed_max"]
-
-
-def sync_legacy_metric_widgets_from_state(window) -> None:
-    visible, primary = sensorgram_metric_selection(window)
-    visible_set = set(visible)
-    if getattr(window, "metric_mode_combo", None) is not None:
-        window.metric_mode_combo.blockSignals(True)
-        window.metric_mode_combo.setCurrentText(primary)
-        window.metric_mode_combo.blockSignals(False)
-    for mode, check in (
-        ("smoothed_max", getattr(window, "trace_max_check", None)),
-        ("centroid", getattr(window, "trace_centroid_check", None)),
-        ("poly_max", getattr(window, "trace_poly_check", None)),
-        ("gaussian_center", getattr(window, "trace_gaussian_check", None)),
-    ):
-        if check is None:
-            continue
-        check.blockSignals(True)
-        check.setChecked(mode in visible_set)
-        check.blockSignals(False)
 
 
 def current_processing_settings(window) -> ProcessingSettings:
@@ -241,7 +206,6 @@ def apply_processing_settings_to_widgets(window, settings: ProcessingSettings) -
     window._sensorgram_metric_visible_modes = set(visible_modes)
     window._sensorgram_metric_primary_mode = primary_mode
     window._trace_stats_metric_name = primary_mode
-    sync_legacy_metric_widgets_from_state(window)
     sync_processing_crop_parameter_widget(window)
     window._suspend_processing_autosave = False
 

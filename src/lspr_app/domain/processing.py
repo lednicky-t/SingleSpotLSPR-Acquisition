@@ -539,30 +539,6 @@ def _stable_polynomial_fit(
     return None, 0, None
 
 
-def _fit_polynomial_coefficients(
-    wavelengths: np.ndarray,
-    values: np.ndarray,
-    order: int,
-) -> list[float] | None:
-    if len(wavelengths) < 2 or order < 1:
-        return None
-    cleaned = _sanitize_curve_values(wavelengths, values)
-    if cleaned is None:
-        return None
-    wavelengths, values, _ = cleaned
-    low = float(wavelengths[0])
-    high = float(wavelengths[-1])
-    span = high - low
-    if not np.isfinite(span) or span <= 0:
-        return None
-    try:
-        poly = np.polynomial.Polynomial.fit(wavelengths, values, order)
-    except (np.linalg.LinAlgError, ValueError):
-        return None
-    coeffs = poly.convert().coef[::-1]
-    return coeffs.tolist()
-
-
 def _polynomial_peak_from_model(
     poly: np.polynomial.Polynomial,
     low: float,

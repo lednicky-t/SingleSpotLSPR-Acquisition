@@ -10,7 +10,7 @@ from time import perf_counter
 from copy import deepcopy
 
 from lspr_app.domain.pump_plan import to_core_experiment_plan
-from lspr_app.gui.main_window_processing import normalize_sensorgram_metric_name, sensorgram_metric_order, sync_legacy_metric_widgets_from_state
+from lspr_app.gui.main_window_processing import normalize_sensorgram_metric_name, sensorgram_metric_order
 from lspr_app.storage.app_config import load_app_setting, save_acquisition_state, save_window_ui_state
 from lspr_core import LAUNCH_PROFILE_CONTROL_EDITOR, LAUNCH_PROFILE_FULL, LAUNCH_PROFILE_SIMULATION, launch_profile_spec, DEFAULT_LAUNCH_PROFILE
 
@@ -775,7 +775,6 @@ def _restore_sensorgram_metric_state(window, ui_state: dict[str, object]) -> Non
             window._trace_stats_metric_name = current_stats if current_stats in visible else visible[0]
         elif not hasattr(window, "_trace_stats_metric_name") or normalize_sensorgram_metric_name(getattr(window, "_trace_stats_metric_name", visible[0])) not in visible:
             window._trace_stats_metric_name = visible[0]
-        sync_legacy_metric_widgets_from_state(window)
         if hasattr(window, "_update_trace_stats"):
             window._update_trace_stats()
     if isinstance(sensorgram_metric_colors, dict):
