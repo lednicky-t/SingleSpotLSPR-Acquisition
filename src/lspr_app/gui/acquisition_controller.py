@@ -823,6 +823,8 @@ def _reset_live_frame_telemetry(window) -> None:
 
 
 def start_live_acquisition(window) -> None:
+    # Session writer is initialized lazily on the first processed spectrum because
+    # the wavelength axis is not available yet - no eager creation here.
     if window._busy or window._live_active:
         return
     if window._live_worker is not None and window._live_worker.is_alive():
@@ -924,51 +926,55 @@ def start_live_acquisition(window) -> None:
 
 
 def stop_live_acquisition(window, message: str = "Live acquisition stopped.") -> None:
-    window._live_active = False
-    window._live_stop_event.set()
-    if hasattr(window, "_live_recording_timer"):
-        window._live_recording_timer.stop()
-    window._ui_task_scheduler.cancel("live_visual_refresh")
-    window._ui_task_scheduler.cancel("live_acquisition")
-    window._live_display_started_at = None
-    window._live_trace_started_at = None
-    window._trace_display_cursor_s = 0.0
-    _reset_live_frame_telemetry(window)
-    window._reset_live_accumulator()
-    window._live_result_queue_max_depth = None
-    window._live_processed_queue_max_depth = None
-    window._set_measurement_buttons_enabled(True)
-    window._set_manual_acquisition_buttons_enabled(True)
-    window.status_label.setText(message)
-    _flush_live_processing_logs(window)
-    window._request_deferred_ui_refresh(telemetry=True)
-    window._log_info(message)
-    window._update_window_mode_label()
-    if window._live_worker is not None and not window._live_worker.is_alive():
-        window._live_worker = None
-    if window._live_worker is not None:
-        try:
-            window._live_worker.stop()
-            window._live_worker.join(timeout=2.0)
-            if window._live_worker.is_alive():
-                window._log_warning("Live acquisition worker did not exit cleanly; terminating it.")
-                window._live_worker.terminate()
-                window._live_worker.join(timeout=1.0)
-        except Exception as exc:
-            window._log_warning(f"Live acquisition worker shutdown failed: {exc}")
-        window._live_worker = None
-    flush_live_recording_results(window)
-    if window._live_processing_worker is not None:
-        try:
-            window._live_processing_worker.join(timeout=0.25)
-        except Exception:
-            pass
-        if not window._live_processing_worker.is_alive():
-            window._live_processing_worker = None
-    _flush_live_processing_logs(window)
-    flush_live_recording_results(window)
-    window._live_recording_queue = None
-    _restore_spectrometer_backend_after_live(window)
+    try:
+        window._live_active = False
+        window._live_stop_event.set()
+        if hasattr(window, "_live_recording_timer"):
+            window._live_recording_timer.stop()
+        window._ui_task_scheduler.cancel("live_visual_refresh")
+        window._ui_task_scheduler.cancel("live_acquisition")
+        window._live_display_started_at = None
+        window._live_trace_started_at = None
+        window._trace_display_cursor_s = 0.0
+        _reset_live_frame_telemetry(window)
+        window._reset_live_accumulator()
+        window._live_result_queue_max_depth = None
+        window._live_processed_queue_max_depth = None
+        window._set_measurement_buttons_enabled(True)
+        window._set_manual_acquisition_buttons_enabled(True)
+        window.status_label.setText(message)
+        _flush_live_processing_logs(window)
+        window._request_deferred_ui_refresh(telemetry=True)
+        window._log_info(message)
+        window._update_window_mode_label()
+        if window._live_worker is not None and not window._live_worker.is_alive():
+            window._live_worker = None
+        if window._live_worker is not None:
+            try:
+                window._live_worker.stop()
+                window._live_worker.join(timeout=2.0)
+                if window._live_worker.is_alive():
+                    window._log_warning("Live acquisition worker did not exit cleanly; terminating it.")
+                    window._live_worker.terminate()
+                    window._live_worker.join(timeout=1.0)
+            except Exception as exc:
+                window._log_warning(f"Live acquisition worker shutdown failed: {exc}")
+            window._live_worker = None
+        flush_live_recording_results(window)
+        if window._live_processing_worker is not None:
+            try:
+                window._live_processing_worker.join(timeout=0.25)
+            except Exception:
+                pass
+            if not window._live_processing_worker.is_alive():
+                window._live_processing_worker = None
+        _flush_live_processing_logs(window)
+        flush_live_recording_results(window)
+        window._live_recording_queue = None
+        _restore_spectrometer_backend_after_live(window)
+    finally:
+        if not _is_recording_active(window):
+            close_temp_measurement_writer(window)
 
 
 def start_acquisition(window, kind: str) -> None:
@@ -1509,27 +1515,6 @@ def _reserve_unique_measurement_destination(destination: Path) -> Path:
 
 def _is_recording_active(window: Any) -> bool:
     return bool(getattr(window, "_measurement_active", False))
-
-
-_original_start_live_acquisition = start_live_acquisition
-
-
-def start_live_acquisition(*args: Any, **kwargs: Any):
-    # Session writer is initialized lazily on the first processed spectrum because
-    # the wavelength axis is not available yet.  No eager creation here.
-    return _original_start_live_acquisition(*args, **kwargs)
-
-
-_original_stop_live_acquisition = stop_live_acquisition
-
-
-def stop_live_acquisition(*args: Any, **kwargs: Any):
-    window = args[0] if args else kwargs.get("window")
-    try:
-        return _original_stop_live_acquisition(*args, **kwargs)
-    finally:
-        if window is not None and not _is_recording_active(window):
-            close_temp_measurement_writer(window)
 
 
 def auto_set_integration_time_for(window) -> None:
