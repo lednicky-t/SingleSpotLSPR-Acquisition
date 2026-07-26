@@ -18,7 +18,6 @@ dependencies = [
     "PyYAML",
     "scipy",
     "seabreeze",
-    "tabler-qicon",
     "platformdirs",
     "lspr-ui>=0.1.0",
     "lspr-core>=0.1.0",

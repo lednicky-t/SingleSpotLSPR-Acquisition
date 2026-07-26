@@ -27,8 +27,6 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate,
 )
 
-from tablerqicon import TablerQIcon
-
 from lspr_app.device.reglo_icc import PUMP_DISPLAY_MAX_LENGTH, sanitize_pump_display_text
 from lspr_app.domain.pump_plan import ACTIVE_PUMP_CHANNELS, PumpPlanStep
 from lspr_app.gui.experiment_control_plan_view import (
@@ -39,7 +37,7 @@ from lspr_app.gui.experiment_control_plan_view import (
     restore_experiment_control_pause_dialog_state,
     save_experiment_control_pause_dialog_state,
 )
-from lspr_app.gui.icon_helpers import flow_tabler_icon
+from lspr_app.gui.icon_helpers import flow_tabler_icon, tabler_icon
 
 
 class PaletteTableWidget(QTableWidget):
@@ -283,7 +281,7 @@ class ExperimentControlDialogs:
         button = QToolButton(parent)
         button.setObjectName("paletteDialogClose")
         button.setAutoRaise(True)
-        button.setIcon(self._tint_icon(TablerQIcon().get_qicon("x"), QColor("#e6ebf1")))
+        button.setIcon(self._tint_icon(tabler_icon("x"), QColor("#e6ebf1")))
         button.setIconSize(QSize(14, 14))
         button.setToolTip("Close")
         return button
@@ -1248,28 +1246,28 @@ class ExperimentControlDialogs:
         add_button.setObjectName("paletteRowActionButton")
         add_button.setAutoRaise(True)
         add_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        add_button.setIcon(self._tint_icon(TablerQIcon().get_qicon("plus"), QColor("#47a861")))
+        add_button.setIcon(self._tint_icon(tabler_icon("plus"), QColor("#47a861")))
         add_button.setIconSize(QSize(14, 14))
         add_button.setToolTip("Add a palette row")
         remove_button = QToolButton()
         remove_button.setObjectName("paletteRowActionButton")
         remove_button.setAutoRaise(True)
         remove_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        remove_button.setIcon(self._tint_icon(TablerQIcon.x, QColor("#b44a4a")))
+        remove_button.setIcon(self._tint_icon(tabler_icon("x"), QColor("#b44a4a")))
         remove_button.setIconSize(QSize(14, 14))
         remove_button.setToolTip("Remove the selected palette row")
         move_up_button = QToolButton()
         move_up_button.setObjectName("paletteRowActionButton")
         move_up_button.setAutoRaise(True)
         move_up_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        move_up_button.setIcon(self._tint_icon(TablerQIcon().get_qicon("chevron_up"), QColor("#e6ebf1")))
+        move_up_button.setIcon(self._tint_icon(tabler_icon("chevron_up"), QColor("#e6ebf1")))
         move_up_button.setIconSize(QSize(14, 14))
         move_up_button.setToolTip("Move selected row up (Page Up)")
         move_down_button = QToolButton()
         move_down_button.setObjectName("paletteRowActionButton")
         move_down_button.setAutoRaise(True)
         move_down_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        move_down_button.setIcon(self._tint_icon(TablerQIcon().get_qicon("chevron_down"), QColor("#e6ebf1")))
+        move_down_button.setIcon(self._tint_icon(tabler_icon("chevron_down"), QColor("#e6ebf1")))
         move_down_button.setIconSize(QSize(14, 14))
         move_down_button.setToolTip("Move selected row down (Page Down)")
         load_button = QPushButton("Load CSV")
