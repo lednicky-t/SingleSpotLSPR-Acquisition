@@ -27,7 +27,6 @@ from lspr_app.gui.plot_controller import (
     flush_deferred_metric_refreshes as _flush_deferred_metric_refreshes,
     flush_deferred_stats_refreshes as _flush_deferred_stats_refreshes,
     flush_deferred_ui_refreshes as _flush_deferred_ui_refreshes,
-    flush_plot_refreshes as _flush_plot_refreshes,
     refresh_plot as _refresh_plot,
 )
 from lspr_app.gui.spectrum_plot_controller import (
@@ -575,26 +574,6 @@ def flush_deferred_stats_refreshes_for(window) -> None:
             )
 
 
-def flush_plot_refreshes_for(window) -> None:
-    started = perf_counter()
-    requested_at = getattr(window, "_plot_refresh_requested_at", None)
-    if requested_at is not None:
-        try:
-            window._last_plot_refresh_delay_ms = max((started - float(requested_at)) * 1000.0, 0.0)
-        except (TypeError, ValueError):
-            window._last_plot_refresh_delay_ms = None
-    _flush_plot_refreshes(window)
-    if bool(getattr(window, "_deep_timing_enabled", False)):
-        elapsed_ms = (perf_counter() - started) * 1000.0
-        if elapsed_ms >= 2.0:
-            window._log_throttled(
-                "gui_plot_refresh",
-                f"GUI plot refresh: {elapsed_ms:.2f} ms",
-                level=logging.INFO,
-                min_interval=0.5,
-            )
-
-
 def refresh_plot_for(window) -> None:
     started = perf_counter()
     _refresh_plot(window)
@@ -967,7 +946,6 @@ def handle_simulation_output_rate_change_for(window) -> None:
     if window._live_active and window._source_mode == "simulation" and window._live_worker is not None:
         window._live_worker.update_cycle_period(1.0 / max(window.sim_output_rate_spin.value(), 1e-9))
         window._request_deferred_ui_refresh(trace_plot=True, live_estimate=True)
-        window._request_plot_refresh()
         window._request_trace_autoscale()
     window._schedule_acquisition_state_persist()
 

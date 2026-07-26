@@ -553,10 +553,6 @@ def flush_deferred_stats_refreshes(window) -> None:
         )
 
 
-def flush_plot_refreshes(window) -> None:
-    return
-
-
 def refresh_plot(window) -> None:
     window._enqueue_plot_processing()
 

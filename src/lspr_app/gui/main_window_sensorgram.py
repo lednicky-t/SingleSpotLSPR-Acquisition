@@ -238,7 +238,7 @@ def sensorgram_time_axis_label_text(mode: object) -> str:
     }[normalized]
 
 
-def apply_sensorgram_time_axis_mode(window, *, redraw: bool = True) -> None:
+def apply_sensorgram_time_axis_mode(window) -> None:
     mode = normalize_sensorgram_time_axis_mode(getattr(window, "_sensorgram_time_axis_mode", "elapsed"))
     window._sensorgram_time_axis_mode = mode
     axis = getattr(window, "trace_time_axis", None)
@@ -246,8 +246,6 @@ def apply_sensorgram_time_axis_mode(window, *, redraw: bool = True) -> None:
         axis.set_time_mode(mode, start_datetime=display_time_anchor(window))
     if hasattr(window, "trace_plot"):
         window.trace_plot.setLabel("bottom", sensorgram_time_axis_label_text(mode))
-    if redraw:
-        window._request_plot_refresh()
 
 
 def toggle_sensorgram_time_axis_mode(window) -> None:

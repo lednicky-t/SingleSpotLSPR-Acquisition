@@ -9,7 +9,6 @@ from lspr_app.gui.main_window_plotting import (
     flush_deferred_display_refreshes_for,
     flush_deferred_metric_refreshes_for,
     flush_deferred_stats_refreshes_for,
-    flush_plot_refreshes_for,
 )
 from lspr_app.gui.runtime_probe import (
     build_runtime_drift_lines_for,
@@ -34,7 +33,6 @@ def run_gui_callback_timed(window, label: str, callback: Callable[[], None], *, 
             "deferred_display_flush": "_last_deferred_display_refresh_ms",
             "deferred_metric_flush": "_last_deferred_metric_refresh_ms",
             "deferred_stats_flush": "_last_deferred_stats_refresh_ms",
-            "plot_refresh": "_last_plot_refresh_total_ms",
             "log_buffer": "_last_log_buffer_total_ms",
             "ui_heartbeat": "_last_ui_heartbeat_total_ms",
             "gui_housekeeping": "_last_gui_housekeeping_total_ms",
@@ -55,7 +53,6 @@ def run_gui_callback_timed(window, label: str, callback: Callable[[], None], *, 
             "gui_housekeeping_session_stats_snapshot": 100.0,
             "gui_housekeeping_session_stats_refresh": 100.0,
             "deferred_ui_flush": 100.0,
-            "plot_refresh": 100.0,
             "session_stats_refresh": 100.0,
             "session_summary_refresh": 100.0,
             "log_buffer": 150.0,
@@ -256,19 +253,6 @@ def request_deferred_ui_refresh(
         )
 
 
-def request_plot_refresh(window, delay_ms: float | None = None) -> None:
-    delay = float(delay_ms if delay_ms is not None else 33.0)
-    if not window._ui_task_scheduler.is_pending("plot_refresh"):
-        window._plot_refresh_requested_at = perf_counter()
-    window._ui_task_scheduler.request(
-        "plot_refresh",
-        delay,
-        window._flush_plot_refreshes,
-        priority=1,
-        coalesce="latest",
-    )
-
-
 def refresh_session_summary(window, force: bool = False) -> None:
     window._run_gui_callback_timed("session_summary_refresh", lambda: refresh_session_summary_for(window, force=force))
 
@@ -322,10 +306,6 @@ def flush_deferred_metric_refreshes(window) -> None:
 
 def flush_deferred_stats_refreshes(window) -> None:
     window._run_gui_callback_timed("deferred_stats_flush", lambda: flush_deferred_stats_refreshes_for(window))
-
-
-def flush_plot_refreshes(window) -> None:
-    window._run_gui_callback_timed("plot_refresh", lambda: flush_plot_refreshes_for(window))
 
 
 def initialize_runtime_drift_probe(window) -> None:

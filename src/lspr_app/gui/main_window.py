@@ -107,14 +107,12 @@ from lspr_app.gui.main_window_runtime import (
     flush_deferred_metric_refreshes as flush_deferred_metric_refreshes_for_runtime,
     flush_deferred_ui_refreshes as flush_deferred_ui_refreshes_for_runtime,
     flush_deferred_stats_refreshes as flush_deferred_stats_refreshes_for_runtime,
-    flush_plot_refreshes as flush_plot_refreshes_for_runtime,
     initialize_runtime_drift_probe as initialize_runtime_drift_probe_for_runtime,
     refresh_session_statistics as refresh_session_statistics_for_runtime,
     refresh_session_summary as refresh_session_summary_for_runtime,
     request_deferred_ui_refresh as request_deferred_ui_refresh_for_runtime,
     request_live_acquisition_poll as request_live_acquisition_poll_for_runtime,
     request_live_visual_refresh as request_live_visual_refresh_for_runtime,
-    request_plot_refresh as request_plot_refresh_for_runtime,
     run_gui_callback_timed as run_gui_callback_timed_for_runtime,
 )
 from lspr_app.gui.main_window_lifecycle import (
@@ -458,7 +456,6 @@ class MainWindow(QMainWindow):
         self._live_mode_deferred_display_flush_count: int = 0
         self._live_mode_deferred_metric_flush_count: int = 0
         self._live_mode_deferred_stats_flush_count: int = 0
-        self._plot_refresh_requested_at: float | None = None
         self._last_plot_refresh_delay_ms: float | None = None
         self._ui_task_scheduler = GuiTaskScheduler(self)
         self._trace_autoscale_timer = QTimer(self)
@@ -1260,7 +1257,7 @@ class MainWindow(QMainWindow):
         self.trace_time_axis._diagnostics_owner = self
         self.trace_time_axis._diagnostics_prefix = "trace_time_axis"
         self.trace_time_axis.doubleClicked.connect(self._toggle_sensorgram_time_axis_mode)
-        self._apply_sensorgram_time_axis_mode(redraw=False)
+        self._apply_sensorgram_time_axis_mode()
         _startup_mark("building spectrum and metric plots")
         self.spectrum_left_axis = ScientificAxis("left")
         self.spectrum_left_axis._diagnostics_owner = self
@@ -2901,9 +2898,6 @@ class MainWindow(QMainWindow):
             trace_label=trace_label,
         )
 
-    def _request_plot_refresh(self, delay_ms: float | None = None) -> None:
-        request_plot_refresh_for_runtime(self, delay_ms=delay_ms)
-
     def _temporal_history_token(self, processed: Spectrum | None) -> tuple[object, ...] | None:
         if processed is None:
             return None
@@ -3045,9 +3039,6 @@ class MainWindow(QMainWindow):
 
     def _flush_deferred_stats_refreshes(self) -> None:
         flush_deferred_stats_refreshes_for_runtime(self)
-
-    def _flush_plot_refreshes(self) -> None:
-        flush_plot_refreshes_for_runtime(self)
 
     def _refresh_plot(self) -> None:
         refresh_plot_for(self)
@@ -3342,8 +3333,8 @@ class MainWindow(QMainWindow):
         self._apply_processing_settings_to_widgets(settings)
         self._handle_processing_setting_change()
 
-    def _apply_sensorgram_time_axis_mode(self, *, redraw: bool = True) -> None:
-        apply_sensorgram_time_axis_mode(self, redraw=redraw)
+    def _apply_sensorgram_time_axis_mode(self) -> None:
+        apply_sensorgram_time_axis_mode(self)
 
     def _toggle_sensorgram_time_axis_mode(self) -> None:
         toggle_sensorgram_time_axis_mode(self)

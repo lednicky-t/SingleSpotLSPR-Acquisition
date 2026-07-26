@@ -806,7 +806,7 @@ def _restore_sensorgram_time_axis_and_density(window, ui_state: dict[str, object
 
         window._sensorgram_time_axis_mode = normalize_sensorgram_time_axis_mode(sensorgram_time_axis_mode)
         if hasattr(window, "_apply_sensorgram_time_axis_mode"):
-            window._apply_sensorgram_time_axis_mode(redraw=False)
+            window._apply_sensorgram_time_axis_mode()
     if isinstance(metric_display_points, (int, float)) and int(metric_display_points) > 0:
         window._plot_display_points = max(int(metric_display_points), 1)
     if isinstance(sensorgram_compression_recent_tail_points, (int, float)) and int(sensorgram_compression_recent_tail_points) >= 0:

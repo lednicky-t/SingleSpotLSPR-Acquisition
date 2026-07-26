@@ -1046,7 +1046,7 @@ class SensorgramPlotSettingsDialog(QDialog):
                 pass
         if hasattr(window, "_apply_sensorgram_time_axis_mode"):
             try:
-                window._apply_sensorgram_time_axis_mode(redraw=False)
+                window._apply_sensorgram_time_axis_mode()
             except Exception:
                 pass
         if hasattr(window, "_persist_processing_settings"):

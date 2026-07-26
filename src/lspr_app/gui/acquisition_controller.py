@@ -762,7 +762,6 @@ def _reset_live_frame_telemetry(window) -> None:
     window._last_plot_refresh_finished_at = None
     window._actual_plot_refresh_rate_hz = None
     window._plot_refresh_timestamps = []
-    window._plot_refresh_requested_at = None
     window._last_spectrum_curve_update_ms = None
     window._last_spectrum_fit_update_ms = None
     window._last_spectrum_marker_update_ms = None
