@@ -1508,16 +1508,7 @@ def _reserve_unique_measurement_destination(destination: Path) -> Path:
 
 
 def _is_recording_active(window: Any) -> bool:
-    for attr in (
-        "_measurement_active",
-        "_measurement_running",
-        "_recording_active",
-        "_recording_running",
-        "_session_recording_active",
-    ):
-        if bool(getattr(window, attr, False)):
-            return True
-    return False
+    return bool(getattr(window, "_measurement_active", False))
 
 
 _original_start_live_acquisition = start_live_acquisition
