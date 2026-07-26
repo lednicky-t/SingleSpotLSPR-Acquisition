@@ -694,6 +694,7 @@ def apply_processing_range_to_spectrum_plot(window) -> None:
 
 
 def autoscale_metric_plot(window, *, force: bool = True) -> None:
+    # -- gather visible series data --
     started = perf_counter()
     axis_mode = _sensorgram_time_axis_mode(window)
     clock_mode = axis_mode == "clock"
@@ -712,6 +713,8 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
         display_series.append((display_x_values, y_values))
     x = np.concatenate([item[0] for item in display_series])
     y = np.concatenate([item[1] for item in visible_series])
+
+    # -- envelope overlay: collect min/max band candidates for the overlay fill --
     if bool(getattr(window, "_sensorgram_metric_envelope_overlay_enabled", False)):
         overlay_min_candidates: list[np.ndarray] = []
         overlay_max_candidates: list[np.ndarray] = []
@@ -753,6 +756,8 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
                             overlay_max_candidates.append(np.asarray(max_y, dtype=np.float64))
                 except Exception:
                     continue
+
+    # -- compute the data's x/y range (finite values only) --
     finite = np.isfinite(x) & np.isfinite(y)
     if not np.any(finite):
         window._metric_autoscale_pending = False
@@ -763,6 +768,8 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
     x_span = float(np.max(x) - np.min(x))
     y_min = float(np.min(y))
     y_max = float(np.max(y))
+
+    # -- fold the envelope overlay's min/max into the y range too --
     if bool(getattr(window, "_sensorgram_metric_envelope_overlay_enabled", False)):
         if overlay_min_candidates:
             overlay_min_values = np.concatenate([arr[np.isfinite(arr)] for arr in overlay_min_candidates if np.any(np.isfinite(arr))]) if any(np.any(np.isfinite(arr)) for arr in overlay_min_candidates) else np.empty(0, dtype=np.float64)
@@ -790,6 +797,9 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
         clock_mode=clock_mode,
         span_s=x_span,
     )
+
+    # -- throttle: skip this autoscale if not forced and we scaled too recently --
+    # (unless the latest data point has scrolled past what the last range showed)
     last_range = getattr(window, "_last_metric_autoscale_range", None)
     if not force:
         last_autoscale_at = float(getattr(window, "_last_metric_autoscale_at", 0.0))
@@ -805,6 +815,8 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
                 window._metric_autoscale_pending = False
                 window._last_metric_autoscale_ms = (perf_counter() - started) * 1000.0
                 return
+
+    # -- compute the candidate new view range --
     x_min = float(np.min(x))
     x_max = latest_x + follow_latest_buffer_s
     if getattr(window, "_trace_view_locked", False):
@@ -851,6 +863,8 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
         float(y_low),
         float(y_high),
     )
+
+    # -- autoscale decision: skip applying if the change is too small to matter --
     should_apply = True
     if isinstance(last_range, tuple) and len(last_range) == 4:
         try:
@@ -871,6 +885,8 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
         window._metric_autoscale_pending = False
         window._last_metric_autoscale_ms = (perf_counter() - started) * 1000.0
         return
+
+    # -- apply the new range and record timing --
     window._trace_view_autoscaling = True
     try:
         window.trace_plot.setXRange(new_range[0], new_range[1], padding=0.0)
@@ -986,6 +1002,7 @@ def render_metric_series(
     history: dict[str, tuple[np.ndarray, np.ndarray] | list[tuple[object, float]]],
     clock_mode: bool,
 ) -> bool:
+    # -- setup: timing accumulators and small local converters --
     started = perf_counter()
     series_export_ms = 0.0
     view_prep_ms = 0.0
@@ -1010,6 +1027,7 @@ def render_metric_series(
             np.asarray([item[1] for item in series], dtype=np.float64),
         )
 
+    # -- setup: per-refresh view/cache state shared by every metric in the loop below --
     trace_view_locked = bool(getattr(window, "_trace_view_locked", False))
     _, _, view_width_px = _current_metric_view_state(window)
     view_x_min = view_x_max = None
@@ -1039,6 +1057,7 @@ def render_metric_series(
     # ran, and the read after the loop raised UnboundLocalError.
     view_mode = "absolute"
 
+    # -- envelope overlay: push a metric's min/max band curves for this refresh --
     def _update_metric_envelope_overlay(
         metric_name: str,
         overlay_data: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None,
@@ -1078,7 +1097,9 @@ def render_metric_series(
         if band is not None and hasattr(band, "setVisible"):
             band.setVisible(True)
 
+    # -- main per-metric render loop --
     for metric_name, curve in window.trace_curves.items():
+        # -- skip deselected/empty metrics --
         series = history.get(metric_name, [])
         if metric_name not in window._selected_trace_metrics() or series is None:
             curve.setDownsampling(auto=False, ds=curve_downsampling_factor)
@@ -1088,6 +1109,8 @@ def render_metric_series(
                 render_state_cache[metric_name] = render_state_key
             _update_metric_envelope_overlay(metric_name, None)
             continue
+
+        # -- convert this metric's history to arrays --
         raw_points += _series_point_count(series)
         series_started = perf_counter()
         x, y = _series_to_arrays(series)
@@ -1100,6 +1123,8 @@ def render_metric_series(
                 render_state_cache[metric_name] = render_state_key
             _update_metric_envelope_overlay(metric_name, None)
             continue
+
+        # -- pick the downsampled/cached view of this metric to actually draw --
         series_token = build_metric_series_token(window, metric_name)
         curve.setDownsampling(auto=False, ds=curve_downsampling_factor)
         display_x = x
@@ -1215,6 +1240,8 @@ def render_metric_series(
                 default_points=_metric_display_target_points(window),
             )
         view_prep_ms += (perf_counter() - view_started) * 1000.0
+
+        # -- skip the actual setData() call if nothing about this metric's view changed --
         display_x, _ = _sensorgram_display_x_values(window, display_x, clock_mode=clock_mode)
         display_state = None
         if cache is not None and not trace_view_locked and bool(getattr(window, "_live_active", False)):
@@ -1237,6 +1264,8 @@ def render_metric_series(
             active_series[metric_name] = (display_x, display_y)
             _update_metric_envelope_overlay(metric_name, overlay_data)
             continue
+
+        # -- push the curve's new data to the plot widget --
         setdata_started = perf_counter()
         if step_mode == "spline":
             spline_x, spline_y = _spline_render_series(display_x, display_y)
@@ -1252,6 +1281,7 @@ def render_metric_series(
         active_series[metric_name] = (display_x, display_y)
         _update_metric_envelope_overlay(metric_name, overlay_data)
 
+    # -- pick which metric's series becomes the window's "visible trace" --
     primary_name = window._primary_trace_metric()
     if primary_name in active_series:
         window._visible_trace_x = active_series[primary_name][0]
@@ -1264,6 +1294,7 @@ def render_metric_series(
         window._visible_trace_x = None
         window._visible_trace_y = None
 
+    # -- diagnostics panel text: cache snapshot + live-absolute source stats --
     if cache is not None and hasattr(cache, "metric_cache_debug_snapshot"):
         try:
             window._last_metric_view_cache_modes = cache.metric_cache_debug_snapshot()
@@ -1291,6 +1322,7 @@ def render_metric_series(
         window._last_metric_absolute_view_prep_text = "-"
         window._last_metric_absolute_append_text = "-"
 
+    # -- record timing stats and emit a debug log line if this refresh was slow --
     elapsed_ms = (perf_counter() - started) * 1000.0
     window._last_metric_render_series_export_ms = series_export_ms
     window._last_metric_render_series_extract_ms = series_export_ms
@@ -1314,6 +1346,8 @@ def render_metric_series(
                 level=logging.INFO,
                 min_interval=0.5,
             )
+
+    # -- sync the plan-step overlay bars, then report whether anything changed --
     sync_control_step_overlay = getattr(window, "_sync_sensorgram_control_step_overlay", None)
     if callable(sync_control_step_overlay):
         try:
