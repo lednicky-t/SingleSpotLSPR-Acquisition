@@ -667,8 +667,11 @@ class MainWindow(QMainWindow):
         self._plot_display_points = 512
         self._sensorgram_compression_recent_tail_points = 300
         self._recording_blink_visible = True
+        # Combined with self._diagnostics.debug_timing_enabled and applied once,
+        # further down, once _diagnostics has been loaded (search for the other
+        # assignment to this attribute) - not applied here to avoid setting the
+        # module-level flag to an incomplete value that's immediately replaced.
         self._processing_debug_mode_enabled = bool(load_app_setting("processing_debug_mode", False))
-        set_processing_debug_mode_enabled(self._processing_debug_mode_enabled)
         self._startup_freeze_plots = bool(load_app_setting("startup_freeze_plots", False))
         self._confirm_exit_if_recording = bool(load_app_setting("confirm_exit_if_recording", True))
         self._default_live_rate_hz = float(load_app_setting("default_live_rate_hz", 4.0))
@@ -873,10 +876,20 @@ class MainWindow(QMainWindow):
         self._install_shortcuts()
         _startup_mark("shortcuts installed")
 
-        self.status_label = ElidingLabel(f"Connected backend: {self._spectrometer.device_name()}", self)
-        self.status_label.setWordWrap(False)
-        self.status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.status_label.setToolTip("Current source/backend connection and important application status messages.")
+        def _make_footer_label(widget_cls, tooltip: str, text: str = "") -> QWidget:
+            label = widget_cls(self)
+            label.setWordWrap(False)
+            label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            if text:
+                label.setText(text)
+            label.setToolTip(tooltip)
+            return label
+
+        self.status_label = _make_footer_label(
+            ElidingLabel,
+            "Current source/backend connection and important application status messages.",
+            text=f"Connected backend: {self._spectrometer.device_name()}",
+        )
 
         self.project_destination_edit = QLineEdit(str(load_app_setting("recording_project_destination", "")))
         self.project_destination_edit.setObjectName("recordingPathEdit")
@@ -986,12 +999,10 @@ class MainWindow(QMainWindow):
             "This does not affect spectrometer hardware."
         )
 
-        self.live_estimate = ElidingLabel(self)
-        self.live_estimate.setWordWrap(False)
-        self.live_estimate.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.live_estimate.setToolTip(
+        self.live_estimate = _make_footer_label(
+            ElidingLabel,
             "src = source acquisition rate; disp = GUI display rate; proc = processing time per spectrum; "
-            "head = display-period / processing-time; skip = dropped GUI updates per second."
+            "head = display-period / processing-time; skip = dropped GUI updates per second.",
         )
         self.status_help_button = make_help_button(
             "Status readouts glossary (src/disp/proc/head/skip, spacing/rate/ovh).",
@@ -999,21 +1010,17 @@ class MainWindow(QMainWindow):
             body=STATUS_READOUTS_BODY,
             parent=self,
         )
-        self.spectrometer_stats_label = QLabel(self)
-        self.spectrometer_stats_label.setWordWrap(False)
-        self.spectrometer_stats_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.spectrometer_stats_label.setText("spacing - | rate - | ovh -")
-        self.spectrometer_stats_label.setToolTip(
-            "Spectrometer acquisition stats: last frame spacing, effective source rate, and acquisition overhead."
+        self.spectrometer_stats_label = _make_footer_label(
+            QLabel,
+            "Spectrometer acquisition stats: last frame spacing, effective source rate, and acquisition overhead.",
+            text="spacing - | rate - | ovh -",
         )
-        self.telemetry_label = ElidingLabel(self)
-        self.telemetry_label.setWordWrap(False)
-        self.telemetry_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.telemetry_label.setText("gap - | acq - | proc - | plot - | ui - | idle - | ovh - | show -")
-        self.telemetry_label.setToolTip(
+        self.telemetry_label = _make_footer_label(
+            ElidingLabel,
             "gap = time between completed source frames; acq = acquisition latency; proc = worker compute + queue wait; "
             "plot = spectrum redraw time; ui = deferred GUI flush; idle = unclassified remainder; ovh = acquisition latency minus expected budget; "
-            "% values are shares of the current frame gap when available; show = display-window summary."
+            "% values are shares of the current frame gap when available; show = display-window summary.",
+            text="gap - | acq - | proc - | plot - | ui - | idle - | ovh - | show -",
         )
         footer_font = QFont("Consolas", 9)
         self.status_label.setFont(footer_font)
@@ -1348,8 +1355,11 @@ class MainWindow(QMainWindow):
         self.spectrum_plot.addItem(self.poly_marker)
         self.spectrum_plot.addItem(self.gaussian_marker)
         self.spectrum_plot.addItem(self.centroid_marker)
-        self.spectrum_vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#666666", width=1))
-        self.spectrum_hline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#666666", width=1))
+        def _make_crosshair_line(angle: int) -> pg.InfiniteLine:
+            return pg.InfiniteLine(angle=angle, movable=False, pen=pg.mkPen("#666666", width=1))
+
+        self.spectrum_vline = _make_crosshair_line(90)
+        self.spectrum_hline = _make_crosshair_line(0)
         self.spectrum_plot.addItem(self.spectrum_vline, ignoreBounds=True)
         self.spectrum_plot.addItem(self.spectrum_hline, ignoreBounds=True)
         self.spectrum_proxy = pg.SignalProxy(
@@ -1410,8 +1420,8 @@ class MainWindow(QMainWindow):
         self.trace_legend = self.trace_plot.addLegend(offset=(10, 10))
         self.trace_legend._diagnostics_owner = self
         self.trace_legend._diagnostics_prefix = "trace_plot"
-        self.trace_vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#666666", width=1))
-        self.trace_hline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#666666", width=1))
+        self.trace_vline = _make_crosshair_line(90)
+        self.trace_hline = _make_crosshair_line(0)
         self.trace_vline._diagnostics_owner = self
         self.trace_vline._diagnostics_prefix = "trace_plot"
         self.trace_hline._diagnostics_owner = self
