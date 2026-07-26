@@ -139,6 +139,20 @@ class MetricArchiveReloadSignals(QObject):
     failed = pyqtSignal(str)
 
 
+class MeasurementWriterErrorSignals(QObject):
+    """Marshals AsyncHDF5MeasurementWriter's background-thread failures onto
+    the GUI thread. The writer itself (storage/hdf5_export.py) has no Qt
+    dependency by design, so it only calls a plain on_error callback - this
+    QObject is the GUI-side adapter that turns that callback into a proper
+    cross-thread signal emission, connected to a bound method of a QObject
+    (see MainWindow._handle_measurement_writer_failed) so Qt's AutoConnection
+    correctly queues it onto the GUI thread instead of running it inline on
+    the writer thread.
+    """
+
+    failed = pyqtSignal(str)
+
+
 class _QueueLogHandler(logging.Handler):
     def __init__(self, log_queue: mp.Queue) -> None:
         super().__init__()

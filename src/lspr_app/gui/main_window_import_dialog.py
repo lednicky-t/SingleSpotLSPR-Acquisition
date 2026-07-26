@@ -53,6 +53,7 @@ class MeasurementFileProbe:
     processing: _SectionInfo = field(default_factory=_SectionInfo)
     plan: _SectionInfo = field(default_factory=_SectionInfo)
     error: str = ""
+    warning: str = ""
 
 
 def probe_measurement_hdf5(path: Path) -> MeasurementFileProbe:
@@ -68,6 +69,23 @@ def probe_measurement_hdf5(path: Path) -> MeasurementFileProbe:
             if isinstance(ver, bytes):
                 ver = ver.decode("utf-8")
             probe.schema_version = str(ver)
+
+            # Reject files from an incompatible (newer-major) schema outright,
+            # same as the plan-import path already does - a user picking an
+            # arbitrary .h5 file here shouldn't get a silently-wrong import
+            # from a future format this app version doesn't understand yet.
+            # Older/minor mismatches are shown as a warning but don't block.
+            try:
+                from lspr_io import validate_measurement_metadata
+
+                validation = validate_measurement_metadata(dict(f.attrs))
+                if not validation.is_valid:
+                    probe.error = "; ".join(validation.errors)
+                    return probe
+                if validation.warnings:
+                    probe.warning = "; ".join(validation.warnings)
+            except Exception:
+                log.debug("Could not validate measurement schema for %s", path, exc_info=True)
 
             # ── Processing settings ───────────────────────────────────────
             try:
@@ -206,6 +224,11 @@ class ImportFromMeasurementDialog(QDialog):
             ver_label = QLabel(f"HDF5 schema version {self._probe.schema_version}")
             ver_label.setStyleSheet("color: gray; font-size: 10px;")
             layout.addWidget(ver_label)
+        if self._probe.warning:
+            warn_label = QLabel(self._probe.warning)
+            warn_label.setWordWrap(True)
+            warn_label.setStyleSheet("color: #b8860b; font-size: 10px;")
+            layout.addWidget(warn_label)
 
         if self._probe.error:
             err = QLabel(f"Could not read file:\n{self._probe.error}")

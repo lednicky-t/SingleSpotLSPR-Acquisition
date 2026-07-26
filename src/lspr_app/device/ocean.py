@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -12,6 +13,8 @@ from seabreeze.spectrometers import list_devices  # noqa: E402 - must follow sea
 
 from lspr_app.device.base import Spectrometer, SpectrometerCapabilities, SpectrometerError  # noqa: E402 - must follow seabreeze.use()
 from lspr_app.domain.models import AcquisitionSettings, Spectrum  # noqa: E402 - must follow seabreeze.use()
+
+log = logging.getLogger(__name__)
 
 
 class OceanSpectrometer(Spectrometer):
@@ -110,7 +113,12 @@ class OceanSpectrometer(Spectrometer):
         try:
             self._spectrometer.trigger_mode(settings.trigger_mode)
         except Exception:
-            pass
+            log.warning(
+                "Failed to set trigger mode %r before auto-integration; "
+                "continuing with the spectrometer's current trigger mode.",
+                settings.trigger_mode,
+                exc_info=True,
+            )
 
         for _ in range(self._AUTO_MAX_ITERATIONS):
             self._spectrometer.integration_time_micros(integration_us)

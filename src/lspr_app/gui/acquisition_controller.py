@@ -41,6 +41,7 @@ from lspr_app.gui.workers import (
     LiveProcessingWorker,
     MeasurementCompressionResult,
     MeasurementCompressionTask,
+    MeasurementWriterErrorSignals,
 )
 from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter
 from lspr_app.storage.measurement_archive import close_temp_measurement_writer
@@ -165,6 +166,35 @@ def _handle_measurement_file_compression_failed(window, message: str) -> None:
     window._refresh_plot()
     window._refresh_trace_plot("Metric position (nm)")
     window._request_trace_autoscale()
+    window._refresh_session_summary(force=True)
+    window._update_window_mode_label()
+
+
+def _handle_measurement_writer_failed(window, message: str) -> None:
+    """The background HDF5 writer thread died mid-recording (e.g. disk full,
+    permission error). Recording has already silently stopped on the writer
+    side by this point - this just makes that visible instead of leaving the
+    UI showing an active recording that isn't actually being written anymore.
+    """
+    if not window._measurement_active:
+        return
+    if window._live_worker is not None and window._live_worker.is_alive():
+        window._live_worker.update_archive_context(None, False, None)
+    # The writer thread is already gone (that's why we're here) - don't call
+    # .close() on it again, just drop the reference.
+    window._measurement_writer = None
+    window._measurement_writer_error_signals = None
+    window._measurement_active = False
+    window._measurement_paused = False
+    window._measurement_started_at = None
+    window._measurement_axis_lock = None
+    window._measurement_path = None
+    set_measurement_ui_locked(window, False)
+    if hasattr(window, "_set_recording_blink_indicator"):
+        window._set_recording_blink_indicator(False)
+    window.status_label.setText("Measurement recording stopped: a write error occurred.")
+    window._log_error(f"Measurement recording stopped unexpectedly: {message}")
+    set_measurement_buttons_enabled(window, True)
     window._refresh_session_summary(force=True)
     window._update_window_mode_label()
 
@@ -1174,6 +1204,12 @@ def start_measurement_run(window) -> None:
     started_at = datetime.now(timezone.utc)
     # Recording follows the execution state, but it is not stopped by flow HOLD.
     window._measurement_axis_lock = np.asarray(anchor.wavelengths_nm, dtype=np.float64).copy()
+    writer_error_signals = MeasurementWriterErrorSignals()
+    writer_error_signals.failed.connect(window._handle_measurement_writer_failed)
+    # Kept alive on window for as long as the writer runs - a QObject with no
+    # surviving Python reference can be garbage-collected even with live
+    # connections, which would silently drop this error path.
+    window._measurement_writer_error_signals = writer_error_signals
     window._measurement_writer = AsyncHDF5MeasurementWriter(
         destination,
         signal_mode,
@@ -1182,6 +1218,7 @@ def start_measurement_run(window) -> None:
         experiment_name=experiment_name,
         started_at_utc=started_at,
         flush_interval_s=window._measurement_flush_interval_s,
+        on_error=writer_error_signals.failed.emit,
     )
     window._measurement_writer.update_acquisition_state(window._acquisition_state_payload())
     window._measurement_writer.update_baselines(window._session.state.dark, window._session.state.reference)
@@ -1253,6 +1290,7 @@ def stop_measurement_run(window) -> None:
     if window._measurement_writer is not None:
         window._measurement_writer.close()
     window._measurement_writer = None
+    window._measurement_writer_error_signals = None
     window._measurement_active = False
     window._measurement_paused = False
     # Sensorgram x-values are relative to measurement start while a

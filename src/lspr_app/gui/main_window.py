@@ -333,6 +333,7 @@ from lspr_app.gui.device_console_dialog import show_device_manager_dialog
 from lspr_app.gui.workers import (
     AcquisitionResult,
     MeasurementCompressionTask,
+    MeasurementWriterErrorSignals,
     MetricArchiveReloadResult,
     LiveAcquisitionEvent,
     LiveAcquisitionWorker,
@@ -577,6 +578,7 @@ class MainWindow(QMainWindow):
         self._measurement_active = False
         self._measurement_paused = False
         self._measurement_writer: AsyncHDF5MeasurementWriter | None = None
+        self._measurement_writer_error_signals: MeasurementWriterErrorSignals | None = None
         self._measurement_path: Path | None = None
         self._measurement_compression_task: MeasurementCompressionTask | None = None
         self._measurement_signal_mode = "absorbance"
@@ -2551,6 +2553,11 @@ class MainWindow(QMainWindow):
         from lspr_app.gui.acquisition_controller import _handle_measurement_file_compression_failed
 
         _handle_measurement_file_compression_failed(self, message)
+
+    def _handle_measurement_writer_failed(self, message: str) -> None:
+        from lspr_app.gui.acquisition_controller import _handle_measurement_writer_failed
+
+        _handle_measurement_writer_failed(self, message)
 
     def _append_processed_trace_history(self, processed: Spectrum, fit: Spectrum | None) -> None:
         append_processed_trace_history(self, processed, fit)

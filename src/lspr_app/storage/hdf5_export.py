@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import threading
@@ -9,6 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 from time import monotonic
 from datetime import datetime, timezone
+from typing import Callable
 
 import h5py
 import numpy as np
@@ -39,6 +41,8 @@ from lspr_io import (
 from lspr_app.domain.models import ProcessingSettings, Spectrum
 from lspr_app.domain.pump_plan import to_core_experiment_plan
 from lspr_app.version import APP_VERSION
+
+log = logging.getLogger(__name__)
 
 
 def repack_measurement_hdf5_file(source_path: Path) -> Path:
@@ -328,6 +332,12 @@ class HDF5MeasurementWriter:
         self._handle.close()
 
     def _upsert_vector(self, name: str, values: np.ndarray, columns: list[str]) -> None:
+        # Intentionally overwritten in place, not append-only: this is the
+        # "current" baseline (dark_intensity/light_intensity) a reader uses
+        # to interpret in-progress sample rows, not a history record. The
+        # full baseline history is preserved separately via
+        # _append_baseline_if_new (self._dark_group/self._reference_group) -
+        # nothing here is lost, this dataset just always reflects the latest.
         if name in self._data:
             dataset = self._data[name]
             dataset[...] = values
@@ -648,6 +658,7 @@ class AsyncHDF5MeasurementWriter:
         *,
         flush_interval_s: float = 2.0,
         compression_enabled: bool = False,
+        on_error: Callable[[str], None] | None = None,
     ) -> None:
         self._path = path
         self._signal_kind = signal_kind
@@ -664,6 +675,11 @@ class AsyncHDF5MeasurementWriter:
         self._stop_event = threading.Event()
         self._closed = False
         self._state_lock = threading.Lock()
+        # Plain callback, not a Qt signal - this module has no Qt dependency by
+        # design (see CLAUDE.md "Don't mix scientific code with GUI code"), so
+        # marshaling onto the GUI thread is the caller's responsibility. Called
+        # from this object's background writer thread, not the caller's thread.
+        self._on_error = on_error
         self._thread = threading.Thread(target=self._run, name="hdf5-writer", daemon=True)
         self._thread.start()
 
@@ -725,17 +741,38 @@ class AsyncHDF5MeasurementWriter:
             self._stop_event.set()
             self._queue.put(("close", None))
         self._thread.join(timeout=10.0)
+        if self._thread.is_alive():
+            log.warning(
+                "HDF5 writer thread for %s did not stop within 10s of close(); "
+                "it may still be flushing or stuck.",
+                self._path,
+            )
+
+    def _notify_error(self, message: str) -> None:
+        if self._on_error is None:
+            return
+        try:
+            self._on_error(message)
+        except Exception:
+            log.exception("on_error callback for HDF5 writer (%s) raised", self._path)
 
     def _run(self) -> None:
-        writer = HDF5MeasurementWriter(
-            self._path,
-            self._signal_kind,
-            self._wavelengths_nm,
-            self._processing,
-            self._experiment_name,
-            self._started_at_utc,
-            compression_enabled=self._compression_enabled,
-        )
+        try:
+            writer = HDF5MeasurementWriter(
+                self._path,
+                self._signal_kind,
+                self._wavelengths_nm,
+                self._processing,
+                self._experiment_name,
+                self._started_at_utc,
+                compression_enabled=self._compression_enabled,
+            )
+        except Exception as exc:
+            log.exception("Failed to open HDF5 measurement file %s", self._path)
+            self._closed = True
+            self._notify_error(f"Could not open measurement file: {exc}")
+            return
+
         pending_spectra: list[Spectrum] = []
         pending_times: list[float] = []
         pending_peaks: list[float] = []
@@ -806,8 +843,17 @@ class AsyncHDF5MeasurementWriter:
                     last_flush = monotonic()
                 if self._stop_event.is_set() and self._queue.empty():
                     break
+        except Exception as exc:
+            log.exception("HDF5 measurement writer for %s stopped due to an error", self._path)
+            self._closed = True
+            self._notify_error(f"Measurement recording stopped unexpectedly: {exc}")
         finally:
-            writer.close()
+            try:
+                writer.close()
+            except Exception:
+                log.exception("Failed to cleanly close HDF5 measurement file %s", self._path)
+
+
 def _string_array(values: list[str]) -> np.ndarray:
     return np.array(values, dtype=h5py.string_dtype(encoding="utf-8"))
 
