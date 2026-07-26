@@ -28,7 +28,7 @@ from lspr_app.gui.ui_helpers import make_compact_spinbox
 from lspr_app.gui.undo_support import push_snapshot
 
 
-def _safe_color_name(color: str) -> str:
+def safe_color_name(color: str) -> str:
     qcolor = QColor(str(color or "").strip())
     return qcolor.name().upper() if qcolor.isValid() else ""
 
@@ -39,6 +39,65 @@ def _contrast_text_color(color: str) -> str:
         return "#e6ebf1"
     luminance = 0.299 * qcolor.red() + 0.587 * qcolor.green() + 0.114 * qcolor.blue()
     return "#111111" if luminance > 150 else "#f5f7fb"
+
+
+# The functions below are the single source of truth for how a raw cell value
+# (typed directly into the table, or pasted via ExperimentControlEditingController
+# in experiment_control_editing.py) becomes a valid PumpPlanStep field, and how a
+# step field is read back out for display/copy. Used by both
+# ExperimentPlanTableModel.data()/setData() below and
+# ExperimentControlWindow._experiment_control_read_cell_value()/
+# _experiment_control_write_row_value() in experiment_control_window.py, which
+# used to each hand-duplicate these rules - they had already drifted apart
+# (switch position went unclamped and color went unvalidated on the window's
+# copy side) by the time this was consolidated.
+#
+# Each function implements only the success-path coercion rule and may raise
+# ValueError/TypeError for input that can't convert - every call site already
+# has its own error-handling around the raw computation (setData() lets a bad
+# direct-edit value raise; the window's paste path catches and rejects it),
+# and that per-caller behavior is preserved as-is here, not baked into these
+# functions.
+
+
+def seconds_to_display_value(seconds: float, time_unit_mode: str) -> float:
+    """Convert seconds to the plan table's currently displayed time unit."""
+    if time_unit_mode == "min":
+        return float(seconds) / 60.0
+    if time_unit_mode == "h":
+        return float(seconds) / 3600.0
+    return float(seconds)
+
+
+def display_value_to_seconds(value: float, time_unit_mode: str) -> float:
+    """Convert a value in the plan table's displayed time unit back to seconds."""
+    if time_unit_mode == "min":
+        return float(value) * 60.0
+    if time_unit_mode == "h":
+        return float(value) * 3600.0
+    return float(value)
+
+
+def clamped_flow_ul_min(value: object) -> int:
+    return max(round(float(value)), 0)
+
+
+def normalized_pump_direction(value: object) -> str:
+    return "CCW" if str(value or "").upper() == "CCW" else "CW"
+
+
+def normalized_valve_state(value: object) -> str:
+    return "Close" if str(value or "").strip().lower() == "close" else "Open"
+
+
+def clamped_switch_position(value: object) -> int:
+    """Coerce *value* to a valid switch/selector position (1-12), defaulting to 1
+    if it can't be parsed as an int - both existing callers already wanted that
+    same fallback, so it's baked in here rather than left to each call site."""
+    try:
+        return max(min(int(value), 12), 1)
+    except (TypeError, ValueError):
+        return 1
 
 
 class ExperimentPlanTableModel(QAbstractTableModel):
@@ -105,18 +164,10 @@ class ExperimentPlanTableModel(QAbstractTableModel):
             )
 
     def _seconds_to_display(self, seconds: float) -> float:
-        if self._time_unit_mode == "min":
-            return float(seconds) / 60.0
-        if self._time_unit_mode == "h":
-            return float(seconds) / 3600.0
-        return float(seconds)
+        return seconds_to_display_value(seconds, self._time_unit_mode)
 
     def _display_to_seconds(self, value: float) -> float:
-        if self._time_unit_mode == "min":
-            return float(value) * 60.0
-        if self._time_unit_mode == "h":
-            return float(value) * 3600.0
-        return float(value)
+        return display_value_to_seconds(value, self._time_unit_mode)
 
     def flags(self, index: QModelIndex):  # type: ignore[override]
         if not index.isValid():
@@ -158,8 +209,8 @@ class ExperimentPlanTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.BackgroundRole:
             valve_column = 4 + ACTIVE_PUMP_CHANNELS * 3
             if column == valve_column:
-                normalized = "Close" if str(step.valve or "").strip().lower() == "close" else "Open"
-                color = _safe_color_name(self._valve_state_colors.get(normalized, ""))
+                normalized = normalized_valve_state(step.valve)
+                color = safe_color_name(self._valve_state_colors.get(normalized, ""))
                 if color:
                     return QBrush(QColor(color))
             palette = self._theme_palette
@@ -170,8 +221,8 @@ class ExperimentPlanTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ForegroundRole:
             valve_column = 4 + ACTIVE_PUMP_CHANNELS * 3
             if column == valve_column:
-                normalized = "Close" if str(step.valve or "").strip().lower() == "close" else "Open"
-                color = _safe_color_name(self._valve_state_colors.get(normalized, ""))
+                normalized = normalized_valve_state(step.valve)
+                color = safe_color_name(self._valve_state_colors.get(normalized, ""))
                 if color:
                     return QBrush(QColor(_contrast_text_color(color)))
             foreground = self._theme_palette.get("fg")
@@ -189,7 +240,7 @@ class ExperimentPlanTableModel(QAbstractTableModel):
                 return f"Direction for CH{channel_index + 1}."
         if role not in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
             if column == 6 + ACTIVE_PUMP_CHANNELS * 3 and role == Qt.ItemDataRole.UserRole:
-                return _safe_color_name(step.color)
+                return safe_color_name(step.color)
             return None
 
         if column == 0:
@@ -212,9 +263,9 @@ class ExperimentPlanTableModel(QAbstractTableModel):
             field = offset % 3
             channel = step.channels[channel_index]
             if field == 0:
-                return f"{max(round(float(channel.flow_ul_min)), 0):g}"
+                return f"{clamped_flow_ul_min(channel.flow_ul_min):g}"
             if field == 1:
-                return "CCW" if str(channel.direction or "").upper() == "CCW" else "CW"
+                return normalized_pump_direction(channel.direction)
             tube_value = self._tube_mm_by_channel[channel_index] if channel_index < len(self._tube_mm_by_channel) else 0.25
             return f"{float(tube_value):.2f}"
 
@@ -224,23 +275,23 @@ class ExperimentPlanTableModel(QAbstractTableModel):
         description_column = valve_column + 3
 
         if column == valve_column:
-            normalized = "Close" if str(step.valve or "").strip().lower() == "close" else "Open"
+            normalized = normalized_valve_state(step.valve)
             if role == Qt.ItemDataRole.EditRole:
                 return normalized
             label = str(self._valve_state_labels.get(normalized, normalized)).strip()
             return label or normalized
         if column == switch_column:
-            position = max(min(int(step.switch_position), 12), 1)
+            position = clamped_switch_position(step.switch_position)
             if role == Qt.ItemDataRole.EditRole:
                 return position
             label = self._switch_solution_labels[position - 1] if position - 1 < len(self._switch_solution_labels) else "empty"
             label = str(label or "").strip() or "empty"
             return f"{position}: {label}"
         if column == color_column:
-            color_name = self._color_name_by_value.get(_safe_color_name(step.color), "")
+            color_name = self._color_name_by_value.get(safe_color_name(step.color), "")
             if role == Qt.ItemDataRole.EditRole:
-                return _safe_color_name(step.color) or "#4E79A7"
-            return color_name or _safe_color_name(step.color) or "#4E79A7"
+                return safe_color_name(step.color) or "#4E79A7"
+            return color_name or safe_color_name(step.color) or "#4E79A7"
         if column == description_column:
             return str(step.description or "")
         return None
@@ -268,11 +319,11 @@ class ExperimentPlanTableModel(QAbstractTableModel):
                 channel_index = offset // 3
                 field = offset % 3
                 if field == 0:
-                    step.channels[channel_index].flow_ul_min = max(round(float(value)), 0)
+                    step.channels[channel_index].flow_ul_min = clamped_flow_ul_min(value)
                     changed = True
                     field_label = f"CH{channel_index + 1} flow"
                 elif field == 1:
-                    step.channels[channel_index].direction = "CCW" if str(value).upper() == "CCW" else "CW"
+                    step.channels[channel_index].direction = normalized_pump_direction(value)
                     changed = True
                     field_label = f"CH{channel_index + 1} direction"
             else:
@@ -281,19 +332,15 @@ class ExperimentPlanTableModel(QAbstractTableModel):
                 color_column = valve_column + 2
                 description_column = valve_column + 3
                 if column == valve_column:
-                    step.valve = "Close" if str(value).strip().lower() == "close" else "Open"
+                    step.valve = normalized_valve_state(value)
                     changed = True
                     field_label = "valve"
                 elif column == switch_column:
-                    try:
-                        step.switch_position = max(min(int(value), 12), 1)
-                    except (TypeError, ValueError):
-                        step.switch_position = 1
+                    step.switch_position = clamped_switch_position(value)
                     changed = True
                     field_label = "switch"
                 elif column == color_column:
-                    color = _safe_color_name(str(value))
-                    step.color = color or "#4E79A7"
+                    step.color = safe_color_name(str(value)) or "#4E79A7"
                     changed = True
                     field_label = "color"
                 elif column == description_column:
@@ -390,7 +437,7 @@ class ExperimentPlanTableModel(QAbstractTableModel):
         self.dataChanged.emit(left, right, [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole])
 
     def set_color_options(self, entries: list[tuple[str, str]]) -> None:
-        self._color_palette_entries = [(str(label), _safe_color_name(color) or "#4E79A7") for label, color in entries]
+        self._color_palette_entries = [(str(label), safe_color_name(color) or "#4E79A7") for label, color in entries]
         self._color_name_by_value = {color: label for label, color in self._color_palette_entries}
         self._color_value_by_name = {label: color for label, color in self._color_palette_entries}
         if not self._steps:
@@ -414,7 +461,7 @@ class ExperimentPlanTableModel(QAbstractTableModel):
     def set_valve_state_colors(self, colors: dict[str, str]) -> None:
         normalized = {"Open": "#4E79A7", "Close": "#B44A4A"}
         for key in ("Open", "Close"):
-            color = _safe_color_name(colors.get(key, ""))
+            color = safe_color_name(colors.get(key, ""))
             if color:
                 normalized[key] = color
         self._valve_state_colors = normalized

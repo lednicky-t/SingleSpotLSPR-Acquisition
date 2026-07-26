@@ -72,6 +72,15 @@ from lspr_app.gui.experiment_control_builders import (
     direction_glyph,
     set_step_valve_button_state_for_button,
 )
+from lspr_app.gui.flow_plan_model import (
+    clamped_flow_ul_min,
+    clamped_switch_position,
+    display_value_to_seconds,
+    normalized_pump_direction,
+    normalized_valve_state,
+    safe_color_name,
+    seconds_to_display_value,
+)
 from lspr_app.gui.experiment_control_table import (
     configure_experiment_control_table_columns,
     configure_experiment_control_plan_table,
@@ -3228,18 +3237,10 @@ class ExperimentControlWindow(QWidget):
         self.save_ui_state()
 
     def _seconds_to_display(self, seconds: float) -> float:
-        if self._time_unit_mode == "min":
-            return float(seconds) / 60.0
-        if self._time_unit_mode == "h":
-            return float(seconds) / 3600.0
-        return float(seconds)
+        return seconds_to_display_value(seconds, self._time_unit_mode)
 
     def _display_to_seconds(self, value: float) -> float:
-        if self._time_unit_mode == "min":
-            return float(value) * 60.0
-        if self._time_unit_mode == "h":
-            return float(value) * 3600.0
-        return float(value)
+        return display_value_to_seconds(value, self._time_unit_mode)
 
     def _capture_editor_duration_from_spin(self, value: float) -> None:
         if self._suspend_duration_tracking:
@@ -4075,9 +4076,9 @@ class ExperimentControlWindow(QWidget):
     def _experiment_control_read_cell_value(self, row: int, column: int) -> object:
         """Read the raw value backing a plan-table cell, for the copy side of
         cell copy/paste (see ExperimentControlEditingController.copy_selection).
-        Mirrors ExperimentPlanTableModel.data()'s EditRole values so a copied
-        value round-trips identically to what editing the cell directly would
-        produce."""
+        Uses the same coercion/normalization rules as ExperimentPlanTableModel's
+        EditRole values (see flow_plan_model.py) so a copied value round-trips
+        identically to what editing the cell directly would produce."""
         steps = self._read_experiment_control_steps()
         if row < 0 or row >= len(steps):
             return None
@@ -4095,17 +4096,17 @@ class ExperimentControlWindow(QWidget):
                 return None
             channel = step.channels[channel_index]
             if field == 0:
-                return float(channel.flow_ul_min)
+                return float(clamped_flow_ul_min(channel.flow_ul_min))
             if field == 1:
-                return "CCW" if str(channel.direction or "").upper() == "CCW" else "CW"
+                return normalized_pump_direction(channel.direction)
             tube_values = self._tube_mm_values()
             return float(tube_values[channel_index]) if channel_index < len(tube_values) else 0.25
         if kind == "valve":
-            return "Close" if str(step.valve or "").strip().lower() == "close" else "Open"
+            return normalized_valve_state(step.valve)
         if kind == "switch":
-            return int(step.switch_position)
+            return clamped_switch_position(step.switch_position)
         if kind == "color":
-            return str(step.color or "#4E79A7")
+            return safe_color_name(step.color) or "#4E79A7"
         if kind == "comment":
             return str(step.description or "")
         return None
@@ -4132,10 +4133,10 @@ class ExperimentControlWindow(QWidget):
         """Write a copied value into ``steps[row]`` at ``column``, for the paste
         side of cell copy/paste. Mutates the given step in place and returns
         whether the write applied; callers (ExperimentControlEditingController.
-        paste_selection) treat ``False`` as "incompatible cell, skip it" -
-        matches the parsing/clamping rules ExperimentPlanTableModel.setData()
-        uses for the same columns, so pasting behaves like typing the same
-        value directly into the cell."""
+        paste_selection) treat ``False`` as "incompatible cell, skip it" - uses
+        the same coercion/clamping rules as ExperimentPlanTableModel.setData()
+        (see flow_plan_model.py) for the same columns, so pasting behaves like
+        typing the same value directly into the cell."""
         if row < 0 or row >= len(steps):
             return False
         step = steps[row]
@@ -4153,12 +4154,12 @@ class ExperimentControlWindow(QWidget):
                 return False
             if field == 0:
                 try:
-                    step.channels[channel_index].flow_ul_min = max(round(float(value)), 0)
+                    step.channels[channel_index].flow_ul_min = clamped_flow_ul_min(value)
                 except (TypeError, ValueError):
                     return False
                 return True
             if field == 1:
-                step.channels[channel_index].direction = "CCW" if str(value).upper() == "CCW" else "CW"
+                step.channels[channel_index].direction = normalized_pump_direction(value)
                 return True
             # field == 2 (tube diameter) isn't a per-step value - it's a single
             # shared setting per channel (the manual_tube_spins row, applied to
@@ -4166,17 +4167,13 @@ class ExperimentControlWindow(QWidget):
             # Copy-only, same as the Step# and time columns below.
             return False
         if kind == "valve":
-            step.valve = "Close" if str(value).strip().lower() == "close" else "Open"
+            step.valve = normalized_valve_state(value)
             return True
         if kind == "switch":
-            try:
-                step.switch_position = max(min(int(value), 12), 1)
-            except (TypeError, ValueError):
-                step.switch_position = 1
+            step.switch_position = clamped_switch_position(value)
             return True
         if kind == "color":
-            color = QColor(str(value or "").strip())
-            step.color = color.name().upper() if color.isValid() else "#4E79A7"
+            step.color = safe_color_name(str(value)) or "#4E79A7"
             return True
         if kind == "comment":
             step.description = str(value or "").strip()
