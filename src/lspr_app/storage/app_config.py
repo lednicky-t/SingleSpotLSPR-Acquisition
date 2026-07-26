@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import shutil
@@ -58,22 +59,65 @@ def _quarantine_corrupt_file(path: Path, exc: Exception) -> Path:
     return quarantine_path
 
 
+# In-process cache for _load_payload/_write_payload, keyed by path and validated
+# against the file's mtime. This module has ~100 call sites app-wide (every
+# load_app_setting/save_app_setting/save_window_ui_state/etc. call goes through
+# here), so avoiding a disk read + full JSON parse on every single one is a real
+# win. The mtime check means an external writer (e.g. the suite launcher's
+# "reset settings" / "restore backup" actions, which touch this same file
+# directly while the app may be running) is still picked up on the next call
+# instead of being silently overwritten by a stale in-memory copy.
+_payload_cache: dict | None = None
+_payload_cache_mtime: float | None = None
+_payload_cache_path: Path | None = None
+
+
+def _reset_payload_cache() -> None:
+    global _payload_cache, _payload_cache_mtime, _payload_cache_path
+    _payload_cache = None
+    _payload_cache_mtime = None
+    _payload_cache_path = None
+
+
 def _load_payload(path: Path) -> dict:
-    if not path.exists():
-        return {}
+    """Read+parse *path* as JSON, returning {} if missing/corrupt.
+
+    Always returns a deep copy of the cached payload, so callers remain free
+    to mutate the result without corrupting the cache or a later save -
+    matching the old no-cache behavior where every call freshly parsed the
+    file from scratch.
+    """
+    global _payload_cache, _payload_cache_mtime, _payload_cache_path
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        mtime = path.stat().st_mtime
+    except OSError:
+        _reset_payload_cache()
+        return {}
+    if _payload_cache is not None and _payload_cache_path == path and _payload_cache_mtime == mtime:
+        return copy.deepcopy(_payload_cache)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
         _quarantine_corrupt_file(path, exc)
+        _reset_payload_cache()
         return {}
+    _payload_cache, _payload_cache_mtime, _payload_cache_path = payload, mtime, path
+    return copy.deepcopy(payload)
 
 
 def _write_payload(payload: dict, path: Path) -> None:
     """Write *payload* atomically so a crash mid-write can't corrupt the file."""
+    global _payload_cache, _payload_cache_mtime, _payload_cache_path
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp_path.replace(path)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        _reset_payload_cache()
+        return
+    _payload_cache, _payload_cache_mtime, _payload_cache_path = copy.deepcopy(payload), mtime, path
 
 
 # Renamed fields from older config/HDF5 schemas: old_name → new_name.
