@@ -896,48 +896,6 @@ def autoscale_metric_plot(window, *, force: bool = True) -> None:
                 )
 
 
-def update_residual_view_geometry(window) -> None:
-    if not hasattr(window, "residual_view"):
-        return
-    spectrum_vb = window.spectrum_plot.getPlotItem().vb
-    window.residual_view.setGeometry(spectrum_vb.sceneBoundingRect())
-    window.residual_view.linkedViewChanged(spectrum_vb, pg.ViewBox.XAxis)
-
-
-def autoscale_residual_axis(window) -> None:
-    if not hasattr(window, "residual_view") or not window.show_residual_button.isChecked():
-        return
-    if bool(getattr(window, "_residual_axis_autoscaled", False)):
-        return
-    residual = window.residual_curve.yData
-    if residual is None or len(residual) == 0:
-        window.residual_view.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
-        window._residual_axis_autoscaled = True
-        return
-    y = np.asarray(residual, dtype=np.float64)
-    finite = np.isfinite(y)
-    if not np.any(finite):
-        return
-    y = y[finite]
-    amplitude = float(np.percentile(np.abs(y), 95))
-    amplitude = max(amplitude, float(np.max(np.abs(y))), 1e-9)
-    pad = max(amplitude * 0.15, 1e-6)
-    if not np.isfinite(pad):
-        pad = 1e-6
-    half_span = min(amplitude + pad, 100.0)
-    window.residual_view.setYRange(-half_span, half_span, padding=0.0)
-    window._residual_axis_autoscaled = True
-
-
-def update_residual_axis_visibility(window, visible: bool | None = None) -> None:
-    if visible is None:
-        visible = window.show_residual_button.isChecked()
-    if hasattr(window, "residual_axis"):
-        window.residual_axis.setVisible(visible)
-    if hasattr(window, "residual_view"):
-        window.residual_view.setVisible(visible)
-
-
 def request_metric_autoscale(window) -> None:
     if bool(getattr(window, "_sensorgram_frozen", False)):
         return
