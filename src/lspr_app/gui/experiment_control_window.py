@@ -4658,13 +4658,6 @@ class ExperimentControlWindow(QWidget):
     def eventFilter(self, obj, event):  # pragma: no cover - GUI runtime path
         if hasattr(self, "_experiment_control_edit_controller") and self._experiment_control_edit_controller.event_filter(obj, event):
             return True
-        if event.type() == QEvent.Type.KeyPress and getattr(obj, "property", None) is not None:
-            if bool(obj.property("flow_navigation")):
-                # FIXME: flagged during a pyflakes/ruff sweep - this reads the key but never
-                # acts on it, unlike the flow_wheel_scroll handling right below (which is fully
-                # implemented). Looks like keyboard-based flow-table navigation was started and
-                # never finished. Needs a maintainer decision on intended behavior, not a guess.
-                key = event.key()  # noqa: F841
         if event.type() == QEvent.Type.Wheel and getattr(obj, "property", None) is not None:
             if bool(obj.property("flow_wheel_scroll")):
                 if isinstance(obj, QDoubleSpinBox):
@@ -5043,12 +5036,6 @@ class ExperimentControlWindow(QWidget):
         dispatch's, even if several are in flight at once (see
         _StepApplyResult.on_success's docstring).
         """
-        # FIXME: flagged during a pyflakes/ruff sweep - captured but never used. The actual
-        # command diffing reads self._applied_plan_step inside _plan_step_commands below, so
-        # this was likely meant for the log line right after (no "previous step" context is
-        # logged today). Not changed here since this is hardware step-transition logging -
-        # a maintainer should confirm before altering it.
-        previous = self._applied_plan_step  # noqa: F841
         _LOGGER.info(
             "Experiment control step apply (async) | step=%s pump_connected=%s valve_connected=%s switch_connected=%s",
             step.step,
