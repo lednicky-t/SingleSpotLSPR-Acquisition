@@ -432,6 +432,89 @@ class MainWindow(QMainWindow):
                 self._startup_timing_buffer.append(message)
 
         _startup_mark("QMainWindow base initialized")
+        self._init_runtime_state(spectrometer, session, discovered_pump_probe)
+        _startup_mark("window flags and icon set")
+
+        # Keep live plots responsive by default; the user can enable smoothing from plot settings.
+        pg.setConfigOptions(antialias=self._plot_antialias_enabled)
+        self._apply_modern_style()
+        _startup_mark("application style applied")
+
+        self._initialize_logging_ui()
+        self._processing_debug_mode_enabled = bool(
+            self._processing_debug_mode_enabled or self._diagnostics.debug_timing_enabled
+        )
+        set_processing_debug_mode_enabled(self._processing_debug_mode_enabled)
+        if self._startup_timing_buffer:
+            for message in self._startup_timing_buffer:
+                self._ui_logger.info(message)
+            self._startup_timing_buffer.clear()
+        _startup_mark("logging UI initialized")
+        self._install_shortcuts()
+        _startup_mark("shortcuts installed")
+
+        self._build_control_panel_widgets()
+        _startup_mark("building source tabs")
+        self.source_tabs.addTab(self._build_spectrometer_page(), "Spectrometer")
+        self.source_tabs.addTab(self._build_simulation_page(), "Simulation")
+        self.source_tabs.setDocumentMode(True)
+        tab_bar = self.source_tabs.tabBar()
+        tab_bar.setExpanding(True)
+        tab_bar.setUsesScrollButtons(False)
+        tab_bar.setElideMode(Qt.TextElideMode.ElideNone)
+        self.source_tabs.setIconSize(QSize(16, 16))
+        self.source_tabs.currentChanged.connect(self._handle_source_tab_changed)
+        install_source_link_buttons(self)
+        install_source_tab_headers(self)
+        self._configure_source_tabs()
+        _startup_mark("source tabs configured")
+
+        self.trace_time_axis = FlexibleTimeAxis("bottom")
+        self.trace_time_axis._diagnostics_owner = self
+        self.trace_time_axis._diagnostics_prefix = "trace_time_axis"
+        self.trace_time_axis.doubleClicked.connect(self._toggle_sensorgram_time_axis_mode)
+        self._apply_sensorgram_time_axis_mode()
+        _startup_mark("building spectrum and metric plots")
+        self._build_spectrum_and_trace_plots()
+        _startup_mark("plot widgets styled")
+
+        self._build_session_summary_panel()
+
+        self._apply_control_sizing()
+        _startup_mark("control sizing applied")
+        self._build_layout()
+        _startup_mark("main layout built")
+        self._build_menu_bar()
+        _startup_mark("menu bar built")
+        self._sync_view_actions()
+        self._flow_panel_bootstrap_pending = False
+        self._experiment_control_panel_bootstrap_pending = False
+        _startup_mark("experiment control panel bootstrap deferred")
+        self.log_clear_button.clicked.connect(self._clear_log_terminal)
+        self.log_copy_button.clicked.connect(self._copy_log_terminal)
+        self.log_follow_button.toggled.connect(self._set_log_following)
+        self._apply_launch_profile_layout()
+        self._restore_ui_state()
+        _startup_mark("UI state restored")
+        if not self._ui_state:
+            self._fit_window_to_available_screen()
+        self._apply_processing_settings_to_widgets(self._processing_settings)
+        self._apply_acquisition_state_to_widgets(self._acquisition_state)
+        _startup_mark("saved settings applied")
+        self._connect_processing_widgets()
+        self._connect_simulation_widgets()
+        _startup_mark("widget signals connected")
+        self._finish_startup_sequence()
+        _startup_mark("startup wiring complete")
+        if bool(getattr(self, "_startup_show_requested", False)):
+            QTimer.singleShot(0, self._complete_startup_show)
+
+    def _init_runtime_state(
+        self,
+        spectrometer: Spectrometer,
+        session: MeasurementSession,
+        discovered_pump_probe: "PumpProbe | None",
+    ) -> None:
         self._spectrometer = spectrometer
         self._hardware_session = session
         self._simulation_session = MeasurementSession()
@@ -856,26 +939,8 @@ class MainWindow(QMainWindow):
         self.resize(1380, 920)
         self._startup_window_revealed = False
         self._startup_show_requested = False
-        _startup_mark("window flags and icon set")
 
-        # Keep live plots responsive by default; the user can enable smoothing from plot settings.
-        pg.setConfigOptions(antialias=self._plot_antialias_enabled)
-        self._apply_modern_style()
-        _startup_mark("application style applied")
-
-        self._initialize_logging_ui()
-        self._processing_debug_mode_enabled = bool(
-            self._processing_debug_mode_enabled or self._diagnostics.debug_timing_enabled
-        )
-        set_processing_debug_mode_enabled(self._processing_debug_mode_enabled)
-        if self._startup_timing_buffer:
-            for message in self._startup_timing_buffer:
-                self._ui_logger.info(message)
-            self._startup_timing_buffer.clear()
-        _startup_mark("logging UI initialized")
-        self._install_shortcuts()
-        _startup_mark("shortcuts installed")
-
+    def _build_control_panel_widgets(self) -> None:
         def _make_footer_label(widget_cls, tooltip: str, text: str = "") -> QWidget:
             label = widget_cls(self)
             label.setWordWrap(False)
@@ -1245,27 +1310,8 @@ class MainWindow(QMainWindow):
         self.plot_selector.currentTextChanged.connect(self._refresh_plot)
 
         self.source_tabs = QTabWidget(self)
-        _startup_mark("building source tabs")
-        self.source_tabs.addTab(self._build_spectrometer_page(), "Spectrometer")
-        self.source_tabs.addTab(self._build_simulation_page(), "Simulation")
-        self.source_tabs.setDocumentMode(True)
-        tab_bar = self.source_tabs.tabBar()
-        tab_bar.setExpanding(True)
-        tab_bar.setUsesScrollButtons(False)
-        tab_bar.setElideMode(Qt.TextElideMode.ElideNone)
-        self.source_tabs.setIconSize(QSize(16, 16))
-        self.source_tabs.currentChanged.connect(self._handle_source_tab_changed)
-        install_source_link_buttons(self)
-        install_source_tab_headers(self)
-        self._configure_source_tabs()
-        _startup_mark("source tabs configured")
 
-        self.trace_time_axis = FlexibleTimeAxis("bottom")
-        self.trace_time_axis._diagnostics_owner = self
-        self.trace_time_axis._diagnostics_prefix = "trace_time_axis"
-        self.trace_time_axis.doubleClicked.connect(self._toggle_sensorgram_time_axis_mode)
-        self._apply_sensorgram_time_axis_mode()
-        _startup_mark("building spectrum and metric plots")
+    def _build_spectrum_and_trace_plots(self) -> None:
         self.spectrum_left_axis = ScientificAxis("left")
         self.spectrum_left_axis._diagnostics_owner = self
         self.spectrum_left_axis._diagnostics_prefix = "spectrum_left_axis"
@@ -1437,8 +1483,8 @@ class MainWindow(QMainWindow):
         self.trace_plot.getPlotItem().vb.sigResized.connect(self._sync_sensorgram_control_step_overlay)
         self._style_plot_widgets()
         self._apply_sensorgram_display_style()
-        _startup_mark("plot widgets styled")
 
+    def _build_session_summary_panel(self) -> None:
         self.session_summary = QTextEdit()
         self.session_summary.setObjectName("sessionSettingsText")
         self.session_summary.setReadOnly(True)
@@ -1487,30 +1533,7 @@ class MainWindow(QMainWindow):
         )
         self.session_font_up_button.clicked.connect(self._increase_session_summary_font_size)
 
-        self._apply_control_sizing()
-        _startup_mark("control sizing applied")
-        self._build_layout()
-        _startup_mark("main layout built")
-        self._build_menu_bar()
-        _startup_mark("menu bar built")
-        self._sync_view_actions()
-        self._flow_panel_bootstrap_pending = False
-        self._experiment_control_panel_bootstrap_pending = False
-        _startup_mark("experiment control panel bootstrap deferred")
-        self.log_clear_button.clicked.connect(self._clear_log_terminal)
-        self.log_copy_button.clicked.connect(self._copy_log_terminal)
-        self.log_follow_button.toggled.connect(self._set_log_following)
-        self._apply_launch_profile_layout()
-        self._restore_ui_state()
-        _startup_mark("UI state restored")
-        if not self._ui_state:
-            self._fit_window_to_available_screen()
-        self._apply_processing_settings_to_widgets(self._processing_settings)
-        self._apply_acquisition_state_to_widgets(self._acquisition_state)
-        _startup_mark("saved settings applied")
-        self._connect_processing_widgets()
-        self._connect_simulation_widgets()
-        _startup_mark("widget signals connected")
+    def _finish_startup_sequence(self) -> None:
         self._update_simulation_labels()
         self._sync_simulation_backend_from_controls()
         self.plot_selector.currentTextChanged.connect(lambda _text: self._schedule_acquisition_state_persist())
@@ -1580,9 +1603,6 @@ class MainWindow(QMainWindow):
         if getattr(self, "_pending_top_view_mode", None) in {"flow", "experimental_control"}:
             self._pending_top_view_mode = None
             QTimer.singleShot(0, self._activate_experimental_control_view)
-        _startup_mark("startup wiring complete")
-        if bool(getattr(self, "_startup_show_requested", False)):
-            QTimer.singleShot(0, self._complete_startup_show)
 
     # ------------------------------------------------------------------
     # Sensorgram display state - thin property shims over self._sensorgram_display
