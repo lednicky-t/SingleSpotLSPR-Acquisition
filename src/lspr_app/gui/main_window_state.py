@@ -1,4 +1,29 @@
-﻿from __future__ import annotations
+﻿"""MainWindow layout persistence, view-mode switching, and acquisition-state
+application.
+
+Despite the module name, most of this is not a passive state container -
+it's UI orchestration with real side effects. In particular:
+  - the view-mode functions (activate_flow_view, show_experimental_control_only,
+    etc.) reparent widgets between layouts, not just flip a flag;
+  - apply_source_mode_for() can restart live acquisition as a side effect of
+    changing the displayed source mode;
+  - apply_acquisition_state_to_widgets() pushes a saved acquisition-state
+    payload onto live widgets, which can itself trigger further side effects
+    through their change handlers.
+
+Roughly five clusters live here, in file order (see the matching section
+banners below):
+  1. Layout preset persistence (save/load/apply named splitter+visibility
+     presets to/from lspr_settings.json)
+  2. Top-content view-mode & splitter helpers
+  3. Window/UI-state restore and save (geometry, panel visibility, splitter
+     sizes, sensorgram display settings) - the closest thing here to a plain
+     state container, though restore has widget side effects by nature
+  4. Panel visibility toggles & view switching
+  5. Acquisition-state application - clusters 4 and 5 are the parts most
+     likely to have a side effect beyond "remember a value"
+"""
+from __future__ import annotations
 
 from PyQt6.QtCore import QRect, QTimer
 from PyQt6.QtGui import QGuiApplication
@@ -13,6 +38,11 @@ from lspr_app.domain.pump_plan import to_core_experiment_plan
 from lspr_app.gui.main_window_processing import normalize_sensorgram_metric_name, sensorgram_metric_order
 from lspr_app.storage.app_config import load_app_setting, save_acquisition_state, save_window_ui_state
 from lspr_core import LAUNCH_PROFILE_CONTROL_EDITOR, LAUNCH_PROFILE_FULL, LAUNCH_PROFILE_SIMULATION, launch_profile_spec, DEFAULT_LAUNCH_PROFILE
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 1. Layout preset persistence
+# ═══════════════════════════════════════════════════════════════════════
 
 
 def normalize_top_content_mode(mode: str | None) -> str:
@@ -526,6 +556,11 @@ def reset_layout_presets_to_defaults(window) -> None:
     save_ui_state(window)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# 2. Top-content view-mode & splitter helpers
+# ═══════════════════════════════════════════════════════════════════════
+
+
 def ensure_visible_top_content_splitter(window, mode: str | None = None) -> None:
     splitter = getattr(window, "plot_splitter", None)
     if splitter is None:
@@ -645,6 +680,11 @@ def set_top_content_mode(window, mode: str, *, save: bool = True) -> None:
     window._sync_view_actions()
     if save:
         window._schedule_ui_state_persist()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 3. Window/UI-state restore and save
+# ═══════════════════════════════════════════════════════════════════════
 
 
 def _restore_window_geometry(window, ui_state: dict[str, object]) -> None:
@@ -1205,6 +1245,12 @@ def restore_collapsible_section_state(window) -> None:
         spectra_section.set_expanded(bool(saved["processing"]))
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# 4. Panel visibility toggles & view switching (side-effecting - these
+#    reparent widgets between layouts, not just flip a flag)
+# ═══════════════════════════════════════════════════════════════════════
+
+
 def set_gui_housekeeping_enabled(window, enabled: bool) -> None:
     from lspr_app.storage.app_config import save_app_setting
 
@@ -1400,6 +1446,13 @@ def apply_launch_profile_layout(window) -> None:
     else:
         show_plots_only(window)
     sync_view_actions(window)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 5. Acquisition-state application (side-effecting - apply_source_mode_for
+#    can restart live acquisition; apply_acquisition_state_to_widgets can
+#    trigger widget change handlers with their own side effects)
+# ═══════════════════════════════════════════════════════════════════════
 
 
 def acquisition_state_payload(window) -> dict[str, object]:
