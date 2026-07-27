@@ -4,6 +4,8 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFontMetrics, QColor
 from PyQt6.QtWidgets import QHeaderView
 
+from lspr_app.device.device_lifecycle import DeviceLifecycleController
+from lspr_app.device.device_types import SELECTOR
 from lspr_app.domain.pump_plan import ACTIVE_PUMP_CHANNELS
 from lspr_app.gui.experiment_control_plan_view import (
     configure_experiment_control_plan_preview as _configure_experiment_control_plan_preview,
@@ -78,6 +80,9 @@ def configure_experiment_control_table_columns(window) -> None:
     for channel_index in range(ACTIVE_PUMP_CHANNELS):
         window.plan_table.setColumnHidden(window._direction_column(channel_index), not window._show_plan_details)
         window.plan_table.setColumnHidden(window._tube_column(channel_index), not window._show_plan_details)
+    window.plan_table.setColumnHidden(
+        window._switch_column(), not DeviceLifecycleController.shared().is_device_type_enabled(SELECTOR)
+    )
     for column in range(len(window.PLAN_COLUMNS)):
         header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
     header.setSectionResizeMode(window._description_column(), QHeaderView.ResizeMode.Interactive)

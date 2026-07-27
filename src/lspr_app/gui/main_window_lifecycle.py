@@ -272,6 +272,14 @@ def apply_device_enablement_for(window, enabled: dict[str, bool]) -> None:
     previous = controller.enabled_devices()
     controller.set_enabled_devices(enabled)
     refresh_hw_device_status_strip(window)
+    # Unconditional, not just as a side effect of the disconnect task below:
+    # a device can be disabled while not currently connected at all (never
+    # plugged in, or the scan just hasn't reached it yet), in which case no
+    # disconnect task ever runs - but the Experiment Control panel's
+    # device-specific controls (e.g. the Switch column) must still hide
+    # based on the enabled/disabled *setting* itself, independent of
+    # whether anything was ever connected.
+    _sync_experiment_control_panel_after_enablement_change(window)
 
     newly_disabled = [
         key for key in DEVICE_ORDER
@@ -291,14 +299,18 @@ def apply_device_enablement_for(window, enabled: dict[str, bool]) -> None:
         window._start_hardware_initialization()
 
 
-def _after_device_enablement_disconnect(window) -> None:
-    refresh_hw_device_status_strip(window)
+def _sync_experiment_control_panel_after_enablement_change(window) -> None:
     experiment_control_window = getattr(window, "_experiment_control_window", None)
     if experiment_control_window is not None and hasattr(experiment_control_window, "sync_from_lifecycle_controller"):
         try:
             experiment_control_window.sync_from_lifecycle_controller()
         except Exception as exc:
-            window._log_warning(f"Could not sync experiment-control panel after device disable: {exc}")
+            window._log_warning(f"Could not sync experiment-control panel after device enablement change: {exc}")
+
+
+def _after_device_enablement_disconnect(window) -> None:
+    refresh_hw_device_status_strip(window)
+    _sync_experiment_control_panel_after_enablement_change(window)
 
 
 def sync_hardware_menu_actions_for(window) -> None:

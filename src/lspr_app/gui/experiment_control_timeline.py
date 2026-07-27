@@ -50,6 +50,8 @@ from PyQt6.QtCore import QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPen
 from PyQt6.QtWidgets import QSizePolicy, QToolButton, QToolTip, QWidget
 
+from lspr_app.device.device_lifecycle import DeviceLifecycleController
+from lspr_app.device.device_types import SELECTOR
 from lspr_app.domain.pump_plan import PumpPlanStep, recompute_plan_timing
 
 
@@ -536,13 +538,18 @@ class PumpPlanTimelineWidget(QWidget):
                 step = self._steps[index]
                 self._hover_row = index
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
+                switch_line = (
+                    f"Switch: port {max(min(int(step.switch_position), 12), 1)}\n"
+                    if DeviceLifecycleController.shared().is_device_type_enabled(SELECTOR)
+                    else ""
+                )
                 QToolTip.showText(
                     self.mapToGlobal(point),
                     (
                         f"Step {step.step}\n"
                         f"{step.description or '-'}\n"
                         f"Valve: {step.valve or '-'}\n"
-                        f"Switch: port {max(min(int(step.switch_position), 12), 1)}\n"
+                        f"{switch_line}"
                         f"Start: {self._format_duration(step.start_s)}\n"
                         f"End: {self._format_duration(step.end_s)}\n"
                         f"Duration: {self._format_duration(step.duration_s)}"

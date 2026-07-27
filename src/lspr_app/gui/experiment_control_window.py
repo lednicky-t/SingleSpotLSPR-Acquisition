@@ -826,6 +826,8 @@ class ExperimentControlWindow(QWidget):
         switch_layout.addWidget(self.step_switch_combo)
         switch_layout.addStretch(1)
         switch_widget.setLayout(switch_layout)
+        self._switch_header_widget = switch_header_widget
+        self._switch_widget = switch_widget
         matrix.addWidget(switch_header_widget, 0, ACTIVE_PUMP_CHANNELS + 6)
         matrix.addWidget(switch_widget, 1, ACTIVE_PUMP_CHANNELS + 6)
         matrix.addWidget(color_header_widget, 0, ACTIVE_PUMP_CHANNELS + 7)
@@ -962,6 +964,7 @@ class ExperimentControlWindow(QWidget):
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.addWidget(scroller)
         self.setLayout(outer_layout)
+        self._sync_switch_controls_visibility()
 
     def _connect_signals(self) -> None:
         self.plan_toggle_button.clicked.connect(self._experiment_control_controller.toggle_run_hold)
@@ -3511,6 +3514,18 @@ class ExperimentControlWindow(QWidget):
         self._sync_pump_from_controller(controller)
         self._sync_valve_from_controller(controller)
         self._sync_mswitch_from_controller(controller)
+        self._sync_switch_controls_visibility()
+
+    def _sync_switch_controls_visibility(self) -> None:
+        """Hide the plan-table Switch column and the single-step editor's
+        switch controls when the Selector (AMF M-Switch, shown as "Switch
+        Rotary Valve" in the titlebar) is disabled via the Hardware devices
+        dialog. Safe to call before any hardware scan has run -
+        is_device_type_enabled() is a plain in-memory lookup, no device I/O."""
+        enabled = DeviceLifecycleController.shared().is_device_type_enabled(SELECTOR)
+        self._switch_header_widget.setVisible(enabled)
+        self._switch_widget.setVisible(enabled)
+        self._configure_experiment_control_table_columns()
 
     def _sync_pump_from_controller(self, controller: DeviceLifecycleController) -> None:
         # is_connected_cached(), not is_connected(): this can run while
@@ -5500,6 +5515,7 @@ class ExperimentControlWindow(QWidget):
             tube_mm_by_channel=self._tube_mm_values(),
             active_channel_count=ACTIVE_PUMP_CHANNELS,
             hdf5_channel_count=HDF5_PUMP_CHANNELS,
+            switch_position_enabled=DeviceLifecycleController.shared().is_device_type_enabled(SELECTOR),
         )
         return table.rows
 
