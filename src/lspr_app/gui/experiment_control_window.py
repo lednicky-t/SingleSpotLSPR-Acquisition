@@ -671,7 +671,7 @@ class ExperimentControlWindow(QWidget):
             "Hide experimental control.",
             size=22,
         )
-        editor_hide_button.clicked.connect(lambda _checked=False: self._activate_spectra_view())
+        editor_hide_button.clicked.connect(lambda _checked=False: self.window()._activate_spectra_view())
         editor_header_row = QWidget(self)
         editor_header_row_layout = QHBoxLayout()
         editor_header_row_layout.setContentsMargins(0, 0, 0, 0)
