@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 
 from lspr_app.gui.panel_help import make_help_button
 from lspr_app.gui.panel_help_text import SIMULATION_BODY, SIMULATION_TITLE, SIMULATION_TOOLTIP
@@ -238,8 +238,22 @@ def configure_spectra_processing_group_controls(window) -> None:
     # temporal: range 1–64 (2 digits) — size from hint
     temp_width = max(int(round(window.temporal_smoothing_spin.sizeHint().width() * 0.80)), 38)
     window.temporal_smoothing_spin.setFixedWidth(temp_width)
-    # smoothing window: practical max 3 digits
-    window.smoothing_window_spin.setFixedWidth(44)
+    # smoothing window: practical max 3 digits - narrow it to match the
+    # "Window" title label above it instead of a wider fixed guess, so the
+    # box lines up with its own label rather than sticking out past it.
+    # Deferred: setting this immediately gets silently widened right back by
+    # make_compact_spinbox's own deferred content-based-minimum-width pass
+    # (queued earlier, at construction time - see ui_helpers.py), which sizes
+    # for this spinbox's full declared range (up to 2147483647, ~10 digits)
+    # rather than the ~3 digits this box will ever actually show. Both are
+    # scheduled as singleShot(0, ...), so queuing this one after guarantees
+    # it fires second and has the final say.
+    def _apply_smoothing_window_width() -> None:
+        window_title_label = getattr(window, "_processing_smoothing_window_title_widget", None)
+        window_width = window_title_label.sizeHint().width() if window_title_label is not None else 44
+        window.smoothing_window_spin.setFixedWidth(window_width)
+
+    QTimer.singleShot(0, _apply_smoothing_window_width)
     # poly order: practical max 2 digits
     window.poly_order_spin.setFixedWidth(40)
 
