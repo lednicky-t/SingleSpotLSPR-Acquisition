@@ -126,6 +126,12 @@ def build_menu_bar(window) -> QMenuBar:
     # ── Hardware ──────────────────────────────────────────────────────────────
     hw_menu = menu_bar.addMenu("Hardware")
 
+    hw_devices_action = hw_menu.addAction("Hardware devices…")
+    hw_devices_action.setToolTip("Choose which device types this app manages.")
+    hw_devices_action.triggered.connect(window._show_hardware_devices_dialog)
+
+    hw_menu.addSeparator()
+
     hw_init_action = hw_menu.addAction("Reinitialize hardware")
     hw_init_action.setToolTip("Disconnect all devices, then scan and reconnect all available hardware.")
     hw_init_action.triggered.connect(window._start_hardware_initialization)

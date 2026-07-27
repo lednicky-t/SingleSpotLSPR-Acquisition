@@ -117,6 +117,7 @@ from lspr_app.gui.main_window_runtime import (
 )
 from lspr_app.gui.main_window_lifecycle import (
     acquisition_state_payload_for,
+    apply_device_enablement_for,
     close_event_for,
     collapsible_section_state_for,
     event_filter_for,
@@ -330,6 +331,7 @@ from lspr_app.gui.spectrum_plot_controller import (
 )
 from lspr_app.gui.device_lifecycle_task import DeviceLifecycleCycleTask
 from lspr_app.gui.device_console_dialog import show_device_manager_dialog
+from lspr_app.gui.hardware_devices_dialog import show_hardware_devices_dialog_for
 from lspr_app.gui.workers import (
     AcquisitionResult,
     MeasurementCompressionTask,
@@ -2853,6 +2855,12 @@ class MainWindow(QMainWindow):
 
     def _show_device_manager_dialog(self) -> None:
         show_device_manager_dialog(self)
+
+    def _show_hardware_devices_dialog(self) -> None:
+        show_hardware_devices_dialog_for(self)
+
+    def _apply_device_enablement(self, enabled: dict[str, bool]) -> None:
+        apply_device_enablement_for(self, enabled)
 
     def _set_processing_debug_mode_enabled(self, enabled: bool) -> None:
         self._processing_debug_mode_enabled = bool(enabled)

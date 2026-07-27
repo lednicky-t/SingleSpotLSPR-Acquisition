@@ -54,8 +54,46 @@ STAGE_MISSING = "missing"
 STAGE_FAILED = "failed"
 STAGE_DISCONNECTED = "disconnected"
 STAGE_SIMULATION = "simulation"
+STAGE_DISABLED = "disabled"
 
-TERMINAL_STAGES = {STAGE_READY, STAGE_MISSING, STAGE_FAILED, STAGE_DISCONNECTED, STAGE_SIMULATION}
+TERMINAL_STAGES = {
+    STAGE_READY,
+    STAGE_MISSING,
+    STAGE_FAILED,
+    STAGE_DISCONNECTED,
+    STAGE_SIMULATION,
+    STAGE_DISABLED,
+}
+
+# ── Per-device-type enable/disable (Hardware menu > "Hardware devices...") ──────
+#
+# A device type turned off here is skipped entirely by run_full_cycle() - no
+# port probing, no connect attempt - and hidden from the titlebar status strip
+# (see gui/main_window_titlebar.py). This is independent of whether a device
+# is actually plugged in; it is a user choice to stop the app from managing a
+# device type at all, e.g. to hide a not-yet-reliable driver or hardware that
+# just isn't part of a given setup. Missing/absent settings default to True
+# (enabled) so existing configs behave exactly as before this feature existed.
+
+_ENABLED_DEVICES_SETTING_KEY = "enabled_devices"
+
+
+def load_enabled_devices() -> dict[str, bool]:
+    from lspr_app.storage.app_config import load_app_setting
+
+    raw = load_app_setting(_ENABLED_DEVICES_SETTING_KEY, {})
+    if not isinstance(raw, dict):
+        raw = {}
+    return {key: bool(raw.get(key, True)) for key in DEVICE_ORDER}
+
+
+def save_enabled_devices(enabled: dict[str, bool]) -> None:
+    from lspr_app.storage.app_config import save_app_setting
+
+    save_app_setting(
+        _ENABLED_DEVICES_SETTING_KEY,
+        {key: bool(enabled.get(key, True)) for key in DEVICE_ORDER},
+    )
 
 _DEVICE_DRIVER = {PUMP: "reglo_icc", SWITCH: "auto", SELECTOR: "amf-mswitch"}
 _DEVICE_ROLE = {PUMP: "sample_pump", SWITCH: "inlet_switch", SELECTOR: "main_selector"}
@@ -266,6 +304,7 @@ class DeviceLifecycleController:
         self._service = service or DeviceCommunicationService.shared()
         self._busy: set[str] = set()
         self._last_event: dict[str, DeviceLifecycleEvent] = {}
+        self._enabled_devices: dict[str, bool] = load_enabled_devices()
 
     @classmethod
     def shared(cls) -> "DeviceLifecycleController":
@@ -307,6 +346,18 @@ class DeviceLifecycleController:
     def probe_for(self, device_key: str) -> object | None:
         event = self._last_event.get(device_key)
         return event.probe if event is not None else None
+
+    # -- Per-device-type enable/disable ----------------------------------------
+
+    def is_device_type_enabled(self, device_key: str) -> bool:
+        return self._enabled_devices.get(device_key, True)
+
+    def enabled_devices(self) -> dict[str, bool]:
+        return dict(self._enabled_devices)
+
+    def set_enabled_devices(self, enabled: dict[str, bool]) -> None:
+        self._enabled_devices = {key: bool(enabled.get(key, True)) for key in DEVICE_ORDER}
+        save_enabled_devices(self._enabled_devices)
 
     # -- Spectrometer ---------------------------------------------------------
 
@@ -362,6 +413,9 @@ class DeviceLifecycleController:
         _, spectrometer_instance = self.run_spectrometer_stage(_emit)
         ports = self.refresh_ports()
         for device_key in DEVICE_ORDER:
+            if not self._enabled_devices.get(device_key, True):
+                _emit(DeviceLifecycleEvent(device_key, STAGE_DISABLED, "Disabled in Hardware devices settings."))
+                continue
             self._discover_and_connect(device_key, ports, _emit)
         _LOGGER.info("Device lifecycle cycle finished.")
 

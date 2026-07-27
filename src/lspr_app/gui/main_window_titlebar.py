@@ -122,7 +122,7 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
         item_layout.addWidget(text_label)
         item.setLayout(item_layout)
         status_layout.addWidget(item)
-        window._hw_status_items.append((key, icon_label, text_label))
+        window._hw_status_items.append((key, item, icon_label, text_label))
     status_cluster.setLayout(status_layout)
     status_cluster.setVisible(bool(profile.show_device_statuses))
     window._titlebar_status_cluster = status_cluster
@@ -217,9 +217,13 @@ def refresh_hw_device_status_strip(window) -> None:
                 pass
         devices[titlebar_key] = (state, _port_name(probe))
 
-    for key, icon_label, text_label in items:
-        state, port_name = devices.get(key, ("disconnected", ""))
+    for key, item, icon_label, text_label in items:
         device_key = _TITLEBAR_KEY_TO_DEVICE_KEY.get(key)
+        if device_key is not None and not controller.is_device_type_enabled(device_key):
+            item.setVisible(False)
+            continue
+        item.setVisible(True)
+        state, port_name = devices.get(key, ("disconnected", ""))
         detail = activity_text.get(device_key, "") if device_key is not None else ""
         icon_label.setPixmap(device_status_icon(state).pixmap(16, 16))
         base_text = text_label.text().split(":", 1)[0].strip()

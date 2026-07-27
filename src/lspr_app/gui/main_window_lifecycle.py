@@ -8,10 +8,15 @@ from time import perf_counter
 
 from PyQt6.QtCore import QEvent, Qt, QTimer
 
-from lspr_app.device.device_lifecycle import DeviceLifecycleController, DeviceLifecycleEvent, DeviceLifecycleReport
+from lspr_app.device.device_lifecycle import (
+    DEVICE_ORDER,
+    DeviceLifecycleController,
+    DeviceLifecycleEvent,
+    DeviceLifecycleReport,
+)
 from lspr_app.device.device_types import PUMP, SELECTOR, SWITCH
 from lspr_app.device.simulated import SimulatedSpectrometer
-from lspr_app.gui.device_lifecycle_task import DeviceLifecycleCycleTask, device_io_pool
+from lspr_app.gui.device_lifecycle_task import DeviceDisconnectTask, DeviceLifecycleCycleTask, device_io_pool
 from lspr_app.gui.main_window_state import (
     acquisition_state_payload,
     collapsible_section_state,
@@ -255,6 +260,45 @@ def disconnect_all_devices_for(window) -> None:
             window._log_warning(f"Could not sync experiment-control panel after disconnect: {exc}")
     refresh_hw_device_status_strip(window)
     window._log_info("All hardware devices disconnected.")
+
+
+def apply_device_enablement_for(window, enabled: dict[str, bool]) -> None:
+    """Apply a new pump/switch/selector enabled-set from the "Hardware devices..."
+    dialog. Persists immediately, hides/shows the titlebar items right away
+    (no device I/O needed for that), disconnects anything newly turned off,
+    and re-runs the normal hardware scan if anything was newly turned on so
+    it can be picked up without an app restart."""
+    controller = DeviceLifecycleController.shared()
+    previous = controller.enabled_devices()
+    controller.set_enabled_devices(enabled)
+    refresh_hw_device_status_strip(window)
+
+    newly_disabled = [
+        key for key in DEVICE_ORDER
+        if previous.get(key, True) and not controller.is_device_type_enabled(key) and controller.is_connected(key)
+    ]
+    newly_enabled = [
+        key for key in DEVICE_ORDER
+        if not previous.get(key, True) and controller.is_device_type_enabled(key)
+    ]
+
+    for device_key in newly_disabled:
+        task = DeviceDisconnectTask(device_key)
+        task.signals.finished.connect(lambda _event, w=window: _after_device_enablement_disconnect(w))
+        device_io_pool().start(task)
+
+    if newly_enabled:
+        window._start_hardware_initialization()
+
+
+def _after_device_enablement_disconnect(window) -> None:
+    refresh_hw_device_status_strip(window)
+    experiment_control_window = getattr(window, "_experiment_control_window", None)
+    if experiment_control_window is not None and hasattr(experiment_control_window, "sync_from_lifecycle_controller"):
+        try:
+            experiment_control_window.sync_from_lifecycle_controller()
+        except Exception as exc:
+            window._log_warning(f"Could not sync experiment-control panel after device disable: {exc}")
 
 
 def sync_hardware_menu_actions_for(window) -> None:
