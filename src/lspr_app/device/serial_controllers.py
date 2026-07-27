@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import logging
 from abc import abstractmethod
 from dataclasses import dataclass
 from time import monotonic, sleep
-from typing import ClassVar
+from typing import Callable, ClassVar, TypeVar
 
 import serial
 from serial.tools import list_ports
 
 from lspr_app.device.communication_models import DeviceCommand
 from lspr_app.device.connection_registry import release_port, try_claim_port
-from lspr_app.device.device_driver import DeviceDriver, DeviceError
+from lspr_app.device.device_driver import DeviceDriver, DeviceError, DeviceTimeoutError
+
+_LOGGER = logging.getLogger("lspr_app.device")
+_T = TypeVar("_T")
 
 @dataclass(slots=True)
 class ControllerPort:
@@ -66,6 +70,13 @@ class SerialController(DeviceDriver):
     # sketch to start before sending any commands. Set to 0 for devices that do
     # not need this (e.g. FTDI-based boards with DTR ignored).
     _BOOTLOADER_WAIT_S: ClassVar[float] = 0.0
+    # Retry policy for _call_with_retry (see below) - confirmed with the
+    # maintainer that resending a timed-out command is safe for this
+    # device family (pump start/stop/set-flow, valve/switch move/set-
+    # position): a lost response doesn't mean the command wasn't applied,
+    # and resending it is a no-op/idempotent in that case.
+    _MAX_COMMAND_ATTEMPTS: ClassVar[int] = 3
+    _RETRY_DELAY_S: ClassVar[float] = 0.15
 
     def __init__(self) -> None:
         self._serial: serial.Serial | None = None
@@ -175,7 +186,54 @@ class SerialController(DeviceDriver):
     def set_position(self, position: str) -> None:
         raise ControllerError(f"{self.controller_type} does not support position commands.")
 
+    def _call_with_retry(self, operation: Callable[[], _T], description: str) -> _T:
+        """Run *operation*, retrying on a timeout or a dropped connection.
+
+        Only retries a ``DeviceTimeoutError`` (no response - safe to resend,
+        see ``_MAX_COMMAND_ATTEMPTS`` above) or a ``serial.SerialException``
+        (the connection itself appears to have dropped - reconnects once
+        before retrying). Any other ``DeviceError`` means the device actively
+        responded (e.g. rejected the command), so it is not retried -
+        resending an answer that was already given wouldn't change it.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1, self._MAX_COMMAND_ATTEMPTS + 1):
+            try:
+                return operation()
+            except DeviceTimeoutError as exc:
+                last_exc = exc
+                _LOGGER.warning(
+                    "%s: %s got no response (attempt %d/%d)",
+                    self.controller_type, description, attempt, self._MAX_COMMAND_ATTEMPTS,
+                )
+            except serial.SerialException as exc:
+                last_exc = exc
+                _LOGGER.warning(
+                    "%s: connection appears lost during %s (attempt %d/%d): %s",
+                    self.controller_type, description, attempt, self._MAX_COMMAND_ATTEMPTS, exc,
+                )
+                if self.port is not None:
+                    port = self.port
+                    try:
+                        self.close()
+                        self.connect(port)
+                    except Exception:
+                        # Reopening the port failed too - further attempts
+                        # would just fail identically (operation() would hit
+                        # "not connected" instead of the real cause), so stop
+                        # now and surface the original, more informative
+                        # error instead of that follow-on one.
+                        _LOGGER.warning("%s: reconnect after dropped connection failed", self.controller_type, exc_info=True)
+                        raise exc from None
+            if attempt < self._MAX_COMMAND_ATTEMPTS:
+                sleep(self._RETRY_DELAY_S)
+        assert last_exc is not None
+        raise last_exc
+
     def _write(self, command: str) -> None:
+        self._call_with_retry(lambda: self._write_once(command), f"write {command!r}")
+
+    def _write_once(self, command: str) -> None:
         if self._serial is None:
             raise ControllerError(f"{self.controller_type} is not connected.")
         self._serial.reset_input_buffer()
@@ -191,10 +249,13 @@ class SerialController(DeviceDriver):
             chunk = self._serial.readline()
             if chunk:
                 return chunk.decode("ascii", errors="replace").strip()
-        raise ControllerError(f"No response from {self.controller_type}.")
+        raise DeviceTimeoutError(f"No response from {self.controller_type}.")
 
     def query(self, command: str, max_wait_s: float = 0.75) -> str:
-        self._write(command)
+        return self._call_with_retry(lambda: self._query_once(command, max_wait_s), f"query {command!r}")
+
+    def _query_once(self, command: str, max_wait_s: float) -> str:
+        self._write_once(command)
         return self._read_line(max_wait_s=max_wait_s)
 
 

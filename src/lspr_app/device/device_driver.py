@@ -21,6 +21,20 @@ class DeviceError(RuntimeError):
     """
 
 
+class DeviceTimeoutError(DeviceError):
+    """A command got no response within its timeout window.
+
+    Distinct from other ``DeviceError`` cases (an explicit device rejection,
+    a malformed response) because it's the one failure mode that's safe to
+    retry: the command may never have reached the device, or its response
+    may have been lost - either way, resending the exact same command is a
+    lost-response recovery, not a repeat of an answer that was already given.
+    Retry logic (see SerialController._call_with_retry) catches this
+    specifically rather than DeviceError broadly, so it never retries a
+    command the device actively responded to.
+    """
+
+
 class DeviceDriver(ABC):
     """Abstract base class for hardware device drivers.
 

@@ -5,7 +5,7 @@ from math import floor, log10
 from time import monotonic, sleep
 
 from lspr_app.device.communication_models import DeviceCommand
-from lspr_app.device.device_driver import DeviceError
+from lspr_app.device.device_driver import DeviceError, DeviceTimeoutError
 from lspr_app.device.serial_controllers import SerialController
 from serial.tools import list_ports
 
@@ -93,7 +93,7 @@ class RegloICCClient(SerialController):
         # Some Reglo ICC units in single-pump RS-232 mode only answer to address 1.
         try:
             addr = self._discover_pump_address()
-        except RegloICCError:
+        except (RegloICCError, DeviceTimeoutError):
             addr = "0"
         protocol_version = self.query(f"{addr}x!")
         serial_number = self.query(f"{addr}xS")
@@ -144,7 +144,7 @@ class RegloICCClient(SerialController):
         try:
             self.query("0x!")
             return "0"
-        except RegloICCError:
+        except (RegloICCError, DeviceTimeoutError):
             self.query("1x!")  # raises if address 1 also fails
             return "1"
 
@@ -152,6 +152,16 @@ class RegloICCClient(SerialController):
         return self.send(command)
 
     def send(self, command: str, idle_timeout_s: float = 0.03, max_wait_s: float = 0.75) -> str:
+        # Retries a lost response (see _call_with_retry on SerialController,
+        # inherited here) - confirmed safe for this pump's start/stop/set-flow
+        # commands: a lost response doesn't mean the pump didn't apply the
+        # command, and resending it is a safe no-op in that case. Does not
+        # retry an explicit pump rejection ("#") below - that's a real answer.
+        return self._call_with_retry(
+            lambda: self._send_once(command, idle_timeout_s, max_wait_s), f"send {command!r}"
+        )
+
+    def _send_once(self, command: str, idle_timeout_s: float, max_wait_s: float) -> str:
         if self._serial is None:
             raise RegloICCError("Pump is not connected.")
 
@@ -178,7 +188,7 @@ class RegloICCClient(SerialController):
 
         raw = b"".join(chunks).decode("ascii", errors="replace").strip()
         if not raw:
-            raise RegloICCError(f"No response from pump for command {command!r}.")
+            raise DeviceTimeoutError(f"No response from pump for command {command!r}.")
         if raw == "#":
             raise RegloICCError(f"Pump rejected command {command!r}.")
         return raw

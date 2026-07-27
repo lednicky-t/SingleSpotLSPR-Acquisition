@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from io import StringIO
+from time import sleep
+from typing import Callable, TypeVar
 
 from lspr_app.device.communication_models import DeviceCommand
 from lspr_app.device.connection_registry import claim_port, release_port, try_claim_port
@@ -13,6 +16,9 @@ try:  # Optional proprietary dependency.
     import amfTools  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
     amfTools = None
+
+_LOGGER = logging.getLogger("lspr_app.device")
+_T = TypeVar("_T")
 
 
 def amf_tools_available() -> bool:
@@ -72,6 +78,12 @@ def detect_amf_mswitch_devices() -> list[ControllerProbe]:
 
 class AMFSwitchController(DeviceDriver):
     controller_type = "amf-mswitch"
+    # Retry policy for _call_with_retry (see below) - confirmed with the
+    # maintainer that resending a move/home command is safe for this device:
+    # a lost response doesn't mean the switch didn't move, and resending a
+    # move-to-position command is an idempotent no-op in that case.
+    _MAX_COMMAND_ATTEMPTS = 3
+    _RETRY_DELAY_S = 0.15
 
     def __init__(self) -> None:
         self._amf = None
@@ -83,6 +95,44 @@ class AMFSwitchController(DeviceDriver):
         # claim under an already-registered owner name as a no-op re-claim,
         # not a conflict), silently defeating the busy-port check.
         self._claim_owner = f"{self.controller_type}:{id(self)}"
+
+    def _call_with_retry(self, operation: Callable[[], _T], description: str) -> _T:
+        """Run *operation*, retrying on failure and reconnecting first.
+
+        Unlike SerialController's version, this retries any exception, not
+        just a distinguished timeout - the amfTools library doesn't expose a
+        separate "no response" exception type to catch more precisely. This
+        is acceptable here because move/home commands were confirmed safe to
+        resend blindly (see _MAX_COMMAND_ATTEMPTS above); retrying a
+        deterministic error (e.g. an invalid target position) just fails the
+        same way again rather than causing harm.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1, self._MAX_COMMAND_ATTEMPTS + 1):
+            try:
+                return operation()
+            except Exception as exc:
+                last_exc = exc
+                _LOGGER.warning(
+                    "%s: %s failed (attempt %d/%d): %s",
+                    self.controller_type, description, attempt, self._MAX_COMMAND_ATTEMPTS, exc,
+                )
+                if self.port is not None:
+                    port = self.port
+                    try:
+                        self.close()
+                        self.connect(port)
+                    except Exception:
+                        # Reopening the port failed too - further attempts
+                        # would just fail identically, so stop now and
+                        # surface the original error rather than a
+                        # follow-on "not connected" from the next attempt.
+                        _LOGGER.warning("%s: reconnect after dropped connection failed", self.controller_type, exc_info=True)
+                        raise exc from None
+            if attempt < self._MAX_COMMAND_ATTEMPTS:
+                sleep(self._RETRY_DELAY_S)
+        assert last_exc is not None
+        raise last_exc
 
     def connect(self, port: str) -> None:
         if amfTools is None:
@@ -150,31 +200,46 @@ class AMFSwitchController(DeviceDriver):
         raise ControllerError(f"Unsupported command type {command.command_type!r} for {type(self).__name__}.")
 
     def get_position(self) -> int:
+        return self._call_with_retry(self._get_position_once, "get_position")
+
+    def _get_position_once(self) -> int:
         if self._amf is None:
             raise ControllerError("AMF switch is not connected.")
         return int(self._amf.getValvePosition())
 
     def get_port_count(self) -> int:
+        return self._call_with_retry(self._get_port_count_once, "get_port_count")
+
+    def _get_port_count_once(self) -> int:
         if self._amf is None:
             raise ControllerError("AMF switch is not connected.")
         return int(self._amf.getPortNumber())
 
     def is_homed(self) -> bool:
+        return self._call_with_retry(self._is_homed_once, "is_homed")
+
+    def _is_homed_once(self) -> bool:
         if self._amf is None:
             raise ControllerError("AMF switch is not connected.")
         return bool(self._amf.getHomeStatus())
 
     def home(self, block: bool = True) -> None:
+        self._call_with_retry(lambda: self._home_once(block), "home")
+
+    def _home_once(self, block: bool) -> None:
         if self._amf is None:
             raise ControllerError("AMF switch is not connected.")
         self._amf.home(block=block)
 
     def move_to(self, target: int, block: bool = True) -> None:
-        if self._amf is None:
-            raise ControllerError("AMF switch is not connected.")
         target_int = int(target)
         if target_int < 1:
             raise ControllerError("AMF switch port must be >= 1.")
+        self._call_with_retry(lambda: self._move_to_once(target_int, block), f"move_to {target_int}")
+
+    def _move_to_once(self, target_int: int, block: bool) -> None:
+        if self._amf is None:
+            raise ControllerError("AMF switch is not connected.")
         self._amf.valveShortestPath(target_int, block=block)
 
 
