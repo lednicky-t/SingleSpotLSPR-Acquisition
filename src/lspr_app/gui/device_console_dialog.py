@@ -3,14 +3,17 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from PyQt6.QtCore import Qt, QTimer, QRunnable, QObject, pyqtSignal
+from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
     QComboBox,
     QCheckBox,
     QDialog,
+    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
@@ -19,6 +22,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QWidget,
     QVBoxLayout,
+    QWidgetAction,
 )
 
 from lspr_app.device.amf_mswitch import amf_tools_available, detect_amf_selector_devices
@@ -31,9 +35,42 @@ from lspr_app.device.probe_diagnostics import snapshot_port_probe_events
 from lspr_app.device.reglo_icc import RegloICCClient, is_probable_reglo_port
 from lspr_app.device.serial_controllers import SerialController, controller_port_priority
 from lspr_app.gui.device_lifecycle_task import DeviceConnectTask, DeviceDisconnectTask, device_io_pool
+from lspr_app.gui.panel_help import make_help_button
 from lspr_app.storage.app_config import load_app_setting, save_app_setting
 
 _DEEP_DEBUG_SETTING_KEY = "device_manager_deep_debug"
+
+_ENABLE_HELP_TOOLTIP = "Enable or disable this device type."
+_ENABLE_HELP_TITLE = "Hardware devices"
+_ENABLE_HELP_BODY = (
+    "Choose which device types this app manages. Unchecked devices are\n"
+    "skipped during hardware scans and hidden from the titlebar status strip.\n"
+    "Turning a device off disconnects it immediately."
+)
+
+# Short controller-name suffix shown in the Switch row's settings popup title,
+# so the maintainer can tell at a glance which firmware they're driving -
+# see docs/hardware/arduino_valve_controller_protocol.md. Only "arduino-valve"
+# supports the temperature/humidity sensors used below.
+_SWITCH_CONTROLLER_SHORT_NAMES = {
+    "arduino-valve": "Arduino",
+    "itsybitsy-32u4-valve": "ItsyBitsy",
+    "legacy-valve": "Legacy",
+}
+
+
+def device_settings_title(device_key: str) -> str:
+    """Friendly device name shown atop its Device Manager settings popup."""
+    if device_key == PUMP:
+        return "Pump (Reglo ICC)"
+    if device_key == SELECTOR:
+        return "Selector rotary valve (AMF M-Switch)"
+    if device_key == SWITCH:
+        probe = DeviceLifecycleController.shared().probe_for(SWITCH)
+        controller_type = getattr(probe, "controller_type", "") if probe is not None else ""
+        short_name = _SWITCH_CONTROLLER_SHORT_NAMES.get(controller_type)
+        return f"Switch valve ({short_name})" if short_name else "Switch valve"
+    return device_key
 
 # Connect/Disconnect for these three labels must go through DeviceLifecycleController,
 # not DeviceCommunicationService directly - it is the single owner of connect/disconnect
@@ -303,6 +340,7 @@ class DeviceManagerDialog(QDialog):
         self._connected_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._connected_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._connected_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._connected_table.cellDoubleClicked.connect(self._show_device_settings_menu)
 
         self._discover_button = QPushButton("Scan && connect")
         self._discover_button.setToolTip(
@@ -516,7 +554,15 @@ class DeviceManagerDialog(QDialog):
         self._tabs.addTab(page, "Event log")
 
     def _wrap_layout(self, layout) -> QWidget:
-        page = QWidget(self)
+        # No parent here on purpose: QTabWidget.addTab() reparents this page
+        # into its own internal stack the moment it's actually added. The
+        # four "deep debug" tabs (Profiles/Probe-assign/Commands/Port list)
+        # are built in __init__ but only added to self._tabs once Deep debug
+        # mode is switched on - if this page were parented to self (the
+        # dialog) immediately, it would render as a floating orphan on top
+        # of the dialog in the meantime (same bug class as the _probe_output
+        # issue in DEVICE_LAYER_AUDIT_2026.md item 30, different widget).
+        page = QWidget()
         page.setLayout(layout)
         return page
 
@@ -822,6 +868,88 @@ class DeviceManagerDialog(QDialog):
         if not selected:
             return None
         return str(selected[0].text()).strip() or None
+
+    # -------------------------------------------------------------------------
+    # Per-device settings popup - double-click a canonical row (Pump/Switch/
+    # Selector) to get a small QMenu with that device's settings. Currently:
+    # the Enable toggle moved here from the old standalone "Hardware
+    # devices…" dialog, plus (Switch only, when an arduino-valve controller
+    # is connected) the temp/humidity poll-interval control. Built as a
+    # generic per-device_key container so future per-device settings have
+    # somewhere to go without another dialog.
+    # -------------------------------------------------------------------------
+
+    def _show_device_settings_menu(self, row: int, _column: int) -> None:
+        label_item = self._connected_table.item(row, 0)
+        if label_item is None:
+            return
+        device_key = _CANONICAL_LABEL_TO_DEVICE_KEY.get(label_item.text().strip())
+        if device_key is None:
+            return
+        menu = self._build_device_settings_menu(device_key)
+        menu.exec(QCursor.pos())
+
+    def _build_device_settings_menu(self, device_key: str) -> QMenu:
+        controller = DeviceLifecycleController.shared()
+        menu = QMenu(self)
+
+        title_action = menu.addAction(device_settings_title(device_key))
+        title_action.setEnabled(False)
+        menu.addSeparator()
+
+        enable_row = QWidget(menu)
+        enable_layout = QHBoxLayout(enable_row)
+        enable_layout.setContentsMargins(10, 4, 10, 4)
+        enable_layout.setSpacing(6)
+        enabled_check = QCheckBox("Enabled", enable_row)
+        enabled_check.setChecked(bool(controller.enabled_devices().get(device_key, True)))
+        enable_layout.addWidget(enabled_check)
+        enable_layout.addWidget(make_help_button(
+            _ENABLE_HELP_TOOLTIP, title=_ENABLE_HELP_TITLE, body=_ENABLE_HELP_BODY, parent=enable_row,
+        ))
+        enable_layout.addStretch(1)
+
+        def _on_enabled_toggled(checked: bool, key: str = device_key) -> None:
+            window = self.parent()
+            if window is not None and hasattr(window, "_apply_device_enablement"):
+                current = DeviceLifecycleController.shared().enabled_devices()
+                current[key] = bool(checked)
+                window._apply_device_enablement(current)
+
+        enabled_check.toggled.connect(_on_enabled_toggled)
+
+        enable_action = QWidgetAction(menu)
+        enable_action.setDefaultWidget(enable_row)
+        menu.addAction(enable_action)
+
+        if device_key == SWITCH:
+            probe = controller.probe_for(SWITCH)
+            if probe is not None and getattr(probe, "controller_type", "") == "arduino-valve":
+                menu.addSeparator()
+                freq_row = QWidget(menu)
+                freq_layout = QHBoxLayout(freq_row)
+                freq_layout.setContentsMargins(10, 4, 10, 4)
+                freq_layout.setSpacing(6)
+                freq_layout.addWidget(QLabel("Temp/humidity read interval", freq_row))
+                freq_spin = QDoubleSpinBox(freq_row)
+                freq_spin.setRange(1.0, 300.0)
+                freq_spin.setDecimals(1)
+                freq_spin.setSuffix(" s")
+                freq_spin.setValue(float(load_app_setting("environment_poll_interval_s", 5.0)))
+                freq_layout.addWidget(freq_spin)
+
+                def _on_interval_changed(value: float) -> None:
+                    window = self.parent()
+                    if window is not None and hasattr(window, "_set_environment_poll_interval_s"):
+                        window._set_environment_poll_interval_s(value)
+
+                freq_spin.valueChanged.connect(_on_interval_changed)
+
+                freq_action = QWidgetAction(menu)
+                freq_action.setDefaultWidget(freq_row)
+                menu.addAction(freq_action)
+
+        return menu
 
     def _probe_selected_endpoint(self) -> None:
         endpoint = self._selected_port()

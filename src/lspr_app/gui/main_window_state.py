@@ -1287,6 +1287,22 @@ def set_measurement_hdf5_flush_interval_s(window, interval_s: float) -> None:
     window._log_info(f"HDF5 flush interval set to {interval_s:g} s.")
 
 
+def set_environment_poll_interval_s(window, interval_s: float) -> None:
+    """Set how often the Switch device's ambient temperature/humidity
+    sensors are polled (default 5 s / 0.2 Hz). Set from Device Manager's
+    Switch row settings popup."""
+    from lspr_app.storage.app_config import save_app_setting
+
+    interval_s = min(max(float(interval_s), 1.0), 300.0)
+    window._environment_poll_interval_s = interval_s
+    save_app_setting("environment_poll_interval_s", interval_s)
+    timer = getattr(window, "_environment_poll_timer", None)
+    if timer is not None:
+        timer.setInterval(int(interval_s * 1000))
+    window.status_label.setText(f"Temp/humidity poll interval set to {interval_s:g} s.")
+    window._log_info(f"Temp/humidity poll interval set to {interval_s:g} s.")
+
+
 def toggle_experimental_control_panel_visibility(window, checked: bool | None = None) -> None:
     if checked is None:
         window._activate_experimental_control_view() if normalize_top_content_mode(getattr(window, "_top_view_mode", "spectra")) != "experimental_control" else window._activate_spectra_view()

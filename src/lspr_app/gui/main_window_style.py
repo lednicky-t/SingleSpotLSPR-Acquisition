@@ -480,7 +480,13 @@ def style_plot_widgets_for(window) -> None:
     """Restyle pyqtgraph plots, crosshairs, markers, and regions for the current theme."""
     palette = window._theme_palette()
     for plot in (window.spectrum_plot, window.trace_plot):
-        plot.setBackground(palette["plot_bg"])
+        # The GraphicsView background (this widget's overall background, which
+        # shows through the margins around the axes/title, not just "inside"
+        # the plot) matches the app's general background so the plot blends
+        # into its surroundings; the ViewBox background (the actual plotting
+        # area behind the data) keeps the previous, separately-set dark color.
+        plot.setBackground(palette["bg"])
+        plot.getPlotItem().getViewBox().setBackgroundColor(palette["plot_bg"])
         plot.getPlotItem().getViewBox().setBorder(pg.mkPen(palette["plot_border"]))
         bottom_axis = plot.getPlotItem().getAxis("bottom")
         left_axis = plot.getPlotItem().getAxis("left")

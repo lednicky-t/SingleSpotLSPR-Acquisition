@@ -34,7 +34,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
-    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -195,6 +194,7 @@ from lspr_app.gui.main_window_state import (
     apply_layout_preset,
     reset_layout_presets_to_defaults,
     save_current_layout_to_preset,
+    set_environment_poll_interval_s,
     set_gui_housekeeping_enabled,
     set_diagnostics_panel_visible,
     set_measurement_hdf5_flush_interval_s,
@@ -305,6 +305,7 @@ from lspr_app.gui.acquisition_controller import (
     flush_live_processed_results,
     handle_acquisition_error,
     handle_acquisition_success,
+    poll_environment_sensors,
     request_manual_acquisition,
     set_manual_acquisition_buttons_enabled,
     set_measurement_buttons_enabled,
@@ -332,7 +333,6 @@ from lspr_app.gui.spectrum_plot_controller import (
 )
 from lspr_app.gui.device_lifecycle_task import DeviceLifecycleCycleTask
 from lspr_app.gui.device_console_dialog import show_device_manager_dialog
-from lspr_app.gui.hardware_devices_dialog import show_hardware_devices_dialog_for
 from lspr_app.gui.workers import (
     AcquisitionResult,
     MeasurementCompressionTask,
@@ -578,6 +578,16 @@ class MainWindow(QMainWindow):
         self._live_recording_timer.setSingleShot(False)
         self._live_recording_timer.setInterval(25)
         self._live_recording_timer.timeout.connect(self._flush_live_recording_results)
+        # Ambient temperature/humidity poll of the Switch device - see
+        # docs/hardware/arduino_valve_controller_protocol.md. Default 5 s
+        # (0.2 Hz); user-configurable from Device Manager's Switch row
+        # settings popup (see set_environment_poll_interval_s).
+        self._environment_poll_interval_s = float(load_app_setting("environment_poll_interval_s", 5.0))
+        self._environment_poll_timer = QTimer(self)
+        self._environment_poll_timer.setSingleShot(False)
+        self._environment_poll_timer.setInterval(int(self._environment_poll_interval_s * 1000))
+        self._environment_poll_timer.timeout.connect(self._poll_environment_sensors)
+        self._environment_poll_timer.start()
         self._measurement_active = False
         self._measurement_paused = False
         self._measurement_writer: AsyncHDF5MeasurementWriter | None = None
@@ -1188,11 +1198,7 @@ class MainWindow(QMainWindow):
             "Save a copy of the current session…",
             size=30,
         )
-        save_copy_menu = QMenu(self.sensorgram_save_copy_button)
-        save_copy_action = save_copy_menu.addAction("Save copy as…")
-        save_copy_action.triggered.connect(self._save_session_copy_as)
-        self.sensorgram_save_copy_button.setMenu(save_copy_menu)
-        self.sensorgram_save_copy_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.sensorgram_save_copy_button.clicked.connect(self._save_session_copy_as)
         self.autoscale_spectrum_button = QPushButton("Auto spectrum", self)
         self.autoscale_spectrum_button.setObjectName("toolbarButton")
         self.autoscale_spectrum_button.clicked.connect(self._autoscale_spectrum_plot)
@@ -1368,6 +1374,16 @@ class MainWindow(QMainWindow):
         self._residual_axis_autoscaled = False
         self._residual_y_range: list[float] | None = None
         spectrum_plot_item.scene().addItem(self.residual_view)
+        # residual_view and spectrum_plot_item (not spectrum_plot_item.vb -
+        # the viewbox is a *child* of the PlotItem, so its own zValue only
+        # orders it among the PlotItem's other children, not against
+        # top-level siblings like residual_view) are both top-level scene
+        # items. PlotItem defaults to zValue 0, which is already above
+        # residual_view's own ViewBox default (-100) - normally invisible
+        # since the PlotItem's viewbox paints nothing outside its curves,
+        # but once it has an opaque background (see style_plot_widgets_for)
+        # that default ordering would paint over residual_view entirely.
+        self.residual_view.setZValue(spectrum_plot_item.zValue() + 1)
         self.residual_zero_line = pg.InfiniteLine(
             angle=0,
             pos=0,
@@ -2514,6 +2530,9 @@ class MainWindow(QMainWindow):
     def _flush_live_recording_results(self) -> None:
         flush_live_recording_results(self)
 
+    def _poll_environment_sensors(self) -> None:
+        poll_environment_sensors(self)
+
     def _flush_live_processed_results(self) -> None:
         flush_live_processed_results(self)
 
@@ -2876,11 +2895,11 @@ class MainWindow(QMainWindow):
     def _show_device_manager_dialog(self) -> None:
         show_device_manager_dialog(self)
 
-    def _show_hardware_devices_dialog(self) -> None:
-        show_hardware_devices_dialog_for(self)
-
     def _apply_device_enablement(self, enabled: dict[str, bool]) -> None:
         apply_device_enablement_for(self, enabled)
+
+    def _set_environment_poll_interval_s(self, interval_s: float) -> None:
+        set_environment_poll_interval_s(self, interval_s)
 
     def _set_processing_debug_mode_enabled(self, enabled: bool) -> None:
         self._processing_debug_mode_enabled = bool(enabled)
