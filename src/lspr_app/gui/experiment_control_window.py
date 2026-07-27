@@ -175,6 +175,10 @@ class ExperimentControlWindow(QWidget):
         "description",
     ]
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Construction & window wiring
+    # ═══════════════════════════════════════════════════════════════════
+
     def __init__(
         self,
         ui_state: dict[str, object],
@@ -1050,6 +1054,10 @@ class ExperimentControlWindow(QWidget):
         button.setIconSize(QSize(24, 24))
         return button
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Runtime control button icons & switch-solution combo
+    # ═══════════════════════════════════════════════════════════════════
+
     def _pause_state_button_icon(self) -> QIcon:
         accent = QColor("#8a98a8")
         for icon_name in ("settings_pause", "clock_pause", "pause"):
@@ -1254,6 +1262,10 @@ class ExperimentControlWindow(QWidget):
                 return position
         return 1
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Plan import: parsing, column detection, native/HDF5 device mapping
+    # ═══════════════════════════════════════════════════════════════════
+
     def _experiment_plan_import_default_dir(self) -> Path:
         stored = load_app_setting("experiment_plan_import_dir", "")
         if isinstance(stored, str) and stored:
@@ -1447,112 +1459,6 @@ class ExperimentControlWindow(QWidget):
             return "Close" if l_is_open else "Open"
         return "Close" if lowered.startswith("close") else "Open"
 
-    def _build_experiment_plan_steps_from_import_data(
-        self,
-        data: ExperimentPlanImportData,
-        *,
-        l_is_open: bool,
-    ) -> list[PumpPlanStep]:
-        steps: list[PumpPlanStep] = []
-        for row_index, row in enumerate(data.rows, start=1):
-            if not any(cell.strip() for cell in row):
-                continue
-
-            channels: list[PumpChannelStep] = []
-            for channel_index in range(1, ACTIVE_PUMP_CHANNELS + 1):
-                flow_text = self._experiment_plan_cell(row, data.column_map.get(("flow", channel_index)), "0")
-                direction_text = self._experiment_plan_cell(row, data.column_map.get(("direction", channel_index)), "CW")
-                flow_ml_min = max(_safe_float(flow_text), 0.0)
-                direction = "CCW" if direction_text.casefold() == "ccw" else "CW"
-                channels.append(
-                    PumpChannelStep(
-                        flow_ul_min=max(round(flow_ml_min * 1000.0), 0),
-                        direction=direction,
-                    )
-                )
-
-            valve = self._normalize_experiment_plan_valve(
-                self._experiment_plan_cell(row, data.column_map.get("valve"), "Open"),
-                l_is_open,
-            )
-            raw_color = self._experiment_plan_cell(row, data.column_map.get("color"), "").strip().upper()
-            qcolor = QColor(raw_color)
-            color = qcolor.name().upper() if qcolor.isValid() else self._default_experiment_control_color(row_index - 1)
-            description = self._experiment_plan_cell(row, data.column_map.get("description"), "").strip()
-            switch_text = self._experiment_plan_cell(row, data.column_map.get("solution"), "")
-            switch_position = self._switch_position_from_text(switch_text) if switch_text else 1
-            duration_s = max(_safe_float(self._experiment_plan_cell(row, data.column_map.get("time"), "0")), 0.0)
-
-            steps.append(
-                PumpPlanStep(
-                    step=row_index,
-                    duration_s=duration_s,
-                    color=color,
-                    valve=valve,
-                    switch_position=switch_position,
-                    description=description,
-                    channels=channels,
-                )
-            )
-
-        return recompute_plan_timing(steps)
-
-    def _experiment_plan_native_flow_factor(self, document: dict[str, object]) -> float:
-        units = document.get("units", {})
-        if not isinstance(units, dict):
-            return 1.0
-        flow_unit = str(units.get("flow", "uL/min") or "uL/min").strip().casefold()
-        if flow_unit in {"ml/min", "ml min-1", "ml_per_min"}:
-            return 1000.0
-        return 1.0
-
-    def _build_experiment_plan_steps_from_native_document(self, document: dict[str, object]) -> list[PumpPlanStep]:
-        raw_steps = document.get("steps", [])
-        if not isinstance(raw_steps, list):
-            return []
-        flow_factor = self._experiment_plan_native_flow_factor(document)
-        steps: list[PumpPlanStep] = []
-        for row_index, raw_step in enumerate(raw_steps, start=1):
-            if not isinstance(raw_step, dict):
-                continue
-            devices = raw_step.get("devices", {})
-            devices = devices if isinstance(devices, dict) else {}
-            pump = devices.get("pump_1", {})
-            pump = pump if isinstance(pump, dict) else {}
-            channels: list[PumpChannelStep] = []
-            for channel_index in range(1, ACTIVE_PUMP_CHANNELS + 1):
-                raw_channel = pump.get(f"ch{channel_index}", {})
-                raw_channel = raw_channel if isinstance(raw_channel, dict) else {}
-                flow = max(_safe_float(str(raw_channel.get("flow", 0.0) or 0.0)), 0.0) * flow_factor
-                direction = str(raw_channel.get("direction", "OFF") or "OFF").upper()
-                if direction not in {"CW", "CCW", "OFF"}:
-                    direction = "CW"
-                channels.append(PumpChannelStep(flow_ul_min=max(round(flow), 0), direction=direction))
-
-            valve_payload = devices.get("valve_1", {})
-            valve_payload = valve_payload if isinstance(valve_payload, dict) else {}
-            raw_valve = str(valve_payload.get("state", "open") or "open").strip().casefold()
-            valve = "Close" if raw_valve in {"close", "closed"} else "Open"
-
-            switch_payload = devices.get("switch_1", {})
-            switch_payload = switch_payload if isinstance(switch_payload, dict) else {}
-            switch_position = self._switch_position_from_text(str(switch_payload.get("port", 1) or 1))
-
-            qcolor = QColor(str(raw_step.get("color", "") or "").strip())
-            color = qcolor.name().upper() if qcolor.isValid() else self._default_experiment_control_color(row_index - 1)
-            steps.append(
-                PumpPlanStep(
-                    step=row_index,
-                    duration_s=max(_safe_float(str(raw_step.get("duration_s", 0.0) or 0.0)), 0.0),
-                    color=color,
-                    valve=valve,
-                    switch_position=switch_position,
-                    description=str(raw_step.get("comment", raw_step.get("description", "")) or ""),
-                    channels=channels,
-                )
-            )
-        return recompute_plan_timing(steps)
-
     def _native_experiment_plan_unsupported_devices(self, document: dict[str, object]) -> list[str]:
         supported = {"pump_1", "valve_1", "switch_1"}
         found: set[str] = set()
@@ -1610,6 +1516,10 @@ class ExperimentControlWindow(QWidget):
                         self.step_valve_button,
                         str(self.step_valve_button.property("valve") or "Open"),
                     )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Plan export & import/export task orchestration
+    # ═══════════════════════════════════════════════════════════════════
 
     def _experiment_plan_export_default_dir(self) -> Path:
         stored = load_app_setting("experiment_plan_export_dir", "")
@@ -2106,6 +2016,10 @@ class ExperimentControlWindow(QWidget):
                 path = path.with_suffix(".flow.yaml")
         self._start_experiment_plan_export(path)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Editing dialogs: switch/pause/color/valve/pump-display settings
+    # ═══════════════════════════════════════════════════════════════════
+
     def _edit_switch_solution_labels(self, anchor: QWidget | None = None) -> None:
         dialogs = ExperimentControlDialogs(self, self._theme_palette(), self._contrast_text_color, self._tint_icon)
         updated_labels = dialogs.edit_switch_solution_labels(self._switch_solution_labels, anchor)
@@ -2245,6 +2159,10 @@ class ExperimentControlWindow(QWidget):
             if enabled
             else "Show all step comments on the pump display, and preview the 16-character limit."
         )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Run/Hold/Pause toggle buttons & icons
+    # ═══════════════════════════════════════════════════════════════════
 
     def _set_direction_button(self, button: QToolButton, direction: str) -> None:
         normalized = "CCW" if str(direction or "").upper() == "CCW" else "CW"
@@ -2389,6 +2307,10 @@ class ExperimentControlWindow(QWidget):
                     self._step_runtime_for_display(),
                 )
         self._update_record_with_flow_button_icon()
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Runtime state machine: start, resume, hold, pause, stop
+    # ═══════════════════════════════════════════════════════════════════
 
     def _toggle_experiment_control_run_hold(self) -> None:
         self._start_or_resume_experiment_control()
@@ -2721,6 +2643,10 @@ class ExperimentControlWindow(QWidget):
         self._refresh_status_line()
         self.save_ui_state()
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Theme & stylesheet application
+    # ═══════════════════════════════════════════════════════════════════
+
     def _theme_palette(self) -> dict[str, str]:
         if self._theme_mode == "dark":
             return {
@@ -3036,6 +2962,10 @@ class ExperimentControlWindow(QWidget):
             """ % palette
         )
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Table columns, splitters, and layout persistence
+    # ═══════════════════════════════════════════════════════════════════
+
     def _update_time_unit_ui(self, current_seconds: float | None = None) -> None:
         labels = {"s": "s", "min": "min", "h": "h"}
         current_label = labels.get(self._time_unit_mode, "s")
@@ -3236,6 +3166,10 @@ class ExperimentControlWindow(QWidget):
         self._flow_editor_splitter_initialized = True
         self.save_ui_state()
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Small display/status helpers
+    # ═══════════════════════════════════════════════════════════════════
+
     def _seconds_to_display(self, seconds: float) -> float:
         return seconds_to_display_value(seconds, self._time_unit_mode)
 
@@ -3320,6 +3254,10 @@ class ExperimentControlWindow(QWidget):
         if not (0 <= row < len(steps)):
             return None
         return float(steps[row].start_s)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Theming entry point & color palette management
+    # ═══════════════════════════════════════════════════════════════════
 
     def set_theme(self, theme_mode: str) -> None:
         if theme_mode not in {"light", "dark"} or theme_mode == self._theme_mode:
@@ -3524,6 +3462,10 @@ class ExperimentControlWindow(QWidget):
             self.step_color_combo.setCurrentIndex(index)
         self._sync_custom_color_controls()
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Column index helpers & device connection sync
+    # ═══════════════════════════════════════════════════════════════════
+
     def _default_experiment_control_color(self, step_index: int) -> str:
         palette = self._color_palette_entries or self._default_color_palette_entries()
         return palette[step_index % len(palette)][1]
@@ -3648,6 +3590,10 @@ class ExperimentControlWindow(QWidget):
         return True
 
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Device status display & manual-mode helpers
+    # ═══════════════════════════════════════════════════════════════════
+
     def _update_mswitch_state_from_probe(self) -> None:
         """Query the selector's live position after a switch-move plan-step
         command, so a failed/unexpected move is at least logged. Called from
@@ -3696,6 +3642,10 @@ class ExperimentControlWindow(QWidget):
             spin.blockSignals(True)
             spin.setValue(tube_mm)
             spin.blockSignals(False)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Table row mapping & pause-row handling
+    # ═══════════════════════════════════════════════════════════════════
 
     def _sync_experiment_control_tube_columns(self) -> None:
         sync_experiment_control_tube_columns(self)
@@ -3841,6 +3791,10 @@ class ExperimentControlWindow(QWidget):
         table_row = self._table_row_from_plan_row(plan_row)
         if 0 <= table_row < self.plan_table.rowCount():
             self.plan_table.selectRow(table_row)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Table input: wheel/mouse/keyboard event filters
+    # ═══════════════════════════════════════════════════════════════════
 
     def _install_flow_navigation_filter(self, widget: QWidget | None) -> None:
         if widget is None:
@@ -4213,6 +4167,10 @@ class ExperimentControlWindow(QWidget):
         scrollbar.setValue(scrollbar.value() - int(step * wheel_delta / 120))
         return True
 
+    # ═══════════════════════════════════════════════════════════════════
+    # View-mode & splitter layout persistence (runtime)
+    # ═══════════════════════════════════════════════════════════════════
+
     def _normalize_experiment_control_view_mode(self, mode: object) -> str:
         normalized = str(mode or "").strip().lower().replace("-", "_").replace(" ", "_")
         if normalized in {"full", "table_timeline", "timeline"}:
@@ -4513,6 +4471,10 @@ class ExperimentControlWindow(QWidget):
             self._configure_experiment_control_table_columns()
             self._fit_plan_table_columns_to_viewport()
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Table population & model-change handling
+    # ═══════════════════════════════════════════════════════════════════
+
     def _update_plan_detail_toggle_icon(self) -> None:
         update_plan_detail_toggle_icon(self)
 
@@ -4696,6 +4658,10 @@ class ExperimentControlWindow(QWidget):
             self._schedule_visible_experiment_control_rows_load()
         return super().eventFilter(obj, event)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Row/step selection & step-editor sync
+    # ═══════════════════════════════════════════════════════════════════
+
     def _handle_experiment_control_current_index_changed(self, current: QModelIndex, previous: QModelIndex) -> None:
         _ = previous
         if not current.isValid():
@@ -4858,6 +4824,10 @@ class ExperimentControlWindow(QWidget):
         updated = self._current_editor_step(step_number=row + 1)
         steps[row] = updated
         self._populate_experiment_control_table(steps, selected_row=row)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Step command dispatch to hardware
+    # ═══════════════════════════════════════════════════════════════════
 
     def _plan_step_commands(
         self, step: PumpPlanStep, *, start: bool
@@ -5193,6 +5163,10 @@ class ExperimentControlWindow(QWidget):
         # moving but nothing is running" state.
         self._jump_to_experiment_control_step(row)
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Runtime state machine: core run/hold/pause/stop loop
+    # ═══════════════════════════════════════════════════════════════════
+
     def _run_experiment_control(self) -> None:
         self._start_or_resume_experiment_control()
 
@@ -5484,6 +5458,10 @@ class ExperimentControlWindow(QWidget):
             self.availability_changed.emit(None)
             self._set_connection_visual(False, "Pump disconnected.")
 
+    # ═══════════════════════════════════════════════════════════════════
+    # Live status & HDF5 export row helpers
+    # ═══════════════════════════════════════════════════════════════════
+
     def _read_live_status(self) -> None:
         if not self._service_device_connected("pump"):
             self._show_info("Connect the pump first.")
@@ -5542,6 +5520,10 @@ class ExperimentControlWindow(QWidget):
 
     def _tube_mm_values(self) -> list[float]:
         return [spin.value() for spin in self.manual_tube_spins]
+
+    # ═══════════════════════════════════════════════════════════════════
+    # State serialize/restore & bootstrap population
+    # ═══════════════════════════════════════════════════════════════════
 
     def _serialize_experiment_control_steps(self, steps: list[PumpPlanStep]) -> list[dict[str, object]]:
         payload: list[dict[str, object]] = []
@@ -5885,6 +5867,10 @@ class ExperimentControlWindow(QWidget):
 
     def _load_visible_experiment_control_rows(self, force: bool = False) -> None:
         self._run_gui_callback_timed("experiment_control_visible_rows", lambda: None)
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Window-level UI state persistence & Qt event overrides
+    # ═══════════════════════════════════════════════════════════════════
 
     def _restore_ui_state(self) -> None:
         state = self._ui_state
