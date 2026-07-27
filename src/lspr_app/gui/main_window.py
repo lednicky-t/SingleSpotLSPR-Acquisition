@@ -1188,11 +1188,13 @@ class MainWindow(QMainWindow):
 
         self.range_min_spin = QSpinBox()
         make_compact_spinbox(self.range_min_spin)
-        self.range_min_spin.setRange(0, 5000)
+        # 1-1000 nm covers this instrument's VIS range (typically 300-800 nm)
+        # with headroom, rather than an arbitrary 0-5000.
+        self.range_min_spin.setRange(1, 1000)
         self.range_min_spin.setToolTip("Minimum wavelength used for processing and fit range.")
         self.range_max_spin = QSpinBox()
         make_compact_spinbox(self.range_max_spin)
-        self.range_max_spin.setRange(0, 5000)
+        self.range_max_spin.setRange(1, 1000)
         self.range_max_spin.setToolTip("Maximum wavelength used for processing and fit range.")
 
         self.smoothing_method_combo = QComboBox(self)
@@ -1205,7 +1207,10 @@ class MainWindow(QMainWindow):
         self.baseline_method_combo.setToolTip("Method used to estimate and subtract the baseline.")
         self.smoothing_window_spin = QSpinBox()
         make_compact_spinbox(self.smoothing_window_spin)
-        self.smoothing_window_spin.setRange(1, 2147483647)
+        # Was left at Qt's default max (2147483647) - no real spectrum needs a
+        # smoothing window anywhere near that; 100 data points is already a
+        # very strong smoothing pass.
+        self.smoothing_window_spin.setRange(1, 100)
         self.smoothing_window_spin.setSingleStep(2)
         self.smoothing_window_spin.setToolTip("Smoothing window in data points. Larger values smooth more strongly.")
         self.temporal_smoothing_spin = QSpinBox()
@@ -1238,7 +1243,11 @@ class MainWindow(QMainWindow):
         self.fit_method_combo.setToolTip("Choose the fit model used to estimate the peak position.")
         self.poly_order_spin = QSpinBox()
         make_compact_spinbox(self.poly_order_spin)
-        self.poly_order_spin.setRange(1, 999)
+        # 1-99: matches the "practical max 2 digits" width already assumed
+        # for this box (configure_spectra_processing_group_controls); a
+        # polynomial order anywhere near 999 would be a numerically unstable
+        # fit anyway, not a realistic setting.
+        self.poly_order_spin.setRange(1, 99)
         self.poly_order_spin.setToolTip("Polynomial order used when polynomial fit is selected.")
         self._poly_order_default_tooltip = self.poly_order_spin.toolTip()
         self.poly_warning_label = QLabel("!")
@@ -1247,7 +1256,10 @@ class MainWindow(QMainWindow):
         self.poly_warning_label.hide()
         self.fit_window_spin = QSpinBox()
         make_compact_spinbox(self.fit_window_spin)
-        self.fit_window_spin.setRange(0, 5000)
+        # 1-1000 nm, matching the tightened processing-range bounds above -
+        # a crop window wider than the instrument's whole VIS range doesn't
+        # mean anything.
+        self.fit_window_spin.setRange(1, 1000)
         self.fit_window_spin.setValue(120)
         self.fit_window_spin.setToolTip(
             "Fit range width in nm around the detected local peak maximum. Used when the crop method is set to fixed_width."
