@@ -179,6 +179,16 @@ class SerialController(DeviceDriver):
             if callable(stop):
                 stop()
             return None
+        if command_type in {"switch.read_ambient_temperature", "valve.read_ambient_temperature"}:
+            read_temperature = getattr(self, "read_ambient_temperature", None)
+            if not callable(read_temperature):
+                raise ControllerError(f"{self.controller_type} does not support ambient temperature readings.")
+            return read_temperature()
+        if command_type in {"switch.read_humidity", "valve.read_humidity"}:
+            read_humidity = getattr(self, "read_humidity", None)
+            if not callable(read_humidity):
+                raise ControllerError(f"{self.controller_type} does not support humidity readings.")
+            return read_humidity()
         if command_type == "raw.query":
             return self.query(str(payload.get("command", "")))
         raise ControllerError(f"Unsupported command type {command.command_type!r} for {type(self).__name__}.")

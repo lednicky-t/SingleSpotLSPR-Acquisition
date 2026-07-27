@@ -17,7 +17,10 @@ from typing import Callable
 
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 
-from lspr_app.device.device_lifecycle import DeviceLifecycleController, DeviceLifecycleEvent
+from lspr_app.device.communication_models import DeviceCommand
+from lspr_app.device.device_lifecycle import DeviceLifecycleController, DeviceLifecycleEvent, device_label_for
+from lspr_app.device.device_manager import DeviceCommunicationService
+from lspr_app.device.device_types import SWITCH
 
 _DEVICE_IO_POOL: QThreadPool | None = None
 
@@ -137,3 +140,39 @@ class DevicePostConnectTask(QRunnable):
         controller.rerun_post_connect(self._device_key, events.append)
         if events:
             self.signals.finished.emit(events[-1])
+
+
+class DeviceEnvironmentReadSignals(QObject):
+    finished = pyqtSignal(object, object)   # temperature_c: float | None, humidity_percent: float | None
+
+
+class DeviceEnvironmentReadTask(QRunnable):
+    """Periodic ambient temperature/humidity poll of the Switch device.
+
+    Only ArduinoValveController actually supports this (see
+    docs/hardware/arduino_valve_controller_protocol.md) - a connected
+    ItsyBitsy/Legacy controller, or no connection at all, just yields
+    (None, None) via DeviceCommunicationService.send_command()'s normal
+    success=False result, which this task never raises on (send_command()
+    itself never raises - see device_manager.py's send_command).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.signals = DeviceEnvironmentReadSignals()
+
+    def run(self) -> None:
+        service = DeviceCommunicationService.shared()
+        label = device_label_for(SWITCH)
+        temperature_c: float | None = None
+        humidity_percent: float | None = None
+
+        temperature_result = service.send_command(label, DeviceCommand("switch.read_ambient_temperature"))
+        if temperature_result.success and isinstance(temperature_result.response, (int, float)):
+            temperature_c = float(temperature_result.response)
+
+        humidity_result = service.send_command(label, DeviceCommand("switch.read_humidity"))
+        if humidity_result.success and isinstance(humidity_result.response, (int, float)):
+            humidity_percent = float(humidity_result.response)
+
+        self.signals.finished.emit(temperature_c, humidity_percent)

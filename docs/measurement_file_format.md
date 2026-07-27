@@ -430,6 +430,27 @@ round-tripping the processing configuration from the HDF5 file back into the GUI
 
 Device-specific metadata and event streams live under `/devices`.
 
+**Implemented today:** `/devices/environment` - ambient temperature/humidity readings from
+the Switch device's onboard sensor (`ArduinoValveController.read_ambient_temperature()`/
+`.read_humidity()`, see `docs/hardware/arduino_valve_controller_protocol.md`), polled every
+60 s while connected. Three parallel resizable 1-D datasets, same layout as
+`/processed/metrics`:
+
+```text
+/devices/environment/timestamp_utc_ms   int64
+/devices/environment/temperature_c      float64
+/devices/environment/humidity_percent   float64
+```
+
+A value that couldn't be read that tick is stored as `NaN`, not omitted - the row always
+advances on `timestamp_utc_ms` even if only one of the two sensors responded. This is
+distinct from `/metadata/environment` below, which is a separate, still-unimplemented,
+manually-entered concept (general lab conditions as experiment context, not live device
+telemetry).
+
+The rest of this section (`/devices/inventory`, `/devices/link_map`, per-device groups below)
+remains a draft - not yet implemented.
+
 Recommended fixed groups:
 
 ```text
@@ -527,6 +548,10 @@ processing_profile
 ```
 
 ### Environment
+
+Not yet implemented (see the "Devices" section above for the live, implemented
+`/devices/environment` time series from the Switch device's sensor - a different thing:
+this section is manually-entered single-value lab context, not a polled time series).
 
 Optional contextual fields:
 

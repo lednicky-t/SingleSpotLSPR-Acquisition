@@ -51,6 +51,36 @@ class ArduinoValveController(SerialController):
             return
         raise ControllerError(f"Unsupported valve state for Arduino controller: {position!r}")
 
+    def read_ambient_temperature(self) -> float:
+        """Read the controller's onboard ambient temperature sensor (°C).
+
+        Command recovered from the sibling LSPR-LCTF project's main.py
+        (Ambient_temperature()), which talks to the same asn/mod-identified
+        Arduino firmware family as this driver - see
+        docs/hardware/arduino_valve_controller_protocol.md.
+        """
+        response = self.query("at")
+        try:
+            return float(response)
+        except (TypeError, ValueError):
+            raise ControllerError(
+                f"Unexpected ambient temperature reading from Arduino controller: {response!r}"
+            ) from None
+
+    def read_humidity(self) -> float:
+        """Read the controller's onboard ambient humidity sensor (% RH).
+
+        Command recovered from the sibling LSPR-LCTF project's main.py
+        (Humidity()) - see docs/hardware/arduino_valve_controller_protocol.md.
+        """
+        response = self.query("ah")
+        try:
+            return float(response)
+        except (TypeError, ValueError):
+            raise ControllerError(
+                f"Unexpected humidity reading from Arduino controller: {response!r}"
+            ) from None
+
 
 @register_controller
 class ItsyBitsy32U4ValveController(ArduinoValveController):
@@ -79,6 +109,17 @@ class ItsyBitsy32U4ValveController(ArduinoValveController):
             serial_number=protocol_version or None,
             protocol_version=protocol_version or None,
         )
+
+    def read_ambient_temperature(self) -> float:
+        # Overrides ArduinoValveController's implementation deliberately: the
+        # ItsyBitsy firmware in this repo (firmware/itsybitsy32u4_valve_controller)
+        # has no sensor code or "at" command at all, so failing fast here with
+        # a clear message beats sending a doomed query and getting a confusing
+        # "unexpected reading: 'err'" from the generic float-parse failure.
+        raise ControllerError("ItsyBitsy 32u4 valve controller firmware has no ambient temperature sensor.")
+
+    def read_humidity(self) -> float:
+        raise ControllerError("ItsyBitsy 32u4 valve controller firmware has no humidity sensor.")
 
 
 @register_controller

@@ -17,6 +17,10 @@ import numpy as np
 
 from lspr_core import ExperimentPlan
 from lspr_io import (
+    LSPR_DEVICE_ENVIRONMENT_GROUP_NAME,
+    LSPR_DEVICE_ENVIRONMENT_TIMESTAMP_UTC_MS_DATASET_NAME,
+    LSPR_DEVICE_ENVIRONMENT_TEMPERATURE_C_DATASET_NAME,
+    LSPR_DEVICE_ENVIRONMENT_HUMIDITY_PERCENT_DATASET_NAME,
     LSPR_MEASUREMENT_ASSIGNMENT_TABLES_GROUP_NAME,
     LSPR_MEASUREMENT_COLOR_PALETTE_ENTRIES_DATASET_NAME,
     LSPR_EXPERIMENT_PLAN_DATASET_NAME,
@@ -176,6 +180,7 @@ class HDF5MeasurementWriter:
         self._metadata = self._handle.create_group("metadata")
         self._processed = self._handle.create_group("processed")
         self._devices = self._handle.create_group("devices")
+        self._environment_group = self._create_environment_group()
         self._data_spectra = self._data.create_group("spectra")
         self._session_identity = standard_session_identity(app_name="LSPR Acquisition", app_version=APP_VERSION)
         write_session_metadata(
@@ -302,6 +307,38 @@ class HDF5MeasurementWriter:
             else:
                 dataset[start:end] = np.asarray([_float_or_nan(row.get(name, np.nan)) for row in rows], dtype=np.float64)
 
+    def append_environment_reading(
+        self,
+        timestamp_utc_ms: int,
+        temperature_c: float | None,
+        humidity_percent: float | None,
+    ) -> None:
+        """Append one ambient temperature/humidity reading from the Switch
+        device (e.g. ArduinoValveController.read_ambient_temperature()/
+        .read_humidity() - see docs/hardware/arduino_valve_controller_protocol.md).
+
+        One row per call, unlike append_metrics' batch-list shape - readings
+        arrive one at a time from an infrequent background poll, not in
+        per-spectrum batches. A value that failed to read (None) is stored as
+        NaN rather than dropping the whole row, so a partial reading (only
+        one of the two sensors responded) still records what's available.
+        """
+        group = self._environment_group
+        start = group[LSPR_DEVICE_ENVIRONMENT_TIMESTAMP_UTC_MS_DATASET_NAME].shape[0]
+        end = start + 1
+        group[LSPR_DEVICE_ENVIRONMENT_TIMESTAMP_UTC_MS_DATASET_NAME].resize((end,))
+        group[LSPR_DEVICE_ENVIRONMENT_TIMESTAMP_UTC_MS_DATASET_NAME][start:end] = np.asarray(
+            [int(timestamp_utc_ms)], dtype=np.int64
+        )
+        group[LSPR_DEVICE_ENVIRONMENT_TEMPERATURE_C_DATASET_NAME].resize((end,))
+        group[LSPR_DEVICE_ENVIRONMENT_TEMPERATURE_C_DATASET_NAME][start:end] = np.asarray(
+            [_float_or_nan(temperature_c)], dtype=np.float64
+        )
+        group[LSPR_DEVICE_ENVIRONMENT_HUMIDITY_PERCENT_DATASET_NAME].resize((end,))
+        group[LSPR_DEVICE_ENVIRONMENT_HUMIDITY_PERCENT_DATASET_NAME][start:end] = np.asarray(
+            [_float_or_nan(humidity_percent)], dtype=np.float64
+        )
+
     def append_experiment_control_runtime(self, rows: list[dict[str, object]]) -> None:
         if not rows:
             return
@@ -414,6 +451,18 @@ class HDF5MeasurementWriter:
     def _write_processed_metrics_metadata(self, processing: ProcessingSettings) -> None:
         write_processed_metrics_metadata(self._metrics_group)
         write_processing_settings_metadata(self._metrics_group, asdict(processing))
+
+    def _create_environment_group(self):
+        group = self._devices.create_group(LSPR_DEVICE_ENVIRONMENT_GROUP_NAME)
+        for name, dtype in (
+            (LSPR_DEVICE_ENVIRONMENT_TIMESTAMP_UTC_MS_DATASET_NAME, np.int64),
+            (LSPR_DEVICE_ENVIRONMENT_TEMPERATURE_C_DATASET_NAME, np.float64),
+            (LSPR_DEVICE_ENVIRONMENT_HUMIDITY_PERCENT_DATASET_NAME, np.float64),
+        ):
+            ds = group.create_dataset(name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=True, **self._compression_kwargs)
+            ds.attrs["schema_version_added"] = "6.0"
+        group.attrs["source"] = "Switch device (ArduinoValveController.read_ambient_temperature()/.read_humidity())"
+        return group
 
     def _create_runtime_dataset(self):
         columns = list(LSPR_MEASUREMENT_RUNTIME_COLUMNS)
@@ -731,6 +780,16 @@ class AsyncHDF5MeasurementWriter:
             return
         self._queue.put(("metrics", rows))
 
+    def append_environment_reading(
+        self,
+        timestamp_utc_ms: int,
+        temperature_c: float | None,
+        humidity_percent: float | None,
+    ) -> None:
+        if self._closed:
+            return
+        self._queue.put(("environment", (int(timestamp_utc_ms), temperature_c, humidity_percent)))
+
     def append_experiment_control_runtime(self, row: dict[str, object]) -> None:
         if self._closed:
             return
@@ -847,6 +906,9 @@ class AsyncHDF5MeasurementWriter:
                     writer.append_flow_state([payload])
                 elif kind == "device_state" and isinstance(payload, dict):
                     writer.append_device_state(payload)
+                elif kind == "environment" and isinstance(payload, tuple):
+                    timestamp_utc_ms, temperature_c, humidity_percent = payload
+                    writer.append_environment_reading(timestamp_utc_ms, temperature_c, humidity_percent)
                 elif kind == "flush":
                     if pending_metrics:
                         writer.append_metrics(pending_metrics)

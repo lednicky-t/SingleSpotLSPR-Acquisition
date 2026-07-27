@@ -24,6 +24,15 @@ def _session_file_path(window: Any) -> Path:
     session_name = getattr(getattr(window, "_session", None), "name", None) or "session"
     safe_session = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(session_name))
     base_dir = recording_experiment_base_dir_for(window, fallback_base=Path.cwd() / "data")
+    # Mirrors start_measurement_run()'s destination.parent.mkdir() in
+    # acquisition_controller.py - without this, h5py.File(path, "w") inside
+    # AsyncHDF5MeasurementWriter's background thread fails with no visible
+    # error (ensure_session_writer() passes no on_error callback), silently
+    # disabling the whole always-on session archive - raw spectra, metrics,
+    # and environment readings alike - whenever the target folder doesn't
+    # already exist (e.g. a fresh install, or a project destination that
+    # hasn't been created yet).
+    base_dir.mkdir(parents=True, exist_ok=True)
     path = base_dir / f"session_{safe_session}_{stamp}.h5"
     setattr(window, _SESSION_PATH_ATTR, path)
     # Keep _metric_archive_writer_path in sync for backwards compat with reload tasks

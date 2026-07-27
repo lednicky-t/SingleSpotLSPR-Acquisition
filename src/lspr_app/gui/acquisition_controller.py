@@ -251,6 +251,57 @@ def _archive_live_sample_if_needed(window, spectrum: Spectrum) -> bool:
     return True
 
 
+def poll_environment_sensors(window) -> None:
+    """Periodic tick (see MainWindow._environment_poll_timer): dispatch a
+    background read of the Switch device's ambient temperature/humidity
+    sensor, if one is connected. Only ArduinoValveController actually
+    supports this - see docs/hardware/arduino_valve_controller_protocol.md.
+    Cheap no-op (no device I/O at all) when nothing is connected, via the
+    same non-blocking cached connection check used for the titlebar status
+    strip.
+    """
+    from lspr_app.device.device_lifecycle import DeviceLifecycleController
+    from lspr_app.device.device_types import SWITCH
+    from lspr_app.gui.device_lifecycle_task import DeviceEnvironmentReadTask, device_io_pool
+
+    if not DeviceLifecycleController.shared().is_connected_cached(SWITCH):
+        return
+    task = DeviceEnvironmentReadTask()
+    task.signals.finished.connect(
+        lambda temperature_c, humidity_percent, w=window: handle_environment_reading(w, temperature_c, humidity_percent)
+    )
+    device_io_pool().start(task)
+
+
+def handle_environment_reading(window, temperature_c: float | None, humidity_percent: float | None) -> None:
+    """Record one temperature/humidity reading to whichever HDF5 writer(s)
+    are currently active - the always-on session archive and, if a named
+    recording is in progress, the measurement file too. Mirrors the "write
+    to both if present" pattern _archive_to_session_writer_if_available /
+    _archive_live_sample_if_needed already use for raw spectra.
+    """
+    if temperature_c is None and humidity_percent is None:
+        return  # nothing readable - e.g. a connected ItsyBitsy/Legacy controller
+    from lspr_app.storage.measurement_archive import ensure_session_writer
+
+    timestamp_utc_ms = int(round(datetime.now(timezone.utc).timestamp() * 1000.0))
+    storage_logger = logging.getLogger("lspr_app.storage")
+
+    session_writer = ensure_session_writer(window)  # no spectrum arg: fetch only, never create
+    if session_writer is not None:
+        try:
+            session_writer.append_environment_reading(timestamp_utc_ms, temperature_c, humidity_percent)
+        except Exception:
+            storage_logger.exception("Failed to record environment reading to session file.")
+
+    measurement_writer = window._measurement_writer
+    if measurement_writer is not None and measurement_writer is not session_writer:
+        try:
+            measurement_writer.append_environment_reading(timestamp_utc_ms, temperature_c, humidity_percent)
+        except Exception:
+            storage_logger.exception("Failed to record environment reading to measurement file.")
+
+
 def flush_live_recording_results(window) -> None:
     started = perf_counter()
     queue_obj = getattr(window, "_live_recording_queue", None)
