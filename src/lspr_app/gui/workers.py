@@ -153,6 +153,15 @@ class MeasurementWriterErrorSignals(QObject):
     failed = pyqtSignal(str)
 
 
+class SessionCopySignals(QObject):
+    """Marshals AsyncHDF5MeasurementWriter.save_copy()'s background-thread
+    completion callback onto the GUI thread, same reasoning as
+    MeasurementWriterErrorSignals above.
+    """
+
+    finished = pyqtSignal(bool, str, str)  # success, error_message, dest_path
+
+
 class _QueueLogHandler(logging.Handler):
     def __init__(self, log_queue: mp.Queue) -> None:
         super().__init__()

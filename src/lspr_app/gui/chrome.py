@@ -29,6 +29,10 @@ def build_menu_bar(window) -> QMenuBar:
     open_output_action.setToolTip("Open the current measurement output folder in the file browser.")
     open_output_action.triggered.connect(window._open_recording_project_destination_in_explorer)
 
+    save_session_copy_action = file_menu.addAction("Save session copy…")
+    save_session_copy_action.setToolTip("Save a copy of the current session's data to a new file.")
+    save_session_copy_action.triggered.connect(window._save_session_copy_as)
+
     file_menu.addSeparator()
 
     exit_action = file_menu.addAction("Exit")

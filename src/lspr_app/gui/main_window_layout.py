@@ -125,6 +125,7 @@ def build_main_layout_for(window) -> None:
     trace_left_field.setContentsMargins(0, 0, 0, 0)
     trace_left_field.setSpacing(6)
     trace_left_field.addWidget(window.trace_record_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+    trace_left_field.addWidget(window.sensorgram_save_copy_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
     trace_left_field.addWidget(window.sensorgram_freeze_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
     trace_left_field.addWidget(window.sensorgram_reload_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
     trace_left_field.addWidget(window.clear_trace_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)

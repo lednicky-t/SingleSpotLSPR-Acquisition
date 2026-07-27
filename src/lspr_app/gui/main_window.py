@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -1176,11 +1177,22 @@ class MainWindow(QMainWindow):
         self._sensorgram_reload_button_spinner_timer.setInterval(80)
         self._sensorgram_reload_button_spinner_timer.timeout.connect(self._advance_sensorgram_reload_spinner)
         self.sensorgram_reload_button.clicked.connect(self._reload_sensorgram_history)
-        self.trace_record_button = self._make_icon_button(
+        self.trace_record_button = self._make_frameless_icon_button(
             transport_icon(self._theme_mode, "record"),
             "Start recording sensorgram data",
+            size=30,
         )
         self.trace_record_button.clicked.connect(self._toggle_measurement_run)
+        self.sensorgram_save_copy_button = self._make_frameless_icon_button(
+            storage_save_icon(),
+            "Save a copy of the current session…",
+            size=30,
+        )
+        save_copy_menu = QMenu(self.sensorgram_save_copy_button)
+        save_copy_action = save_copy_menu.addAction("Save copy as…")
+        save_copy_action.triggered.connect(self._save_session_copy_as)
+        self.sensorgram_save_copy_button.setMenu(save_copy_menu)
+        self.sensorgram_save_copy_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.autoscale_spectrum_button = QPushButton("Auto spectrum", self)
         self.autoscale_spectrum_button.setObjectName("toolbarButton")
         self.autoscale_spectrum_button.clicked.connect(self._autoscale_spectrum_plot)
@@ -2464,6 +2476,14 @@ class MainWindow(QMainWindow):
     def _show_import_from_measurement_dialog(self) -> None:
         from lspr_app.gui.main_window_import_dialog import show_import_from_measurement_for
         show_import_from_measurement_for(self)
+
+    def _save_session_copy_as(self) -> None:
+        from lspr_app.gui.main_window_session_copy import save_session_copy_as_for
+        save_session_copy_as_for(self)
+
+    def _handle_session_copy_finished(self, success: bool, message: str, dest_path: str) -> None:
+        from lspr_app.gui.main_window_session_copy import handle_session_copy_finished_for
+        handle_session_copy_finished_for(self, success, message, dest_path)
 
     def _settings_key(self, settings: AcquisitionSettings) -> tuple[object, ...]:
         if self._source_mode == "simulation":

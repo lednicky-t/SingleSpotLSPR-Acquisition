@@ -327,6 +327,22 @@ class HDF5MeasurementWriter:
     def flush(self) -> None:
         self._handle.flush()
 
+    def copy_into(self, dest_path: Path) -> None:
+        """Copy this writer's current on-disk contents into a brand new file
+        at *dest_path*, via the already-open handle - not by reopening
+        self.path from the OS. A second open of the same path (e.g. a raw
+        file copy, or `h5py.File(self.path, "r")`) would collide with the
+        file lock this handle already holds; reading through the handle we
+        already own has no such conflict and needs no lock changes. Caller
+        is responsible for flushing first if a specific in-memory state must
+        be reflected (repack_measurement_hdf5_file uses the same
+        _copy_hdf5_node helper on a source path, but only ever after that
+        source's writer has fully closed).
+        """
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(dest_path, "w") as destination:
+            _copy_hdf5_node(self._handle, destination)
+
     def close(self) -> None:
         self._handle.flush()
         self._handle.close()
@@ -733,6 +749,25 @@ class AsyncHDF5MeasurementWriter:
             return
         self._queue.put(("flush", None))
 
+    def save_copy(self, dest_path: Path, on_done: Callable[[bool, str], None] | None = None) -> None:
+        """Flush pending data, then copy the file to *dest_path*.
+
+        Runs entirely inside the writer's own background thread, after the
+        flush - so the copy only ever happens once every pending write has
+        been drained and nothing else is touching the file at the same time.
+        A second h5py handle or a raw OS copy from another thread/process
+        while this writer's handle is still open would risk either an HDF5
+        locking error or copying a file mid-write (no SWMR is used here).
+
+        *on_done* is called from that same background thread, not the
+        caller's - same contract as *on_error* above.
+        """
+        if self._closed:
+            if on_done is not None:
+                on_done(False, "Writer is already closed.")
+            return
+        self._queue.put(("save_copy", (Path(dest_path), on_done)))
+
     def close(self) -> None:
         with self._state_lock:
             if self._closed:
@@ -823,6 +858,26 @@ class AsyncHDF5MeasurementWriter:
                         pending_peaks.clear()
                     writer.flush()
                     last_flush = monotonic()
+                elif kind == "save_copy" and isinstance(payload, tuple):
+                    dest_path, on_done = payload
+                    if pending_metrics:
+                        writer.append_metrics(pending_metrics)
+                        pending_metrics.clear()
+                    if pending_spectra:
+                        writer.append_batch(pending_spectra, pending_times, pending_peaks)
+                        pending_spectra.clear()
+                        pending_times.clear()
+                        pending_peaks.clear()
+                    writer.flush()
+                    last_flush = monotonic()
+                    try:
+                        writer.copy_into(dest_path)
+                        if on_done is not None:
+                            on_done(True, "")
+                    except Exception as exc:
+                        log.exception("Failed to save a copy of %s to %s", self._path, dest_path)
+                        if on_done is not None:
+                            on_done(False, str(exc))
                 elif kind == "close":
                     if pending_metrics:
                         writer.append_metrics(pending_metrics)
