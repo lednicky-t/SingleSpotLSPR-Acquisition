@@ -4,11 +4,9 @@ from dataclasses import dataclass
 from math import floor, log10
 from time import monotonic, sleep
 
-import serial
-
 from lspr_app.device.communication_models import DeviceCommand
-from lspr_app.device.connection_registry import release_port, try_claim_port
-from lspr_app.device.device_driver import DeviceDriver, DeviceError
+from lspr_app.device.device_driver import DeviceError
+from lspr_app.device.serial_controllers import SerialController
 from serial.tools import list_ports
 
 
@@ -60,11 +58,18 @@ def is_probable_reglo_port(port: PumpPort) -> bool:
     )
 
 
-class RegloICCClient(DeviceDriver):
-    def __init__(self) -> None:
-        self._serial: serial.Serial | None = None
-        self.port: str | None = None
-        self._claim_owner = f"reglo-icc:{id(self)}"
+class RegloICCClient(SerialController):
+    # Shares SerialController's connect()/close()/is_connected()/claim-owner
+    # lifecycle (see serial_controllers.py) instead of reimplementing the
+    # same claim-port-then-open-serial-then-rollback-on-failure pattern
+    # independently - this used to be a near-verbatim copy of it. Note: a
+    # busy port now raises ControllerError (from serial_controllers.py)
+    # rather than RegloICCError, since that check now happens in the shared
+    # base class; nothing in this codebase catches RegloICCError specifically
+    # for that case, only DeviceError more broadly.
+    controller_type = "reglo-icc"
+    _BAUD_RATE = 9600
+    _TIMEOUT = 0.35
 
     @staticmethod
     def list_ports() -> list[PumpPort]:
@@ -82,38 +87,6 @@ class RegloICCClient(DeviceDriver):
             return client.get_probe()
         finally:
             client.close()
-
-    def connect(self, port: str, timeout_s: float = 0.35) -> None:
-        self.close()
-        if not try_claim_port(port, self._claim_owner):
-            raise RegloICCError(f"Port {port} is busy.")
-        try:
-            self._serial = serial.Serial(
-                port=port,
-                baudrate=9600,
-                bytesize=8,
-                parity="N",
-                stopbits=1,
-                timeout=timeout_s,
-                write_timeout=timeout_s,
-            )
-        except Exception:
-            release_port(port, self._claim_owner)
-            raise
-        self.port = port
-
-    def close(self) -> None:
-        if self._serial is not None:
-            try:
-                self._serial.close()
-            finally:
-                self._serial = None
-                if self.port is not None:
-                    release_port(self.port, self._claim_owner)
-                self.port = None
-
-    def is_connected(self) -> bool:
-        return self._serial is not None and self._serial.is_open
 
     def get_probe(self) -> PumpProbe:
         # Try broadcast address (0) first; fall back to pump address 1 if rejected.
