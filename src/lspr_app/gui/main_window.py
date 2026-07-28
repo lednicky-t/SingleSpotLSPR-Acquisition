@@ -1339,7 +1339,7 @@ class MainWindow(QMainWindow):
         self.sim_noise_slider = make_sim_slider(0, 250, 40)
         self.sim_resolution_spin = QDoubleSpinBox()
         make_compact_spinbox(self.sim_resolution_spin)
-        self.sim_resolution_spin.setRange(0.01, 10.0)
+        self.sim_resolution_spin.setRange(0.05, 10.0)
         self.sim_resolution_spin.setDecimals(3)
         self.sim_resolution_spin.setSingleStep(0.01)
         self.sim_resolution_spin.setSuffix(" nm")

@@ -303,18 +303,30 @@ def get_analysis_metrics(
 
     dense_wavelengths, dense_values, _ = get_dense_analysis_curve(processed, fit, settings)
     dense_max_nm = float("nan")
-    if len(dense_wavelengths) >= 3 and len(dense_values) >= 3:
-        dense_peak = quadratic_peak_from_curve(dense_wavelengths, dense_values)
-        if dense_peak is not None:
-            dense_max_nm = float(dense_peak)
-        else:
+    if processed is not None and len(processed.wavelengths_nm) >= 3:
+        # Refine the peak with a 3-point parabola fit on the real (smoothed) samples
+        # within the crop window, not on the densely-interpolated display curve: the
+        # interpolated curve is piecewise-linear between real samples, so a local fit
+        # there just snaps back to the nearest raw sample and gives no real sub-pixel
+        # precision. Fitting the raw samples instead ties precision to the actual
+        # data, the same way poly_max/centroid already work.
+        window_wavelengths, window_values, _ = resolve_fit_window(
+            np.asarray(processed.wavelengths_nm, dtype=np.float64),
+            np.asarray(processed.values, dtype=np.float64),
+            settings,
+        )
+        raw_peak = quadratic_peak_from_curve(window_wavelengths, window_values)
+        if raw_peak is not None:
+            dense_max_nm = float(raw_peak)
+    if not np.isfinite(dense_max_nm):
+        if len(dense_wavelengths) >= 1 and len(dense_values) >= 1:
             dense_peak_index = _safe_nanargmax_index(dense_values)
             if dense_peak_index is not None and dense_peak_index < len(dense_wavelengths):
                 dense_max_nm = float(dense_wavelengths[dense_peak_index])
-    elif processed is not None and len(processed.wavelengths_nm) > 0:
-        processed_peak_index = _safe_nanargmax_index(processed.values)
-        if processed_peak_index is not None and processed_peak_index < len(processed.wavelengths_nm):
-            dense_max_nm = float(processed.wavelengths_nm[processed_peak_index])
+        elif processed is not None and len(processed.wavelengths_nm) > 0:
+            processed_peak_index = _safe_nanargmax_index(processed.values)
+            if processed_peak_index is not None and processed_peak_index < len(processed.wavelengths_nm):
+                dense_max_nm = float(processed.wavelengths_nm[processed_peak_index])
 
     centroid_nm = centroid_from_curve(dense_wavelengths, dense_values, threshold_fraction=settings.crop_fraction)
     if centroid_nm is None:
