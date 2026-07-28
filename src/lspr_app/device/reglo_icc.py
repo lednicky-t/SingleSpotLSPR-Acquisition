@@ -214,19 +214,27 @@ class RegloICCClient(SerialController):
     def set_display_text(self, text: str) -> None:
         """Write *text* to the pump's display while it's under remote control.
 
-        Uses the ``DA`` (write letters) command, addressed to pump 0 since
-        this is a per-pump, not per-channel, parameter. *text* is sanitized
-        to printable ASCII and truncated to 16 characters first - see
-        :func:`sanitize_pump_display_text`.
+        Uses the ``xN`` ("Set pump's temporary display name") command,
+        addressed to pump 0 since this is a per-pump, not per-channel,
+        parameter. *text* is sanitized to printable ASCII and truncated to
+        16 characters first - see :func:`sanitize_pump_display_text`.
 
-        UNVERIFIED against real hardware as of the commit that added this: the
-        command sends and gets acknowledged (`*`), but no text has yet been
-        confirmed visible on a physical pump's screen. See "Pump Display" in
-        docs/experiment-control/pump_control_guide.md before assuming this
-        works or debugging "why doesn't the pump show my comment" reports.
+        Switched from the originally-implemented ``DA`` ("Write letters to
+        the pump to display...", manual section 6.20): that command is
+        only ever listed in the summary command table - unlike nearly
+        every other command in the manual, it has no worked example
+        anywhere in section 18, which was the first real hint it might not
+        be the intended way to show custom text. ``xN`` (section 6.5) does
+        have one, for exactly this use case (section 18.6.2: "Set the
+        pump's display name to 'Reagent A.'" -> request `0xNReagent A[CR]`
+        -> response `*`). Both are per-pump String commands addressed to
+        pump 0 the same way, so the only change here is the command code.
+
+        Still UNVERIFIED against real hardware as of this change - see
+        "Pump Display" in docs/experiment-control/pump_control_guide.md.
         """
         sanitized = sanitize_pump_display_text(text)
-        self._expect_status(f"0DA{sanitized}")
+        self._expect_status(f"0xN{sanitized}")
 
     def configure_channel(
         self,

@@ -189,6 +189,16 @@ If you change this encoding, verify it against the pump manual and a real contro
 pump's screen yet. Treat this feature as unverified until someone checks it against
 hardware and this note is updated or removed.**
 
+**History**: originally implemented with the `DA` command (see "What's NOT confirmed"
+below for why that was the first guess); a real hardware test showed the command sends
+and gets acknowledged (`*`) but nothing appears on the screen. Confirmed with the
+maintainer that the pump already switches to its own "Remote Mode" screen automatically
+as soon as it's connected over USB (manual section 6.6, "Information Screens") -
+regardless of any command this app sends - so the `A`/`B` front-panel-lock commands
+(section 6.17/6.18) that were the next suspect are **not** the missing piece; a
+short-lived toggle for them was built, found to make no observable difference, and
+removed again. Currently implemented with `xN` instead - see below.
+
 This is a **global** setting, not a per-step field: `ExperimentControlWindow._pump_display_enabled`
 (a plain instance attribute, not part of `PumpPlanStep` or the exported plan/HDF5 data - it's
 pure app/session UI state, saved and restored the same way as other window preferences via
@@ -205,14 +215,17 @@ row was currently selected and mutate that row's step object directly - easy to 
 the source of an earlier "toggling this silently does nothing" bug). A global boolean has
 nothing to write back to.
 
-- `RegloICCClient.set_display_text(text)` sends `0DA{text}\r` - the manual's `DA`
-  ("write letters to the pump to display while under external control") command, addressed
-  to pump 0 since this is a per-pump, not per-channel, parameter.
+- `RegloICCClient.set_display_text(text)` sends `0xN{text}\r` - the manual's `xN`
+  ("Set pump's temporary display name") command, addressed to pump 0 since this is a
+  per-pump, not per-channel, parameter.
 - `sanitize_pump_display_text(text, max_length=16)` (module-level function in
   `reglo_icc.py`) filters to printable ASCII (0x20-0x7E) and truncates to 16 characters
   first, per the manual's `String` data type rules (section 14.6.13: printable ASCII only,
-  no embedded `[CR]`) and the `D`/`DA` commands' own `<17 characters` limit. Reused by the
-  GUI's live preview so the two can't drift apart.
+  no embedded `[CR]`) and the physical display's own line width (the general `String` type
+  itself allows up to 64 characters - `xN`'s own table entry doesn't restate a shorter
+  limit the way `D`/`DA`'s entries do, but 16 chars is what actually fits the LCD in every
+  screenshot in the manual, so the truncation stays at 16 either way). Reused by the GUI's
+  live preview so the two can't drift apart.
 - Dispatch happens in `experiment_control_window.py`'s `_plan_step_commands` (via a
   `pump.set_display` command) for normal step transitions, and in
   `_push_step_pump_display_now` for an immediate push when the setting is toggled while a
@@ -252,24 +265,35 @@ what gets sent to hardware at all - it only controls how comments are *drawn*:
   outside what the pump display itself supports (see `sanitize_pump_display_text` above).
 
 **What's confirmed:** the full software round-trip (checkbox -> global window state -> command
-dispatch -> `0DA<text>\r` sent over the serial port) works, and the exact command sent has a
+dispatch -> `0xN<text>\r` sent over the serial port) works, and the exact command sent has a
 unit test (`tests/unit/test_pump_display.py`) checking it against a fake serial port. The
 Comment-cell and inline-editor coloring is covered by
 `tests/integration/test_pump_display_global_highlight.py` (pixel-level checks against a
-rendered `QPixmap`).
+rendered `QPixmap`). Also confirmed: the pump does *not* need to be told anything (via `A`/`B`
+or otherwise) to be "under remote control" - it enters that mode by itself as soon as it's
+connected over USB, and address `0` is documented as ignored-but-required for any
+per-pump (non-per-channel) command sent over USB (section 14.4), so address is not a
+suspect either.
 
-**What's NOT confirmed:** whether `DA` is actually the right command for this pump model's
-display, whether address `0` is correct for a single non-daisy-chained USB-connected pump,
-and whether the pump needs to be in some particular mode (see commands `A`/`B` in the
-manual - "Set control from the pump user interface" / "Disable pump user interface") for a
-`DA` write to be visible on-screen at all. Nothing in the manual's worked-examples section
-(section 18) shows a `D`/`DA` example, only the summary command table, so this was
-implemented from the table specification alone. First real test attempt (pump physically
-connected) showed no visible text on the display; the command send itself did not error.
-Next time hardware is available: enable diagnostics/log panel, toggle the setting on the
-currently-applied step, and check the log for `pump.set_display` - "Step command OK" or
-"Step command failed | ... | error=...". If it logs OK but nothing shows, the command
-letter/target field is the likely culprit, not the dispatch plumbing.
+**What's NOT confirmed:** whether `xN` is actually the right command for this pump model's
+display. First real test attempt used `DA` ("write letters to the pump to display while
+under external control", section 6.20) - it seemed like the obvious match by name, sent and
+got acknowledged (`*`), but no text appeared on the screen. The tell in hindsight: `DA` (and
+its sibling `D`, "write numbers") are the *only* commands in the entire manual's summary
+table (section 16.2's list) with no corresponding worked example anywhere in section 18,
+even though nearly every other command does - including `xN` ("Set pump's temporary display
+name", section 6.5), which has one for exactly this scenario (section 18.6.2: `0xNReagent
+A[CR]` -> `*`). Switched to `xN` on that basis, but this is still a documentation-driven
+best guess, not a hardware-confirmed fix. Next time hardware is available: enable
+diagnostics/log panel, toggle the setting on the currently-applied step, and check the log
+for `pump.set_display` - "Step command OK" or "Step command failed | ... | error=...". If it
+logs OK but nothing shows even with `xN`, the remaining suspects are: the display needing a
+specific pumping *mode* selected (section 6.4.2 lists 7 modes, e.g. Flow Rate vs Volume vs
+Disabled - the manual's screenshots suggest the channel number/rate always occupies the
+main display area, so a custom name may only be visible on a *different* screen than the
+default Status view, e.g. reachable via the right-arrow "Next Screen" icon shown in section
+6.2) or, less likely, this being a documented-but-unimplemented command in this pump's
+actual firmware revision.
 
 ## Important Safety Rules
 
