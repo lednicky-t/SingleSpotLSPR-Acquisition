@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -15,6 +16,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -182,9 +184,25 @@ class PreferencesDialog(QDialog):
 
         self._build_ui()
         self._load_from_window()
+        self._fit_to_available_screen()
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        # Sections go in a scroll area so a tall dialog (six bordered
+        # sections, more as they're added) never pushes the OK/Cancel/
+        # Apply row off the bottom of the screen - previously the whole
+        # dialog just grew to fit its content, and on a screen shorter than
+        # that content the button row ended up behind the Windows taskbar
+        # with no way to reach it. See _fit_to_available_screen() for the
+        # matching cap on the dialog's own height.
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        content = QWidget(scroll_area)
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
@@ -251,6 +269,9 @@ class PreferencesDialog(QDialog):
         layout.addWidget(performance_box)
         layout.addWidget(developer_box)
 
+        scroll_area.setWidget(content)
+        outer_layout.addWidget(scroll_area, 1)
+
         button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Apply
@@ -261,7 +282,24 @@ class PreferencesDialog(QDialog):
         apply_btn = button_box.button(QDialogButtonBox.StandardButton.Apply)
         if apply_btn is not None:
             apply_btn.clicked.connect(self.apply_changes)
-        layout.addWidget(button_box)
+        button_row = QWidget(self)
+        button_row.setObjectName("preferencesButtonRow")
+        button_row_layout = QVBoxLayout(button_row)
+        button_row_layout.setContentsMargins(16, 10, 16, 16)
+        button_row_layout.addWidget(button_box)
+        outer_layout.addWidget(button_row, 0)
+
+    def _fit_to_available_screen(self) -> None:
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        # Leave headroom for the taskbar/other chrome rather than filling
+        # the whole usable screen - matches how the main window's own
+        # startup sizing (fit_window_to_available_screen_for) leaves margin.
+        max_height = max(int(available.height() * 0.85), 320)
+        target_height = min(self.sizeHint().height(), max_height)
+        self.resize(self.width(), target_height)
 
     def _on_ok(self) -> None:
         self.apply_changes()
