@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -10,12 +11,17 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
+    QListWidget,
+    QMessageBox,
+    QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from lspr_app.gui.undo_support import DEFAULT_UNDO_HISTORY_SIZE
+from lspr_app.storage import user_profile
 
 _GUI_LOG_LEVELS = [
     ("Errors only", logging.ERROR),
@@ -37,6 +43,19 @@ class PreferencesDialog(QDialog):
         self.theme_combo = QComboBox()
         self.theme_combo.addItem("Dark", "dark")
         self.theme_combo.addItem("Light", "light")
+
+        # Users - who's using this instrument (see storage/user_profile.py).
+        # No password: this list is bookkeeping for settings isolation and
+        # HDF5 traceability, not access control.
+        self.user_list = QListWidget()
+        self.user_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.user_list.setToolTip("Known users, picked from the User field next to the recording destination.")
+        self.remove_user_button = QPushButton("Remove")
+        self.remove_user_button.setToolTip(
+            "Remove the selected name from the look-up list. Their saved settings are kept on "
+            "disk, not deleted - only removed from this list. The active user can't be removed."
+        )
+        self.remove_user_button.clicked.connect(self._remove_selected_user)
 
         # Startup
         self.start_maximized_check = QCheckBox("Start maximized")
@@ -139,6 +158,16 @@ class PreferencesDialog(QDialog):
         appearance_layout.setVerticalSpacing(8)
         appearance_layout.addRow("Theme", self.theme_combo)
 
+        # ── Users ─────────────────────────────────────────────────────────────
+        users_box = QGroupBox("Users")
+        users_layout = QVBoxLayout(users_box)
+        users_layout.setSpacing(6)
+        users_layout.addWidget(self.user_list)
+        remove_row = QHBoxLayout()
+        remove_row.addStretch(1)
+        remove_row.addWidget(self.remove_user_button)
+        users_layout.addLayout(remove_row)
+
         # ── Startup ───────────────────────────────────────────────────────────
         startup_box = QGroupBox("Startup")
         startup_layout = QFormLayout(startup_box)
@@ -178,6 +207,7 @@ class PreferencesDialog(QDialog):
         developer_layout.addRow("Log panel level", self.gui_log_level_combo)
 
         layout.addWidget(appearance_box)
+        layout.addWidget(users_box)
         layout.addWidget(startup_box)
         layout.addWidget(acquisition_box)
         layout.addWidget(performance_box)
@@ -199,7 +229,30 @@ class PreferencesDialog(QDialog):
         self.apply_changes()
         self.accept()
 
+    def _refresh_user_list(self) -> None:
+        active = user_profile.active_user()
+        self.user_list.clear()
+        for name in user_profile.list_known_users():
+            self.user_list.addItem(f"{name} (active)" if name == active else name)
+
+    def _remove_selected_user(self) -> None:
+        item = self.user_list.currentItem()
+        if item is None:
+            return
+        name = item.text().removesuffix(" (active)")
+        if name == user_profile.active_user():
+            QMessageBox.information(
+                self, "Remove user", "Switch to a different user before removing the active one."
+            )
+            return
+        user_profile.remove_known_user(name)
+        self._refresh_user_list()
+        if hasattr(self._window, "_refresh_user_combo"):
+            self._window._refresh_user_combo()
+
     def _load_from_window(self) -> None:
+        self._refresh_user_list()
+
         theme = str(getattr(self._window, "_theme_mode", "dark"))
         index = self.theme_combo.findData(theme)
         if index >= 0:

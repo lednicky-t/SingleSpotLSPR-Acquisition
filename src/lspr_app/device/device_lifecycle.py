@@ -80,8 +80,13 @@ _ENABLED_DEVICES_SETTING_KEY = "enabled_devices"
 
 def load_enabled_devices() -> dict[str, bool]:
     from lspr_app.storage.app_config import load_app_setting
+    from lspr_app.storage.user_profile import GLOBAL_CONFIG_PATH
 
-    raw = load_app_setting(_ENABLED_DEVICES_SETTING_KEY, {})
+    # Deliberately the global (not per-user) settings file: this describes
+    # the physical rig, not a person's preference - switching users must
+    # not make the app try to scan for hardware that isn't on this rig, or
+    # hide hardware that is.
+    raw = load_app_setting(_ENABLED_DEVICES_SETTING_KEY, {}, path=GLOBAL_CONFIG_PATH)
     if not isinstance(raw, dict):
         raw = {}
     return {key: bool(raw.get(key, True)) for key in DEVICE_ORDER}
@@ -89,10 +94,12 @@ def load_enabled_devices() -> dict[str, bool]:
 
 def save_enabled_devices(enabled: dict[str, bool]) -> None:
     from lspr_app.storage.app_config import save_app_setting
+    from lspr_app.storage.user_profile import GLOBAL_CONFIG_PATH
 
     save_app_setting(
         _ENABLED_DEVICES_SETTING_KEY,
         {key: bool(enabled.get(key, True)) for key in DEVICE_ORDER},
+        path=GLOBAL_CONFIG_PATH,
     )
 
 _DEVICE_DRIVER = {PUMP: "reglo_icc", SWITCH: "auto", SELECTOR: "amf-mswitch"}

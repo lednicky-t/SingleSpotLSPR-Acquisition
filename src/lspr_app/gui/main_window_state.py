@@ -35,8 +35,18 @@ from time import perf_counter
 from copy import deepcopy
 
 from lspr_app.domain.pump_plan import to_core_experiment_plan
-from lspr_app.gui.main_window_processing import normalize_sensorgram_metric_name, sensorgram_metric_order
-from lspr_app.storage.app_config import load_app_setting, save_acquisition_state, save_window_ui_state
+from lspr_app.gui.main_window_processing import (
+    apply_processing_settings_to_widgets,
+    normalize_sensorgram_metric_name,
+    sensorgram_metric_order,
+)
+from lspr_app.storage import user_profile
+from lspr_app.storage.app_config import (
+    load_app_setting,
+    load_processing_settings,
+    save_acquisition_state,
+    save_window_ui_state,
+)
 from lspr_core import LAUNCH_PROFILE_CONTROL_EDITOR, LAUNCH_PROFILE_FULL, LAUNCH_PROFILE_SIMULATION, launch_profile_spec, DEFAULT_LAUNCH_PROFILE
 
 
@@ -1301,6 +1311,47 @@ def set_environment_poll_interval_s(window, interval_s: float) -> None:
         timer.setInterval(int(interval_s * 1000))
     window.status_label.setText(f"Temp/humidity poll interval set to {interval_s:g} s.")
     window._log_info(f"Temp/humidity poll interval set to {interval_s:g} s.")
+
+
+def switch_active_user(window, name: str) -> bool:
+    """Switch which user is active - see storage/user_profile.py and the
+    user look-up field next to the destination-folder/experiment-name row
+    (main_window_layout.py's build_recording_context_row_for) that calls
+    this. Returns True if the switch happened. Deliberately bounded "live"
+    behavior:
+      - refused outright while a measurement is actively recording (avoids
+        the ambiguity of which user an in-flight HDF5 file belongs to);
+      - the active-user pointer switches immediately, so every *new* file
+        created from this point on is tagged with the new user and
+        reads/writes that user's settings file;
+      - processing settings and theme hot-reload immediately, by simply
+        re-running the same "load and apply" functions startup already
+        uses, now pointed at the new user's file;
+      - window/panel layout is saved per-user but only restored on the
+        *next* app launch, not hot-applied here - resizing panels out from
+        under someone actively working is jarring for little benefit.
+    """
+    name = str(name or "").strip()
+    if not name:
+        return False
+    if bool(getattr(window, "_measurement_active", False)):
+        window.status_label.setText("Stop the current recording before switching users.")
+        return False
+    if name == user_profile.active_user():
+        return False
+    user_profile.set_active_user(name)
+
+    processing_settings = load_processing_settings()
+    window._processing_settings = processing_settings
+    apply_processing_settings_to_widgets(window, processing_settings)
+
+    theme_mode = str(load_app_setting("theme_mode", "dark"))
+    if theme_mode in {"light", "dark"} and hasattr(window, "set_theme"):
+        window.set_theme(theme_mode)
+
+    window.status_label.setText(f"Switched to user: {name}")
+    window._log_info(f"Switched active user to {name!r}.")
+    return True
 
 
 def toggle_experimental_control_panel_visibility(window, checked: bool | None = None) -> None:

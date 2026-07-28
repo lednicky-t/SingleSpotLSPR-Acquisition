@@ -51,19 +51,25 @@ Recommended root attributes:
 
 ```text
 attrs["schema_name"] = "lspr_measurement"
-attrs["schema_version"] = "6.0"
+attrs["schema_version"] = "6.1"
 attrs["schema_major"] = 6
-attrs["schema_minor"] = 0
+attrs["schema_minor"] = 1
 attrs["format_name"] = "experiment_run"
 attrs["format_version"] = 6
 attrs["app_version"] = "<application version>"
 attrs["created_by"] = "LSPR Acquisition"
 attrs["created_at_utc"] = "YYYY-MM-DDTHH:MM:SS.sssZ"
 attrs["started_at_utc"] = "YYYY-MM-DDTHH:MM:SS.sssZ"
+attrs["user"] = "<name picked in the app's User field, or \"\" if none>"
 attrs["storage_compression_enabled"] = true|false
 attrs["storage_compression_filter"] = "gzip"|"none"
 attrs["storage_compression_level"] = 0..9
 ```
+
+`user` (schema 6.1+) is who was using the instrument, picked from the app's own User
+field - no password, just bookkeeping. Absent or empty on files written before 6.1, or
+when no user was chosen. Not the same as `export_user` below (the OS login name,
+captured automatically) - on a shared Windows login that's identical for everyone.
 
 Compatibility rules:
 
@@ -90,6 +96,7 @@ Recommended manifest group:
   created_by
   created_at_utc
   started_at_utc
+  user
   export_host
   export_user
   storage_compression_enabled

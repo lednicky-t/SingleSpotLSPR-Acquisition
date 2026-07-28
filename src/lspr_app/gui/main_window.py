@@ -199,6 +199,7 @@ from lspr_app.gui.main_window_state import (
     set_diagnostics_panel_visible,
     set_measurement_hdf5_flush_interval_s,
     set_metric_plot_enabled,
+    switch_active_user,
     show_experimental_control_only,
     show_plots_only,
     show_split_view,
@@ -970,6 +971,19 @@ class MainWindow(QMainWindow):
             "Current source/backend connection and important application status messages.",
             text=f"Connected backend: {self._spectrometer.device_name()}",
         )
+
+        self.user_combo = QComboBox(self)
+        self.user_combo.setObjectName("recordingUserCombo")
+        self.user_combo.setEditable(True)
+        self.user_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.user_combo.setToolTip(
+            "Who is using this instrument. Pick a known name or type a new one - "
+            "new names are remembered for next time (Preferences > Users to remove one)."
+        )
+        self.user_combo.setFixedHeight(24)
+        self._refresh_user_combo()
+        self.user_combo.textActivated.connect(self._on_user_selected)
+        self.user_combo.lineEdit().editingFinished.connect(self._on_user_name_edited)
 
         self.project_destination_edit = QLineEdit(str(load_app_setting("recording_project_destination", "")))
         self.project_destination_edit.setObjectName("recordingPathEdit")
@@ -1759,6 +1773,27 @@ class MainWindow(QMainWindow):
         if folder.is_file():
             folder = folder.parent
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder.resolve())))
+
+    def _refresh_user_combo(self) -> None:
+        from lspr_app.storage import user_profile
+
+        known = user_profile.list_known_users()
+        current = user_profile.active_user() or ""
+        self.user_combo.blockSignals(True)
+        self.user_combo.clear()
+        self.user_combo.addItems(known)
+        self.user_combo.setCurrentText(current)
+        self.user_combo.blockSignals(False)
+
+    def _on_user_selected(self, name: str) -> None:
+        self._switch_active_user(name)
+
+    def _on_user_name_edited(self) -> None:
+        self._switch_active_user(self.user_combo.currentText())
+
+    def _switch_active_user(self, name: str) -> None:
+        switch_active_user(self, name)
+        self._refresh_user_combo()
 
     def _remember_recording_project_destination(self) -> None:
         save_app_setting("recording_project_destination", self.recording_project_destination())

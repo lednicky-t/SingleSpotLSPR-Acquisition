@@ -14,6 +14,7 @@ from platformdirs import user_config_dir
 
 from lspr_app.domain.models import ProcessingSettings
 from lspr_app import __version__ as APP_VERSION
+from lspr_app.storage.user_profile import GLOBAL_CONFIG_PATH, active_user, current_config_path
 from lspr_io import (
     read_processing_settings_metadata,
     standard_measurement_metadata,
@@ -23,7 +24,23 @@ from lspr_io import (
 )
 
 
-DEFAULT_CONFIG_PATH = Path(user_config_dir("lspr-suite", appauthor=False)) / "lspr_settings.json"
+# The flat, pre-user settings file. Still used as-is: as the starting
+# directory for the explicit "Save/load processing settings..." export
+# dialogs (main_window_processing.py), and as the fallback path before any
+# user has been entered yet. The functions below no longer default to this
+# path directly - see current_config_path()/_resolve_path().
+DEFAULT_CONFIG_PATH = GLOBAL_CONFIG_PATH
+
+
+def _resolve_path(path: Path | None) -> Path:
+    """Every load/save function's `path` parameter defaults to None, not a
+    fixed constant - the active user can change during a run (see the user
+    look-up field next to the destination-folder/experiment-name row), and
+    a `path: Path = DEFAULT_CONFIG_PATH` default would be baked in once at
+    import time, never re-evaluated. Resolving here means callers that
+    pass no explicit path automatically follow whichever user is active
+    *right now*."""
+    return path if path is not None else current_config_path()
 
 _logger = logging.getLogger(__name__)
 
@@ -162,7 +179,8 @@ def _coerce_processing_settings(raw: object) -> ProcessingSettings:
     return ProcessingSettings(**defaults)
 
 
-def save_processing_settings(settings: ProcessingSettings, path: Path = DEFAULT_CONFIG_PATH) -> None:
+def save_processing_settings(settings: ProcessingSettings, path: Path | None = None) -> None:
+    path = _resolve_path(path)
     payload = _load_payload(path)
     payload["processing"] = asdict(settings)
     _write_payload(payload, path)
@@ -180,6 +198,7 @@ def save_processing_settings_to_hdf5(settings: ProcessingSettings, path: Path) -
                 app_name="LSPR Acquisition",
                 app_version=APP_VERSION,
                 experiment_name="",
+                user=active_user() or "",
             ),
         )
         metadata = handle.create_group("metadata")
@@ -209,7 +228,8 @@ def save_processing_settings_to_hdf5(settings: ProcessingSettings, path: Path) -
         metadata.attrs["trace_metrics"] = np.asarray(settings.trace_metrics, dtype=h5py.string_dtype(encoding="utf-8"))
 
 
-def load_processing_settings(path: Path = DEFAULT_CONFIG_PATH) -> ProcessingSettings:
+def load_processing_settings(path: Path | None = None) -> ProcessingSettings:
+    path = _resolve_path(path)
     if not path.exists():
         return ProcessingSettings()
 
@@ -265,13 +285,15 @@ def load_processing_settings_from_hdf5(path: Path) -> ProcessingSettings:
         return _coerce_processing_settings(legacy_payload)
 
 
-def save_ui_state(state: dict[str, object], path: Path = DEFAULT_CONFIG_PATH) -> None:
+def save_ui_state(state: dict[str, object], path: Path | None = None) -> None:
+    path = _resolve_path(path)
     payload = _load_payload(path)
     payload["ui_state"] = state
     _write_payload(payload, path)
 
 
-def load_ui_state(path: Path = DEFAULT_CONFIG_PATH) -> dict[str, object]:
+def load_ui_state(path: Path | None = None) -> dict[str, object]:
+    path = _resolve_path(path)
     if not path.exists():
         return {}
     payload = _load_payload(path)
@@ -282,8 +304,9 @@ def load_ui_state(path: Path = DEFAULT_CONFIG_PATH) -> dict[str, object]:
 def save_window_ui_state(
     window_name: str,
     state: dict[str, object],
-    path: Path = DEFAULT_CONFIG_PATH,
+    path: Path | None = None,
 ) -> None:
+    path = _resolve_path(path)
     payload = _load_payload(path)
     ui_state = payload.get("ui_state", {})
     if not isinstance(ui_state, dict):
@@ -293,7 +316,8 @@ def save_window_ui_state(
     _write_payload(payload, path)
 
 
-def load_window_ui_state(window_name: str, path: Path = DEFAULT_CONFIG_PATH) -> dict[str, object]:
+def load_window_ui_state(window_name: str, path: Path | None = None) -> dict[str, object]:
+    path = _resolve_path(path)
     ui_state = load_ui_state(path)
     window_state = ui_state.get(window_name)
     if isinstance(window_state, dict):
@@ -309,8 +333,9 @@ def load_window_ui_state(window_name: str, path: Path = DEFAULT_CONFIG_PATH) -> 
 def save_app_setting(
     key: str,
     value: object,
-    path: Path = DEFAULT_CONFIG_PATH,
+    path: Path | None = None,
 ) -> None:
+    path = _resolve_path(path)
     payload = _load_payload(path)
     app_state = payload.get("app", {})
     if not isinstance(app_state, dict):
@@ -323,8 +348,9 @@ def save_app_setting(
 def load_app_setting(
     key: str,
     default: object = None,
-    path: Path = DEFAULT_CONFIG_PATH,
+    path: Path | None = None,
 ) -> object:
+    path = _resolve_path(path)
     payload = _load_payload(path)
     app_state = payload.get("app", {})
     if not isinstance(app_state, dict):
@@ -334,13 +360,13 @@ def load_app_setting(
 
 def save_acquisition_state(
     state: dict[str, object],
-    path: Path = DEFAULT_CONFIG_PATH,
+    path: Path | None = None,
 ) -> None:
     save_app_setting("acquisition_state", state, path)
 
 
 def load_acquisition_state(
-    path: Path = DEFAULT_CONFIG_PATH,
+    path: Path | None = None,
 ) -> dict[str, object]:
     state = load_app_setting("acquisition_state", {}, path)
     return state if isinstance(state, dict) else {}

@@ -44,6 +44,7 @@ from lspr_io import (
 )
 from lspr_app.domain.models import ProcessingSettings, Spectrum
 from lspr_app.domain.pump_plan import to_core_experiment_plan
+from lspr_app.storage import user_profile
 from lspr_app.version import APP_VERSION
 
 log = logging.getLogger(__name__)
@@ -148,6 +149,7 @@ class HDF5MeasurementWriter:
         self._reference_index = -1
         self._last_dark_key: tuple[object, ...] | None = None
         self._last_reference_key: tuple[object, ...] | None = None
+        active_user = user_profile.active_user() or ""
         self._handle = h5py.File(path, "w")
         write_measurement_root_metadata(
             self._handle,
@@ -157,6 +159,7 @@ class HDF5MeasurementWriter:
                 app_name="LSPR Acquisition",
                 app_version=APP_VERSION,
                 experiment_name=experiment_name,
+                user=active_user,
             ),
         )
         self._manifest = self._handle.create_group("manifest")
@@ -168,6 +171,7 @@ class HDF5MeasurementWriter:
                 app_name="LSPR Acquisition",
                 app_version=APP_VERSION,
                 experiment_name=experiment_name,
+                user=active_user,
             ),
             storage_compression_enabled=False,
             storage_compression_filter="none",
@@ -192,6 +196,7 @@ class HDF5MeasurementWriter:
                 "created_by": "LSPR HDF5 Builder",
                 "version": "2.0",
                 "experiment_name": str(experiment_name or ""),
+                "user": active_user,
             },
         )
         self._handle.attrs["storage_compression_enabled"] = False
