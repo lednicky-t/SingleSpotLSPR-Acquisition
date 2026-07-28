@@ -29,6 +29,12 @@ def build_menu_bar(window) -> QMenuBar:
     open_output_action.setToolTip("Open the current measurement output folder in the file browser.")
     open_output_action.triggered.connect(window._open_recording_project_destination_in_explorer)
 
+    open_settings_folder_action = file_menu.addAction("Open settings folder")
+    open_settings_folder_action.setToolTip(
+        "Open the application settings and log folder in the file browser."
+    )
+    open_settings_folder_action.triggered.connect(window._open_app_config_folder)
+
     save_session_copy_action = file_menu.addAction("Save session copy…")
     save_session_copy_action.setToolTip("Save a copy of the current session's data to a new file.")
     save_session_copy_action.triggered.connect(window._save_session_copy_as)
@@ -130,13 +136,13 @@ def build_menu_bar(window) -> QMenuBar:
     # ── Hardware ──────────────────────────────────────────────────────────────
     hw_menu = menu_bar.addMenu("Hardware")
 
+    device_manager_action = hw_menu.addAction("Device Manager")
+    device_manager_action.setToolTip("View connection status, manage device profiles, run diagnostics, and send commands.")
+    device_manager_action.triggered.connect(window._show_device_manager_dialog)
+
     hw_init_action = hw_menu.addAction("Reinitialize hardware")
     hw_init_action.setToolTip("Disconnect all devices, then scan and reconnect all available hardware.")
     hw_init_action.triggered.connect(window._start_hardware_initialization)
-
-    device_manager_action = hw_menu.addAction("Device Manager…")
-    device_manager_action.setToolTip("View connection status, manage device profiles, run diagnostics, and send commands.")
-    device_manager_action.triggered.connect(window._show_device_manager_dialog)
 
     hw_disconnect_all_action = hw_menu.addAction("Disconnect all")
     hw_disconnect_all_action.setToolTip("Stop the active devices and release all app-owned hardware connections.")
@@ -159,12 +165,6 @@ def build_menu_bar(window) -> QMenuBar:
     legend_action = help_menu.addAction("Diagnostics legend")
     legend_action.setToolTip("Show a short legend for the status and telemetry labels.")
     legend_action.triggered.connect(window._show_diagnostics_legend_dialog)
-
-    open_log_folder_action = help_menu.addAction("Open settings folder")
-    open_log_folder_action.setToolTip(
-        "Open the application settings and log folder in the file browser."
-    )
-    open_log_folder_action.triggered.connect(window._open_app_config_folder)
 
     help_menu.addSeparator()
 
