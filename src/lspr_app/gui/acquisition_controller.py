@@ -1157,7 +1157,7 @@ def update_measurement_toggle_button(window) -> None:
         if window._measurement_active:
             record_color = QColor("#d84d4d" if window._theme_mode == "dark" else "#a11d1d")
             record_color.setAlpha(255 if bool(getattr(window, "_recording_blink_visible", True)) else 90)
-            trace_icon = tint_tabler_icon(flow_tabler_icon("player_record"), record_color)
+            trace_icon = tint_tabler_icon(flow_tabler_icon("player_record_filled"), record_color)
         else:
             trace_icon = transport_icon(window._theme_mode, "record")
         trace_tooltip = "Stop sensorgram recording" if window._measurement_active else "Start sensorgram recording"
