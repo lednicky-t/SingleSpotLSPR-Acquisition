@@ -1094,6 +1094,19 @@ class PlotViewCache:
             )
             _trim_live_cache_l0_if_needed(cache, self._max_live_cache_l0_blocks)
             appended_blocks = int(np.ceil(float(len(pending_x)) / float(block_size)))
+        # NOTE: this rebuild WAS removed in an earlier pass on the theory that
+        # render_metric_series() (plot_controller.py, via live_absolute_metric_view)
+        # always rebuilds it again immediately afterward in the same frame, making
+        # this one redundant. That was wrong: refresh_metric_plot() first computes
+        # active_series = window._active_trace_series(), which calls
+        # live_absolute_metric_series() below - and that method SKIPS any metric
+        # whose cache.x_display is empty (see live_absolute_metric_series just
+        # below). With this rebuild removed, x_display never gets populated, so
+        # active_series comes back empty every frame and refresh_metric_plot takes
+        # its "no data" branch and returns *before* ever reaching
+        # live_absolute_metric_view - the curve never renders live data at all
+        # (only a manual archive reload, which seeds x_display directly, made it
+        # reappear). Keep this rebuild here; it is not actually redundant.
         display_x, display_y, display_level, old_blocks, overlap_blocks = _build_absolute_metric_display_arrays(
             cache,
             target_points=int(target_points),

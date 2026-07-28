@@ -34,7 +34,7 @@ class SimulatedSpectrometer(Spectrometer):
 
     def __init__(self, parameters: SimulationParameters | None = None) -> None:
         self._parameters = parameters or SimulationParameters()
-        self._sample_phase = 0
+        self._drift_level = 0.0
         self._cached_axis_key: tuple[float, float, float] | None = None
         self._cached_axis: np.ndarray | None = None
         self._cached_x_relative: np.ndarray | None = None
@@ -88,8 +88,14 @@ class SimulatedSpectrometer(Spectrometer):
         assert linear_baseline is not None
         assert peak_signal is not None
         assert secondary_peak_signal is not None
-        phase_shift = self._sample_phase * 0.6
-        drift = 0.5 * float(self._parameters.noise) * np.sin(x_relative / 140.0 + phase_shift)
+        # Mean-reverting random walk (AR(1)): baseline_signal wanders up/down like
+        # real instrument thermal/mechanical drift. The 0.98 reversion factor keeps
+        # the walk bounded around zero rather than drifting away indefinitely; the
+        # step scale is tuned to give a steady-state wander of a similar order of
+        # magnitude to the noise parameter.
+        drift_step = float(np.random.normal(0.0, 0.1 * max(self._parameters.noise, 0.0)))
+        self._drift_level = 0.98 * self._drift_level + drift_step
+        drift = np.full_like(x_relative, self._drift_level)
         baseline_signal = linear_baseline + drift
         sample_signal = baseline_signal + peak_signal + secondary_peak_signal
         noise_scale = max(self._parameters.noise, 0.0)
@@ -102,7 +108,6 @@ class SimulatedSpectrometer(Spectrometer):
         else:
             values = np.clip(sample_signal + noise, 1e-6, None)
 
-        self._sample_phase += 1
         return Spectrum(
             wavelengths_nm=wavelengths.copy(),
             values=values,

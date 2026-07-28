@@ -1417,23 +1417,35 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
 
     display_step_s = max(1.0 / max(window.live_rate_spin.value(), 1e-9), 1e-3)
     metrics = window._get_analysis_metrics(processed, fit)
+    selected_metrics = set(window._selected_trace_metrics())
     updated = False
     for metric_name in window.TRACE_METRIC_LABELS:
         value = metrics.get(metric_name)
         if not isinstance(value, (int, float)) or not np.isfinite(float(value)):
             continue
-        plot_view_cache = getattr(window, "_plot_view_cache", None)
-        if plot_view_cache is not None and hasattr(plot_view_cache, "append_live_absolute_metric_point"):
-            try:
-                plot_view_cache.append_live_absolute_metric_point(
-                    metric_name,
-                    float(elapsed_s),
-                    float(value),
-                    target_points=max(int(getattr(window, "_plot_display_points", 512)), 1),
-                    recent_tail_points=max(int(getattr(window, "_sensorgram_compression_recent_tail_points", 300)), 0),
-                )
-            except Exception:
-                pass
+        # Only maintain the compression-pyramid cache for metrics that are actually
+        # selected/plotted - render_metric_series() (plot_controller.py) already
+        # skips unselected metrics the same way, so rebuilding all four caches
+        # (see TRACE_METRIC_LABELS) every live frame regardless of what's on screen
+        # was pure wasted work, and it scales with elapsed session time (each
+        # rebuild walks the metric's full compression pyramid). See
+        # docs/sensorgram_improvements.md P2, and apply_sensorgram_metric_selection
+        # in main_window_sensorgram.py, which reseeds a metric's cache from the
+        # archive file when it becomes newly selected so switching visibility
+        # doesn't leave a gap.
+        if metric_name in selected_metrics:
+            plot_view_cache = getattr(window, "_plot_view_cache", None)
+            if plot_view_cache is not None and hasattr(plot_view_cache, "append_live_absolute_metric_point"):
+                try:
+                    plot_view_cache.append_live_absolute_metric_point(
+                        metric_name,
+                        float(elapsed_s),
+                        float(value),
+                        target_points=max(int(getattr(window, "_plot_display_points", 512)), 1),
+                        recent_tail_points=max(int(getattr(window, "_sensorgram_compression_recent_tail_points", 300)), 0),
+                    )
+                except Exception:
+                    pass
         updated = True
         last_metric_points = max(int(getattr(window, "_trace_display_cursor_s", 0.0) / max(display_step_s, 1e-9)), 0)
 

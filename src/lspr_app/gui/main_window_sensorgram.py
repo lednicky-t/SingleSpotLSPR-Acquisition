@@ -27,12 +27,26 @@ def apply_sensorgram_metric_selection(window, visible_modes: list[str] | set[str
     primary = normalize_sensorgram_metric_name(primary_mode)
     if primary not in ordered:
         primary = ordered[0]
+    previous_visible = set(getattr(window, "_sensorgram_metric_visible_modes", set()))
+    newly_visible = set(ordered) - previous_visible
     window._sensorgram_metric_visible_modes = set(ordered)
     window._sensorgram_metric_primary_mode = primary
     current_stats = normalize_sensorgram_metric_name(getattr(window, "_trace_stats_metric_name", ordered[0]))
     window._trace_stats_metric_name = current_stats if current_stats in ordered else ordered[0]
     if hasattr(window, "_update_trace_stats"):
         window._update_trace_stats()
+    if newly_visible:
+        # append_processed_trace_history (acquisition_controller.py) only appends
+        # live points into a metric's compression cache while it's selected, so a
+        # metric that was hidden has a stale/empty cache. Reload it from the
+        # archive file (same mechanism used when the display mode changes) so it
+        # doesn't show a gap for the period it was hidden.
+        request_reload = getattr(window, "_request_absolute_sensorgram_metric_archive_reload", None)
+        if callable(request_reload):
+            try:
+                request_reload()
+            except Exception:
+                pass
     if save:
         window._schedule_acquisition_state_persist()
         window._schedule_ui_state_persist()
