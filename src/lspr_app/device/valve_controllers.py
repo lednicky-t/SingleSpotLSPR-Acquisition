@@ -26,8 +26,15 @@ class ArduinoValveController(SerialController):
             "ARDUINO" in description
             or "CH340" in description
             or "ATMEGA" in description
+            or "FTDI" in description
             or "2341" in hwid  # Arduino LLC VID
             or "1A86" in hwid  # QinHeng CH340 VID
+            or "0403" in hwid  # FTDI VID - some Arduino-family boards (e.g.
+            # Nano clones/custom builds) use an FTDI USB-serial adapter
+            # instead of CH340 or native USB. Confirmed against a real
+            # board: hwid "VID:PID=0403:6001", firmware answers asn/mod/
+            # at/ah correctly at 115200 baud - it just doesn't announce
+            # itself as "Arduino" in the description or VID.
         ) and "239A" not in hwid  # exclude Adafruit/ItsyBitsy
 
     def get_probe(self) -> ControllerProbe:

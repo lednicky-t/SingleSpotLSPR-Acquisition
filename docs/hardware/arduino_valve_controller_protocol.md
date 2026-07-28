@@ -2,8 +2,18 @@
 
 Applies to the generic Arduino / CH340 controller board driven by
 `ArduinoValveController` (`src/lspr_app/device/valve_controllers.py`,
-`device_types.SWITCH`, `controller_type = "arduino-valve"`). Shown in the
-Hardware devices dialog as "Switch / injection valve (Arduino)".
+`device_types.SWITCH`, `controller_type = "arduino-valve"`). Shown in
+Device Manager's Switch row as "Switch valve (Arduino)".
+
+`ArduinoValveController.is_probable_port()` recognizes boards by
+description text ("Arduino"/"CH340"/"ATmega"/"FTDI") or USB VID (Arduino
+LLC `2341`, QinHeng CH340 `1A86`, FTDI `0403`) - some boards in this
+family (e.g. Nano clones, custom builds) use an FTDI FT232R USB-serial
+adapter instead of CH340 or native USB, so they show up with hwid
+`VID:PID=0403:6001` and no "Arduino" text anywhere, but still speak this
+exact protocol at 115200 baud. Confirmed against real hardware
+(`SER=AM00PFW2A`, `mod` → "Arduino Nano") - see
+`tests/unit/test_arduino_valve_controller.py`'s `IsProbablePortTests`.
 
 This board's firmware source is **not** in this repository (unlike the
 ItsyBitsy 32u4 controller, whose sketch lives in
