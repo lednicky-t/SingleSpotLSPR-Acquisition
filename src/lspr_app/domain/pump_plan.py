@@ -12,6 +12,66 @@ HDF5_PUMP_CHANNELS = 6
 DEFAULT_TUBE_MM = 0.25
 
 
+@dataclass(slots=True, frozen=True)
+class TubeDiameterOption:
+    """One entry from the Reglo ICC's supported-tubing chart.
+
+    The pump's "+" (set tube inside diameter) command only accepts these 26
+    exact values - real Ismatec cassette sizes, not arbitrary millimeters.
+    Anything else is rejected outright, which used to fail silently: a
+    rejected tube-diameter command aborts the rest of that channel's
+    configuration (direction/mode/flow rate never get sent), so an
+    off-catalog value looked like a channel just ignoring its plan step.
+    Source: Reglo ICC manual, section 13 "Tubing Size and Flow Rate Chart".
+    """
+
+    mm: float
+    order_no: str
+    min_flow_ul_min: float
+    max_flow_ul_min: float
+
+
+TUBE_DIAMETER_OPTIONS: tuple[TubeDiameterOption, ...] = (
+    TubeDiameterOption(0.13, "SC0189T", 2.0, 110.0),
+    TubeDiameterOption(0.19, "SC0049T", 3.0, 230.0),
+    TubeDiameterOption(0.25, "SC0050T", 5.0, 410.0),
+    TubeDiameterOption(0.38, "SC0051T", 10.0, 940.0),
+    TubeDiameterOption(0.44, "SC0052T", 13.0, 1300.0),
+    TubeDiameterOption(0.51, "SC0053T", 17.0, 1700.0),
+    TubeDiameterOption(0.57, "SC0054T", 21.0, 2100.0),
+    TubeDiameterOption(0.64, "SC0055T", 26.0, 2600.0),
+    TubeDiameterOption(0.76, "SC0056T", 36.0, 3600.0),
+    TubeDiameterOption(0.89, "SC0057T", 49.0, 4900.0),
+    TubeDiameterOption(0.95, "SC0058T", 56.0, 5600.0),
+    TubeDiameterOption(1.02, "SC0059T", 63.0, 6300.0),
+    TubeDiameterOption(1.09, "SC0060T", 72.0, 7200.0),
+    TubeDiameterOption(1.14, "SC0061T", 78.0, 7800.0),
+    TubeDiameterOption(1.22, "SC0062T", 88.0, 8800.0),
+    TubeDiameterOption(1.30, "SC0063T", 100.0, 10000.0),
+    TubeDiameterOption(1.42, "SC0064T", 110.0, 11000.0),
+    TubeDiameterOption(1.52, "SC0065T", 130.0, 13000.0),
+    TubeDiameterOption(1.65, "SC0066T", 150.0, 15000.0),
+    TubeDiameterOption(1.75, "SC0067T", 160.0, 16000.0),
+    TubeDiameterOption(1.85, "SC0068T", 170.0, 17000.0),
+    TubeDiameterOption(2.06, "SC0069T", 200.0, 20000.0),
+    TubeDiameterOption(2.29, "SC0070T", 240.0, 24000.0),
+    TubeDiameterOption(2.54, "SC0071T", 270.0, 27000.0),
+    TubeDiameterOption(2.79, "SC0072T", 310.0, 31000.0),
+    TubeDiameterOption(3.17, "SC0224T", 350.0, 35000.0),
+)
+
+
+def nearest_tube_diameter_option(mm: float) -> TubeDiameterOption:
+    """Snap an arbitrary millimeter value to the closest supported tube size.
+
+    Used when loading plan files or settings that predate this restriction
+    and may hold an off-catalog value (e.g. an old default or a typo) -
+    rather than reject them, pick the nearest real tube the pump can
+    actually be configured with.
+    """
+    return min(TUBE_DIAMETER_OPTIONS, key=lambda option: abs(option.mm - float(mm)))
+
+
 @dataclass(slots=True)
 class PumpChannelStep:
     flow_ul_min: float = 0.0

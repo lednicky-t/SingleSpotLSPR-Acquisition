@@ -59,7 +59,6 @@ from lspr_app.gui.experiment_control_runtime import ExperimentRuntimeSnapshot, e
 from lspr_app.resources import app_icon_path
 from lspr_app.domain.pump_plan import (
     ACTIVE_PUMP_CHANNELS,
-    DEFAULT_TUBE_MM,
     HDF5_PUMP_CHANNELS,
     PumpChannelStep,
     PumpPlanStep,
@@ -109,6 +108,7 @@ from lspr_app.gui.experiment_control_export import (
 from lspr_app.gui.device_lifecycle_task import DevicePortRefreshTask, device_io_pool
 from lspr_app.gui.experiment_control_widgets import (
     ExperimentControlTableView,
+    TubeDiameterComboBox,
     _NoFocusItemDelegate,
     _make_frameless_icon_button,
 )
@@ -352,15 +352,10 @@ class ExperimentControlWindow(QWidget):
 
         self.manual_flow_spins: list[QDoubleSpinBox] = []
         self.manual_direction_buttons: list[QToolButton] = []
-        self.manual_tube_spins: list[QDoubleSpinBox] = []
+        self.manual_tube_spins: list[TubeDiameterComboBox] = []
         self.shared_direction_button = create_direction_button(self, "CW")
-        self.shared_tube_spin = QDoubleSpinBox(self)
-        make_compact_spinbox(self.shared_tube_spin)
-        self.shared_tube_spin.setRange(0.13, 3.17)
-        self.shared_tube_spin.setDecimals(2)
-        self.shared_tube_spin.setSingleStep(0.01)
-        self.shared_tube_spin.setValue(DEFAULT_TUBE_MM)
-        self.shared_tube_spin.setSuffix("")
+        self.shared_tube_spin = TubeDiameterComboBox(self)
+        self._style_combo_popup_view(self.shared_tube_spin, center_items=True, rounded=False, selection_frame=True)
         self.manual_uniform_button = QToolButton(self)
         self.manual_uniform_button.setCheckable(True)
         self.manual_uniform_button.setChecked(True)
@@ -741,14 +736,10 @@ class ExperimentControlWindow(QWidget):
                 f"Direction for CH{channel}. '\u21bb' means clock-wise (CW), '\u21ba' means counter clock-wise (CCW)."
             )
 
-            tube_spin = QDoubleSpinBox()
-            make_compact_spinbox(tube_spin)
-            tube_spin.setRange(0.13, 3.17)
-            tube_spin.setDecimals(2)
-            tube_spin.setSingleStep(0.01)
-            tube_spin.setValue(DEFAULT_TUBE_MM)
-            tube_spin.setMaximumWidth(74)
-            tube_spin.setToolTip(f"Tubing inner diameter for CH{channel} in mm.")
+            tube_spin = TubeDiameterComboBox()
+            self._style_combo_popup_view(tube_spin, center_items=True, rounded=False, selection_frame=True)
+            tube_spin.setMaximumWidth(88)
+            tube_spin.setToolTip(f"Tubing inner diameter for CH{channel} in mm. Only the pump's supported sizes are selectable.")
 
             self.manual_flow_spins.append(flow_spin)
             self.manual_direction_buttons.append(direction_button)
@@ -762,7 +753,7 @@ class ExperimentControlWindow(QWidget):
         self.manual_uniform_button.setToolTip("Shared direction and tube for all channels. Click to expand per-channel settings.")
         self.manual_uniform_button.setText("=")
         self.shared_direction_button.setToolTip("Shared direction for all channels when 'CHs' mode is active. '\u21bb' means CW, '\u21ba' means CCW.")
-        self.shared_tube_spin.setToolTip("Shared tubing inner diameter in mm when 'CHs' mode is active.")
+        self.shared_tube_spin.setToolTip("Shared tubing inner diameter in mm when 'CHs' mode is active. Only the pump's supported sizes are selectable.")
         self.plan_detail_toggle.setToolTip("Show or hide the per-channel direction and tube columns in the table.")
         self.manual_flow_label = QLabel("Flow")
         self.manual_dir_label = QLabel("Dir")
@@ -845,7 +836,7 @@ class ExperimentControlWindow(QWidget):
         self.step_comment_edit.setMinimumWidth(300)
 
         self.shared_direction_button.setMaximumWidth(40)
-        self.shared_tube_spin.setMaximumWidth(82)
+        self.shared_tube_spin.setMaximumWidth(88)
         self.shared_direction_row = QWidget(self)
         shared_direction_layout = QHBoxLayout()
         shared_direction_layout.setContentsMargins(0, 0, 0, 0)
@@ -3968,7 +3959,7 @@ class ExperimentControlWindow(QWidget):
                 # control spinbox already behaves.
                 if 0 <= channel_index < len(self.manual_tube_spins):
                     spin = self.manual_tube_spins[channel_index]
-                    spin.setValue(spin.value() + (cycle_delta * spin.singleStep()))
+                    spin.step(cycle_delta)
                     return True
                 return False
         if index.column() == self._switch_column() and hasattr(model, "cycle_switch"):
@@ -4888,18 +4879,24 @@ class ExperimentControlWindow(QWidget):
 
         if pump_connected:
             for index, channel in enumerate(step.channels, start=1):
-                direction = str(channel.direction or "OFF").upper()
-                active = channel.flow_ul_min > 0.0 and direction != "OFF"
+                # Normalize exactly like the table's own display/write path
+                # (flow_plan_model.normalized_pump_direction) - a channel's
+                # raw direction defaults to "OFF" until its cell is
+                # explicitly touched, but the table has always *displayed*
+                # that default as "CW" (the function never returns "OFF").
+                # Reading the raw value here instead meant a channel whose
+                # direction cell nobody ever clicked - despite showing "CW"
+                # - was silently skipped even with a real flow rate set,
+                # since only this dispatch code (not the table) still
+                # treated "OFF" as a real third state blocking the channel.
+                direction = normalized_pump_direction(channel.direction)
+                active = channel.flow_ul_min > 0.0
                 tube_mm = self.manual_tube_spins[index - 1].value()
                 previous_channel = previous.channels[index - 1] if previous is not None else None
                 previous_direction = (
-                    str(previous_channel.direction or "OFF").upper() if previous_channel is not None else "OFF"
+                    normalized_pump_direction(previous_channel.direction) if previous_channel is not None else "CW"
                 )
-                previous_active = (
-                    previous_channel is not None
-                    and previous_channel.flow_ul_min > 0.0
-                    and previous_direction != "OFF"
-                )
+                previous_active = previous_channel is not None and previous_channel.flow_ul_min > 0.0
                 previous_flow = float(previous_channel.flow_ul_min) if previous_channel is not None else 0.0
                 channel_changed = (
                     previous is None

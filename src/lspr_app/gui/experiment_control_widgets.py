@@ -15,6 +15,9 @@ Classes
     pinned horizontal scroll position.
 ``PlanColorDelegate``
     Delegate that renders a cell as a rounded colour swatch with elided text.
+``TubeDiameterComboBox``
+    Dropdown restricted to the pump's supported tubing diameters; drop-in
+    replacement for the free-entry spinbox it used to be.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from PyQt6.QtCore import QItemSelectionModel, QModelIndex, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -30,6 +34,8 @@ from PyQt6.QtWidgets import (
     QToolButton,
     QWidget,
 )
+
+from lspr_app.domain.pump_plan import DEFAULT_TUBE_MM, TUBE_DIAMETER_OPTIONS, nearest_tube_diameter_option
 
 
 def _make_frameless_icon_button(
@@ -203,3 +209,58 @@ class PlanColorDelegate(QStyledItemDelegate):
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
 
         painter.restore()
+
+
+class TubeDiameterComboBox(QComboBox):
+    """Dropdown listing only the pump's supported tubing diameters.
+
+    The Reglo ICC's "+" command only accepts 26 exact tube sizes (see
+    ``lspr_app.domain.pump_plan.TUBE_DIAMETER_OPTIONS``) - anything else is
+    rejected, which silently skips the rest of that channel's setup. This
+    replaces a free-entry ``QDoubleSpinBox`` (0.13-3.17 mm in 0.01 mm steps)
+    that let a user dial in hundreds of values the pump would never accept.
+
+    Exposes ``value()`` / ``setValue(float)`` / ``valueChanged(float)`` so it
+    drops in wherever the spinbox used to be without touching call sites.
+    """
+
+    valueChanged = pyqtSignal(float)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(28)
+        self.setMaxVisibleItems(10)  # forces a scrollable popup rather than dumping all 26 rows open
+        for option in TUBE_DIAMETER_OPTIONS:
+            self.addItem(f"{option.mm:.2f} mm", option.mm)
+            index = self.count() - 1
+            self.setItemData(
+                index,
+                f"{option.mm:.2f} mm - Ismatec {option.order_no}\n"
+                f"Flow range: {option.min_flow_ul_min:.0f}-{option.max_flow_ul_min:.0f} uL/min",
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        self.setCurrentIndex(self._index_for_mm(DEFAULT_TUBE_MM))
+        self.currentIndexChanged.connect(self._emit_value_changed)
+
+    def value(self) -> float:
+        data = self.currentData()
+        return float(data) if data is not None else DEFAULT_TUBE_MM
+
+    def setValue(self, mm: float) -> None:
+        index = self._index_for_mm(float(mm))
+        if index == self.currentIndex():
+            self._emit_value_changed(index)
+        else:
+            self.setCurrentIndex(index)
+
+    def step(self, delta: int) -> None:
+        """Move *delta* entries through the supported-diameter list (e.g. for scroll-wheel cycling)."""
+        self.setCurrentIndex(max(0, min(self.currentIndex() + int(delta), self.count() - 1)))
+
+    def _emit_value_changed(self, _index: int) -> None:
+        self.valueChanged.emit(self.value())
+
+    @staticmethod
+    def _index_for_mm(mm: float) -> int:
+        option = nearest_tube_diameter_option(mm)
+        return TUBE_DIAMETER_OPTIONS.index(option)
