@@ -70,6 +70,8 @@ def _is_performance_diagnostic(source: object, text: object) -> bool:
         return True
     if "scheduler dispatch" in text_s:
         return True
+    if "slow spectrum processing" in text_s:
+        return True
     if "paint" in text_s and "ms" in text_s:
         return True
     if "took" in text_s and "ms" in text_s:
@@ -611,6 +613,8 @@ def append_log_record(window, levelno: int, source: str, text: str) -> None:
             buffer_events.append((perf_counter(), int(levelno), str(source), line))
         if window._log_buffer_requested_at is None:
             window._log_buffer_requested_at = perf_counter()
+        if not buffer_timer.isActive():
+            buffer_timer.start()
         return
     append_log_record_now(window, levelno, source, line)
 

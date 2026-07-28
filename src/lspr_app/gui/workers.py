@@ -401,8 +401,9 @@ def _live_processing_worker_main(
             if event.produced_at_perf is not None:
                 queue_wait_ms = max((started - event.produced_at_perf) * 1000.0, 0.0)
             processed, fit = process_spectrum(event.result.spectrum, current_settings)
+            pre_smoothing_processed = processed
             processed, temporal_key = _apply_temporal_smoothing(processed, current_settings, temporal_history, temporal_key)
-            if processed is not None and fit is not None and processed is not event.result.spectrum:
+            if processed is not None and fit is not None and processed is not pre_smoothing_processed:
                 fit = fit_processed_spectrum(processed, current_settings)
             finished = perf_counter()
             processing_ms = (finished - started) * 1000.0
