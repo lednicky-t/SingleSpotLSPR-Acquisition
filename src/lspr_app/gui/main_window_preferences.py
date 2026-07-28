@@ -30,6 +30,36 @@ _GUI_LOG_LEVELS = [
     ("Debug", logging.DEBUG),
 ]
 
+# The app's global stylesheet deliberately hides native QGroupBox titles
+# (color: transparent) elsewhere, since most of the app pairs QGroupBox
+# with its own CollapsibleSection header widget instead. This dialog has
+# no such header, so its section titles would otherwise render as
+# invisible text - this instance-level stylesheet overrides that (Qt's
+# cascade lets a widget's own stylesheet win over an ancestor/application
+# one) just for these boxes, without touching the shared app-wide style.
+_SECTION_BOX_STYLE = (
+    "QGroupBox {"
+    " border: 1px solid rgba(255, 255, 255, 0.10);"
+    " border-radius: 6px;"
+    " margin-top: 8px;"
+    " padding-top: 14px;"
+    "}"
+    "QGroupBox::title {"
+    " subcontrol-origin: margin;"
+    " subcontrol-position: top left;"
+    " left: 9px;"
+    " padding: 0px 4px;"
+    " color: #9fb3c5;"
+    " font-weight: 700;"
+    "}"
+)
+
+
+def _make_section_box(title: str) -> QGroupBox:
+    box = QGroupBox(title)
+    box.setStyleSheet(_SECTION_BOX_STYLE)
+    return box
+
 
 class PreferencesDialog(QDialog):
     def __init__(self, window, parent: QWidget | None = None) -> None:
@@ -50,12 +80,19 @@ class PreferencesDialog(QDialog):
         self.user_list = QListWidget()
         self.user_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.user_list.setToolTip("Known users, picked from the User field next to the recording destination.")
+        self.switch_user_button = QPushButton("Switch to")
+        self.switch_user_button.setToolTip(
+            "Make the selected name the active user. Refused while a measurement is actively "
+            "recording - stop it first."
+        )
+        self.switch_user_button.clicked.connect(self._switch_to_selected_user)
         self.remove_user_button = QPushButton("Remove")
         self.remove_user_button.setToolTip(
             "Remove the selected name from the look-up list. Their saved settings are kept on "
             "disk, not deleted - only removed from this list. The active user can't be removed."
         )
         self.remove_user_button.clicked.connect(self._remove_selected_user)
+        self.user_list.itemSelectionChanged.connect(self._update_user_buttons_enabled)
 
         # Startup
         self.start_maximized_check = QCheckBox("Start maximized")
@@ -152,24 +189,25 @@ class PreferencesDialog(QDialog):
         layout.setSpacing(10)
 
         # ── Appearance ────────────────────────────────────────────────────────
-        appearance_box = QGroupBox("Appearance")
+        appearance_box = _make_section_box("Appearance")
         appearance_layout = QFormLayout(appearance_box)
         appearance_layout.setHorizontalSpacing(16)
         appearance_layout.setVerticalSpacing(8)
         appearance_layout.addRow("Theme", self.theme_combo)
 
         # ── Users ─────────────────────────────────────────────────────────────
-        users_box = QGroupBox("Users")
+        users_box = _make_section_box("Users")
         users_layout = QVBoxLayout(users_box)
         users_layout.setSpacing(6)
         users_layout.addWidget(self.user_list)
-        remove_row = QHBoxLayout()
-        remove_row.addStretch(1)
-        remove_row.addWidget(self.remove_user_button)
-        users_layout.addLayout(remove_row)
+        user_button_row = QHBoxLayout()
+        user_button_row.addStretch(1)
+        user_button_row.addWidget(self.switch_user_button)
+        user_button_row.addWidget(self.remove_user_button)
+        users_layout.addLayout(user_button_row)
 
         # ── Startup ───────────────────────────────────────────────────────────
-        startup_box = QGroupBox("Startup")
+        startup_box = _make_section_box("Startup")
         startup_layout = QFormLayout(startup_box)
         startup_layout.setHorizontalSpacing(16)
         startup_layout.setVerticalSpacing(8)
@@ -178,7 +216,7 @@ class PreferencesDialog(QDialog):
         startup_layout.addRow(self.confirm_exit_check)
 
         # ── Acquisition & storage ─────────────────────────────────────────────
-        acquisition_box = QGroupBox("Acquisition && storage")
+        acquisition_box = _make_section_box("Acquisition && storage")
         acquisition_layout = QFormLayout(acquisition_box)
         acquisition_layout.setHorizontalSpacing(16)
         acquisition_layout.setVerticalSpacing(8)
@@ -187,7 +225,7 @@ class PreferencesDialog(QDialog):
         acquisition_layout.addRow("Default live rate", self.default_live_rate_spin)
 
         # ── Performance ───────────────────────────────────────────────────────
-        performance_box = QGroupBox("Performance")
+        performance_box = _make_section_box("Performance")
         performance_layout = QFormLayout(performance_box)
         performance_layout.setHorizontalSpacing(16)
         performance_layout.setVerticalSpacing(8)
@@ -199,7 +237,7 @@ class PreferencesDialog(QDialog):
         performance_layout.addRow("Undo history size", self.undo_history_size_spin)
 
         # ── Developer ─────────────────────────────────────────────────────────
-        developer_box = QGroupBox("Developer")
+        developer_box = _make_section_box("Developer")
         developer_layout = QFormLayout(developer_box)
         developer_layout.setHorizontalSpacing(16)
         developer_layout.setVerticalSpacing(8)
@@ -234,12 +272,38 @@ class PreferencesDialog(QDialog):
         self.user_list.clear()
         for name in user_profile.list_known_users():
             self.user_list.addItem(f"{name} (active)" if name == active else name)
+        self._update_user_buttons_enabled()
+
+    def _selected_user_name(self) -> str | None:
+        item = self.user_list.currentItem()
+        return item.text().removesuffix(" (active)") if item is not None else None
+
+    def _update_user_buttons_enabled(self) -> None:
+        name = self._selected_user_name()
+        is_active = name is not None and name == user_profile.active_user()
+        self.switch_user_button.setEnabled(name is not None and not is_active)
+        self.remove_user_button.setEnabled(name is not None and not is_active)
+
+    def _switch_to_selected_user(self) -> None:
+        name = self._selected_user_name()
+        if name is None or name == user_profile.active_user():
+            return
+        switched = (
+            self._window._switch_active_user(name)
+            if hasattr(self._window, "_switch_active_user")
+            else False
+        )
+        if not switched:
+            QMessageBox.information(
+                self, "Switch user", "Stop the current recording before switching users."
+            )
+            return
+        self._refresh_user_list()
 
     def _remove_selected_user(self) -> None:
-        item = self.user_list.currentItem()
-        if item is None:
+        name = self._selected_user_name()
+        if name is None:
             return
-        name = item.text().removesuffix(" (active)")
         if name == user_profile.active_user():
             QMessageBox.information(
                 self, "Remove user", "Switch to a different user before removing the active one."

@@ -51,7 +51,11 @@ def build_recording_context_row_for(window) -> QWidget:
     experiment_label = QLabel("Experiment name")
     experiment_label.setToolTip("Folder name and filename component for the current experiment.")
     controls_row.addWidget(user_label)
-    controls_row.addWidget(window.user_combo, 1)
+    # Fixed, not stretch-sized like the fields to its right: it only ever
+    # holds a short name, not a path - ~60% of the ~198px it rendered at
+    # with a stretch factor of 1 alongside destination(3)/experiment(2).
+    window.user_combo.setFixedWidth(119)
+    controls_row.addWidget(window.user_combo)
     controls_row.addSpacing(6)
     controls_row.addWidget(project_label)
     controls_row.addWidget(window.project_destination_edit, 3)

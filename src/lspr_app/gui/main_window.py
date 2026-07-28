@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -374,6 +375,10 @@ from lspr_app.gui.main_window_startup_diagnostics import (
 if TYPE_CHECKING:
     from lspr_app.device.reglo_icc import PumpProbe
     from lspr_app.gui.experiment_control_window import ExperimentControlWindow
+
+# Sentinel entry always last in user_combo (see _refresh_user_combo) - a
+# real person's name will essentially never collide with this exact string.
+ADD_NEW_USER_LABEL = "Add new user…"
 
 
 class MainWindow(QMainWindow):
@@ -974,16 +979,13 @@ class MainWindow(QMainWindow):
 
         self.user_combo = QComboBox(self)
         self.user_combo.setObjectName("recordingUserCombo")
-        self.user_combo.setEditable(True)
-        self.user_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.user_combo.setToolTip(
-            "Who is using this instrument. Pick a known name or type a new one - "
+            "Who is using this instrument. Pick a known name, or \"Add new user…\" - "
             "new names are remembered for next time (Preferences > Users to remove one)."
         )
         self.user_combo.setFixedHeight(24)
         self._refresh_user_combo()
         self.user_combo.textActivated.connect(self._on_user_selected)
-        self.user_combo.lineEdit().editingFinished.connect(self._on_user_name_edited)
 
         self.project_destination_edit = QLineEdit(str(load_app_setting("recording_project_destination", "")))
         self.project_destination_edit.setObjectName("recordingPathEdit")
@@ -1778,22 +1780,34 @@ class MainWindow(QMainWindow):
         from lspr_app.storage import user_profile
 
         known = user_profile.list_known_users()
-        current = user_profile.active_user() or ""
+        current = user_profile.active_user()
         self.user_combo.blockSignals(True)
         self.user_combo.clear()
         self.user_combo.addItems(known)
-        self.user_combo.setCurrentText(current)
+        self.user_combo.addItem(ADD_NEW_USER_LABEL)
+        if current is not None:
+            index = self.user_combo.findText(current)
+            if index >= 0:
+                self.user_combo.setCurrentIndex(index)
         self.user_combo.blockSignals(False)
 
     def _on_user_selected(self, name: str) -> None:
+        if name == ADD_NEW_USER_LABEL:
+            self._prompt_for_new_user()
+            return
         self._switch_active_user(name)
 
-    def _on_user_name_edited(self) -> None:
-        self._switch_active_user(self.user_combo.currentText())
+    def _prompt_for_new_user(self) -> None:
+        name, ok = QInputDialog.getText(self, "Add new user", "Name:")
+        if ok and name.strip():
+            self._switch_active_user(name.strip())
+        else:
+            self._refresh_user_combo()
 
-    def _switch_active_user(self, name: str) -> None:
-        switch_active_user(self, name)
+    def _switch_active_user(self, name: str) -> bool:
+        switched = switch_active_user(self, name)
         self._refresh_user_combo()
+        return switched
 
     def _remember_recording_project_destination(self) -> None:
         save_app_setting("recording_project_destination", self.recording_project_destination())
