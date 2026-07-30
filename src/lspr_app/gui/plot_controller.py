@@ -16,6 +16,7 @@ from lspr_app.gui.main_window_sensorgram import (
     normalize_sensorgram_time_axis_mode,
     sensorgram_time_axis_label_text,
 )
+from lspr_app.gui.sensorgram_secondary_axis import update_secondary_axis_display
 from lspr_app.gui.plot_view_cache import (
     build_metric_series_token,
     downsample_metric_series_for_view as _downsample_metric_series_for_view,
@@ -23,9 +24,10 @@ from lspr_app.gui.plot_view_cache import (
     sample_absolute_metric_series_for_view,
 )
 from lspr_app.gui.sensorgram_time_anchor import display_time_anchor
+from lspr_app.gui.runtime_diagnostics import format_rate_for_window
 
 
-def _spline_render_series(x: np.ndarray, y: np.ndarray, *, max_points: int = 4096) -> tuple[np.ndarray, np.ndarray]:
+def spline_render_series(x: np.ndarray, y: np.ndarray, *, max_points: int = 4096) -> tuple[np.ndarray, np.ndarray]:
     x_values = np.asarray(x, dtype=np.float64)
     y_values = np.asarray(y, dtype=np.float64)
     finite = np.isfinite(x_values) & np.isfinite(y_values)
@@ -476,7 +478,7 @@ def flush_deferred_display_refreshes(window) -> None:
                 "UI flush | trace_dirty="
                 f"{int(bool(getattr(refresh_state, 'metric_plot_dirty', False)))} | "
                 f"stats_dirty={int(bool(getattr(refresh_state, 'stats_dirty', False)))} | "
-                f"display_rate={window.live_rate_spin.value():.2f} Hz"
+                f"display_rate={format_rate_for_window(window, window.live_rate_spin.value())}"
             ),
             level=logging.DEBUG,
                 min_interval=1.0,
@@ -522,7 +524,7 @@ def flush_deferred_metric_refreshes(window) -> None:
                 "UI flush | trace_dirty="
                 f"{int(bool(getattr(refresh_state, 'metric_plot_dirty', False)))} | "
                 f"stats_dirty={int(bool(getattr(refresh_state, 'stats_dirty', False)))} | "
-                f"display_rate={window.live_rate_spin.value():.2f} Hz"
+                f"display_rate={format_rate_for_window(window, window.live_rate_spin.value())}"
             ),
             level=logging.DEBUG,
             min_interval=1.0,
@@ -546,7 +548,7 @@ def flush_deferred_stats_refreshes(window) -> None:
                 "UI flush | trace_dirty="
                 f"{int(bool(getattr(refresh_state, 'metric_plot_dirty', False)))} | "
                 f"stats_dirty={int(bool(getattr(refresh_state, 'stats_dirty', False)))} | "
-                f"display_rate={window.live_rate_spin.value():.2f} Hz"
+                f"display_rate={format_rate_for_window(window, window.live_rate_spin.value())}"
             ),
             level=logging.DEBUG,
             min_interval=1.0,
@@ -929,6 +931,15 @@ def refresh_metric_plot(window, trace_label: str) -> None:
     # reliably freeze anything.
     if window._sensorgram_frozen:
         return
+    # Secondary axes periodic catch-up: the direct per-point calls in
+    # acquisition_controller.py already redraw them the instant new data
+    # arrives, but this tick (same one refresh_metric_plot's 1Y rendering
+    # runs on) is what re-syncs them after a mode switch, an unfreeze, or a
+    # metric change made while the axis had no fresh data to react to. Both
+    # slots are no-ops when inactive for the current mode. See
+    # gui/sensorgram_secondary_axis.py.
+    update_secondary_axis_display(window, "a")
+    update_secondary_axis_display(window, "b")
     started = perf_counter()
     axis_mode = _sensorgram_time_axis_mode(window)
     clock_mode = axis_mode == "clock"
@@ -958,12 +969,11 @@ def refresh_metric_plot(window, trace_label: str) -> None:
                 _set_visible_if_changed(curve, True)
             if (metric_changed or previous_visible_mode != visible_mode) and _sensorgram_metric_y_axis_is_auto(window):
                 request_metric_autoscale(window)
-            sync_control_step_overlay = getattr(window, "_sync_sensorgram_control_step_overlay", None)
-            if callable(sync_control_step_overlay):
-                try:
-                    sync_control_step_overlay()
-                except Exception:
-                    pass
+            # render_metric_series (just above) already syncs the control-step
+            # overlay at its own end - nothing between there and here can
+            # change what it would sync, so a second call here was pure
+            # redundant O(N)-over-session-events work on every tick. See
+            # docs/sensorgram_improvements.md's C9/P-series notes.
             return
 
         _set_plot_label_if_changed(window.trace_plot, "left", trace_label, window, "_trace_left_label_text")
@@ -995,6 +1005,35 @@ def refresh_metric_plot(window, trace_label: str) -> None:
                 pass
     finally:
         window._last_sensorgram_render_ms = (perf_counter() - started) * 1000.0
+
+
+def _display_series_content_signature(display_x: np.ndarray, display_y: np.ndarray) -> tuple[object, ...]:
+    """Cheap O(1) stand-in for "did this metric's display data actually
+    change", used as the render-state cache key's fallback when no
+    cache-provided display_state is available (i.e. whenever the view is
+    manually panned/zoomed - trace_view_locked - see the call site).
+
+    Previously the fallback was `(id(display_x), id(display_y), len(...))`,
+    which changes on every single render tick even when the underlying data
+    is identical, because downsampling/windowing allocates a fresh array
+    object each time - defeating the render-state cache's whole purpose
+    (skipping redundant curve.setData() calls) for as long as the view stays
+    locked, a common thing to do during a long inspection run. A collision
+    here (same signature, different data) would need identical length plus
+    identical first/last x AND y values while the interior differs - not
+    realistic for live sensor data, and even then the cost is just one stale
+    render frame, self-correcting on the next tick.
+    """
+    n = len(display_x)
+    if n == 0:
+        return (0,)
+    return (
+        n,
+        float(display_x[0]),
+        float(display_x[-1]),
+        float(display_y[0]),
+        float(display_y[-1]),
+    )
 
 
 def render_metric_series(
@@ -1256,7 +1295,7 @@ def render_metric_series(
             step_mode,
             bool(overlay_enabled),
             int(getattr(window, "_plot_display_points", 0)),
-            display_state if display_state is not None else (id(display_x), id(display_y), int(len(display_x))),
+            display_state if display_state is not None else _display_series_content_signature(display_x, display_y),
         )
         if render_state_cache.get(metric_name) == render_state_key:
             display_points += int(len(display_x))
@@ -1268,7 +1307,7 @@ def render_metric_series(
         # -- push the curve's new data to the plot widget --
         setdata_started = perf_counter()
         if step_mode == "spline":
-            spline_x, spline_y = _spline_render_series(display_x, display_y)
+            spline_x, spline_y = spline_render_series(display_x, display_y)
             curve.setData(spline_x, spline_y, stepMode=False)
         elif step_mode is None:
             curve.setData(display_x, display_y, stepMode=False)

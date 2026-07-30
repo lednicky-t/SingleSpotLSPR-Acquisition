@@ -31,6 +31,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from lspr_ui import CompactWedgeSlider
+
 from lspr_app.gui.ui_helpers import make_compact_spinbox
 from lspr_app.gui.main_window_processing import normalize_sensorgram_metric_name, sensorgram_metric_order
 from lspr_app.gui.icon_helpers import flow_tabler_icon, tint_tabler_icon
@@ -396,6 +398,140 @@ class MetricModeSelector(QWidget):
         self._sync_widgets()
 
 
+@dataclass(frozen=True)
+class SecondaryAxisMetricStyleRow:
+    metric: str
+    label: QLabel
+    color_button: "MetricColorButton"
+    width_spin: QDoubleSpinBox
+    opacity_slider: CompactWedgeSlider
+
+
+class SecondaryAxisMetricStyleSelector(QWidget):
+    """Per-metric style controls for the sensorgram's secondary (right-hand)
+    axes: color, line thickness, and opacity - independent of which slot(s)
+    (see gui/sensorgram_secondary_axis.py) currently show a given metric,
+    so a color/width/opacity choice here applies the moment that metric is
+    selected in either the [FWHM]-style header dropdown, not just to
+    whichever one happens to be on screen right now.
+
+    Column 0 (the "Metric" label) has its minimum width set from outside
+    (see _build_live_tab) to match MetricModeSelector's own column 0, so
+    the two tables' Color swatches - and now Thickness/Opacity too - line
+    up in one visual column when stacked in the same dialog.
+    """
+
+    def __init__(self, window) -> None:
+        super().__init__()
+        self._window = window
+        self._rows: dict[str, SecondaryAxisMetricStyleRow] = {}
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        from lspr_app.gui.sensorgram_secondary_axis import (
+            SECONDARY_METRIC_KEYS,
+            secondary_axis_color_for,
+            secondary_axis_line_width_for,
+            secondary_axis_metric_label,
+            secondary_axis_opacity_for,
+        )
+
+        layout = QGridLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(2)
+
+        metric_header = QLabel("Metric")
+        metric_header.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(metric_header, 0, 0)
+        color_header = QLabel("Color")
+        color_header.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(color_header, 0, 1)
+        thickness_header = QLabel("Thickness")
+        thickness_header.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(thickness_header, 0, 2)
+        opacity_header = QLabel("Opacity")
+        opacity_header.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(opacity_header, 0, 3)
+
+        for row_index, metric_key in enumerate(SECONDARY_METRIC_KEYS, start=1):
+            metric_color = secondary_axis_color_for(self._window, metric_key)
+
+            label = QLabel(secondary_axis_metric_label(metric_key))
+            label.setMinimumHeight(22)
+            label.setStyleSheet(f"color: {metric_color};")
+
+            color_button = MetricColorButton(metric_color)
+            color_button.colorChanged.connect(lambda color, metric=metric_key: self._on_color_changed(metric, color))
+
+            width_spin = QDoubleSpinBox(self)
+            width_spin.setRange(0.5, 10.0)
+            width_spin.setSingleStep(0.5)
+            width_spin.setDecimals(1)
+            width_spin.setSuffix(" px")
+            width_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+            width_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+            width_spin.setFixedWidth(62)
+            width_spin.setValue(secondary_axis_line_width_for(self._window, metric_key))
+            width_spin.setToolTip("Line thickness for this metric's curve, in pixels.")
+            width_spin.valueChanged.connect(lambda value, metric=metric_key: self._on_width_changed(metric, value))
+
+            opacity_slider = CompactWedgeSlider(parent=self)
+            opacity_slider.setRange(0, 100)
+            opacity_slider.setValue(secondary_axis_opacity_for(self._window, metric_key))
+            opacity_slider.setToolTip("Line opacity for this metric's curve.")
+            opacity_slider.valueChanged.connect(lambda value, metric=metric_key: self._on_opacity_changed(metric, value))
+
+            self._rows[metric_key] = SecondaryAxisMetricStyleRow(
+                metric=metric_key,
+                label=label,
+                color_button=color_button,
+                width_spin=width_spin,
+                opacity_slider=opacity_slider,
+            )
+            layout.addWidget(label, row_index, 0)
+            layout.addWidget(color_button, row_index, 1, alignment=Qt.AlignmentFlag.AlignHCenter)
+            layout.addWidget(width_spin, row_index, 2, alignment=Qt.AlignmentFlag.AlignHCenter)
+            layout.addWidget(opacity_slider, row_index, 3, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self.setLayout(layout)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def refresh_from_window(self) -> None:
+        from lspr_app.gui.sensorgram_secondary_axis import (
+            secondary_axis_color_for,
+            secondary_axis_line_width_for,
+            secondary_axis_opacity_for,
+        )
+
+        for metric_key, row in self._rows.items():
+            color = secondary_axis_color_for(self._window, metric_key)
+            row.color_button.set_color(color)
+            row.label.setStyleSheet(f"color: {color};")
+            with QSignalBlocker(row.width_spin):
+                row.width_spin.setValue(secondary_axis_line_width_for(self._window, metric_key))
+            with QSignalBlocker(row.opacity_slider):
+                row.opacity_slider.setValue(secondary_axis_opacity_for(self._window, metric_key))
+
+    def _on_color_changed(self, metric_key: str, color: str) -> None:
+        window = self._window
+        if hasattr(window, "_set_secondary_axis_metric_color"):
+            window._set_secondary_axis_metric_color(metric_key, color, save=True)
+        row = self._rows.get(metric_key)
+        if row is not None:
+            row.label.setStyleSheet(f"color: {color};")
+
+    def _on_width_changed(self, metric_key: str, value: float) -> None:
+        window = self._window
+        if hasattr(window, "_set_secondary_axis_metric_line_width"):
+            window._set_secondary_axis_metric_line_width(metric_key, float(value), save=True)
+
+    def _on_opacity_changed(self, metric_key: str, value: int) -> None:
+        window = self._window
+        if hasattr(window, "_set_secondary_axis_metric_opacity"):
+            window._set_secondary_axis_metric_opacity(metric_key, int(value), save=True)
+
+
 class SensorgramPlotSettingsDialog(QDialog):
     def __init__(self, window) -> None:
         started_total = perf_counter()
@@ -498,6 +634,10 @@ class SensorgramPlotSettingsDialog(QDialog):
                 getattr(self._window, "_sensorgram_metric_visible_modes", {"smoothed_max"}),
                 getattr(self._window, "_sensorgram_metric_primary_mode", "smoothed_max"),
             )
+        secondary_axis_style_selector = getattr(self, "secondary_axis_style_selector", None)
+        if secondary_axis_style_selector is not None:
+            secondary_axis_style_selector.refresh_from_window()
+            self._align_metric_table_columns()
         if hasattr(self, "control_overlay_check"):
             self.control_overlay_check.setChecked(bool(getattr(self._window, "_sensorgram_control_step_overlay_enabled", True)))
         if hasattr(self, "control_overlay_style_combo"):
@@ -643,6 +783,13 @@ class SensorgramPlotSettingsDialog(QDialog):
         )
         self.metric_mode_selector.selectionChanged.connect(self._on_metric_mode_selection_changed)
         outer.addWidget(self.metric_mode_selector)
+
+        secondary_axis_header = QLabel("Secondary axis metrics")
+        secondary_axis_header.setStyleSheet("color: #8a98a8; margin-top: 4px;")
+        outer.addWidget(secondary_axis_header)
+        self.secondary_axis_style_selector = SecondaryAxisMetricStyleSelector(self._window)
+        outer.addWidget(self.secondary_axis_style_selector)
+        self._align_metric_table_columns()
 
         self.control_overlay_style_combo = QComboBox(self)
         self.control_overlay_style_combo.addItem("Compact", "bar")
@@ -946,6 +1093,44 @@ class SensorgramPlotSettingsDialog(QDialog):
         sections_grid.addLayout(performance_grid, 5, 0)
         outer.addLayout(sections_grid)
         return page
+
+    def _align_metric_table_columns(self) -> None:
+        """Force the "Metric" name column to the same width in both the 1Y
+        table (MetricModeSelector) and the secondary-axis table
+        (SecondaryAxisMetricStyleSelector), so their Color swatches - and
+        now Thickness/Opacity too - land in the same visual column when the
+        two tables are stacked vertically. Each table auto-sizes its own
+        column 0 to its own widest label by default (a plain QGridLayout
+        column), and the two tables' metric names are different lengths
+        ("Polynomial max" vs "Temperature"), so without this they'd
+        naturally end up misaligned.
+        """
+        metric_selector = getattr(self, "metric_mode_selector", None)
+        style_selector = getattr(self, "secondary_axis_style_selector", None)
+        if metric_selector is None or style_selector is None:
+            return
+        metric_layout = metric_selector.layout()
+        style_layout = style_selector.layout()
+        if metric_layout is None or style_layout is None:
+            return
+        width = max(
+            metric_layout.itemAtPosition(row, 0).widget().sizeHint().width()
+            for row in range(metric_layout.rowCount())
+            if metric_layout.itemAtPosition(row, 0) is not None
+        )
+        width = max(
+            width,
+            max(
+                (
+                    style_layout.itemAtPosition(row, 0).widget().sizeHint().width()
+                    for row in range(style_layout.rowCount())
+                    if style_layout.itemAtPosition(row, 0) is not None
+                ),
+                default=0,
+            ),
+        )
+        metric_layout.setColumnMinimumWidth(0, width)
+        style_layout.setColumnMinimumWidth(0, width)
 
     def _build_preview_tab(self) -> QWidget:
         page = QWidget(self)

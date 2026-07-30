@@ -438,19 +438,22 @@ class HDF5MeasurementWriter:
         group = self._processed.create_group("metrics")
         # No relative "t_ms" here (removed in schema 6.0) - see
         # docs/sensorgram_improvements.md, "Correctness fixes" C1/C2.
-        for name, dtype in (
-            (LSPR_PROCESSED_METRICS_ACQUIRED_AT_UNIX_MS_DATASET_NAME, np.int64),
-            ("sample_index", np.int64),
-            ("centroid_nm", np.float64),
-            ("smoothed_max_nm", np.float64),
-            ("poly_max_nm", np.float64),
-            ("gaussian_center_nm", np.float64),
-            ("fwhm_nm", np.float64),
-            ("mse", np.float64),
-            ("snr", np.float64),
+        for name, dtype, schema_version_added in (
+            (LSPR_PROCESSED_METRICS_ACQUIRED_AT_UNIX_MS_DATASET_NAME, np.int64, "3.0"),
+            ("sample_index", np.int64, "3.0"),
+            ("centroid_nm", np.float64, "3.0"),
+            ("smoothed_max_nm", np.float64, "3.0"),
+            ("poly_max_nm", np.float64, "3.0"),
+            ("gaussian_center_nm", np.float64, "3.0"),
+            ("fwhm_nm", np.float64, "3.0"),
+            ("mse", np.float64, "3.0"),
+            ("snr", np.float64, "3.0"),
+            # 6.2: Y-value of whichever fit metric is primary at record time -
+            # see get_analysis_metrics in gui/processing_helpers.py.
+            ("extinction_value", np.float64, "6.2"),
         ):
             ds = group.create_dataset(name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=True, **self._compression_kwargs)
-            ds.attrs["schema_version_added"] = "3.0"
+            ds.attrs["schema_version_added"] = schema_version_added
         return group
 
     def _write_processed_metrics_metadata(self, processing: ProcessingSettings) -> None:
@@ -1064,6 +1067,60 @@ def load_processed_metric_history(
             else:
                 values = np.asarray(dataset[...], dtype=float)
             series[metric_name] = (times_s.copy(), values)
+    return series
+
+
+def load_environment_history(
+    path: Path,
+    fields: set[str] | None = None,
+) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Read temperature/humidity history from the devices/environment group.
+
+    Mirrors load_processed_metric_history's shape and time-axis convention
+    (absolute unix-ms sorted defensively, converted to seconds anchored to
+    this file's own first sample) so the two are interchangeable inputs to
+    PlotViewCache.seed_live_absolute_metric_cache - see
+    gui/sensorgram_secondary_axis.py, the only current caller.
+
+    `fields` restricts which of {"temperature", "humidity"} to read;
+    None (default) reads both. Returns {} if the file predates schema 6.0
+    (no environment group) or has no readings at all - not an error, just
+    "nothing to backfill" (e.g. no Switch device was ever connected).
+    """
+    with h5py.File(path, "r") as handle:
+        devices_group = handle.get("devices")
+        if devices_group is None:
+            return {}
+        environment_group = devices_group.get(LSPR_DEVICE_ENVIRONMENT_GROUP_NAME)
+        if environment_group is None:
+            return {}
+        time_ds = environment_group.get(LSPR_DEVICE_ENVIRONMENT_TIMESTAMP_UTC_MS_DATASET_NAME)
+        if time_ds is None:
+            return {}
+        unix_ms = np.asarray(time_ds[...], dtype=float)
+        if len(unix_ms) == 0:
+            return {}
+        sort_order = np.argsort(unix_ms, kind="stable")
+        needs_reorder = not np.array_equal(sort_order, np.arange(len(unix_ms)))
+        if needs_reorder:
+            unix_ms = unix_ms[sort_order]
+        times_s = (unix_ms - unix_ms[0]) / 1000.0
+
+        wanted = fields if fields is not None else {"temperature", "humidity"}
+        dataset_by_field = {
+            "temperature": LSPR_DEVICE_ENVIRONMENT_TEMPERATURE_C_DATASET_NAME,
+            "humidity": LSPR_DEVICE_ENVIRONMENT_HUMIDITY_PERCENT_DATASET_NAME,
+        }
+        series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for field_name in wanted:
+            dataset = environment_group.get(dataset_by_field.get(field_name, ""))
+            if dataset is None:
+                continue
+            values = np.asarray(dataset[...], dtype=float)
+            if needs_reorder:
+                values = values[sort_order]
+            finite = np.isfinite(values)
+            series[field_name] = (times_s[finite].copy(), values[finite])
     return series
 
 

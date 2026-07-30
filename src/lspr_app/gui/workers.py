@@ -295,6 +295,71 @@ class MetricArchiveReloadTask(QRunnable):
         )
 
 
+@dataclass(slots=True)
+class SecondaryAxisReloadRequest:
+    path: Path
+    metric_name: str
+    source: str  # "processed_metrics" or "environment" - see sensorgram_secondary_axis.py
+    dataset_name: str  # HDF5 dataset/field name for this metric within that source
+
+
+@dataclass(slots=True)
+class SecondaryAxisReloadResult:
+    metric_name: str
+    x_values: np.ndarray
+    y_values: np.ndarray
+    load_ms: float
+
+
+class SecondaryAxisReloadSignals(QObject):
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+
+class SecondaryAxisReloadTask(QRunnable):
+    """Backfills the sensorgram's 2Y axis from the archive file on a background
+    thread - mirrors MetricArchiveReloadTask's shape, but reads either the
+    existing processed-metrics group (FWHM/extinction) or the separate
+    devices/environment group (temperature/humidity), and needs none of the
+    primary reload's metric-name remapping tables since its own metric keys
+    ("fwhm"/"extinction"/"temperature"/"humidity") are used directly end to end.
+    """
+
+    def __init__(self, request: SecondaryAxisReloadRequest) -> None:
+        super().__init__()
+        self._request = request
+        self.signals = SecondaryAxisReloadSignals()
+
+    def run(self) -> None:
+        logger = logging.getLogger("lspr_app.metric_archive_reload")
+        load_started = perf_counter()
+        try:
+            if self._request.source == "environment":
+                from lspr_app.storage.hdf5_export import load_environment_history
+
+                series = load_environment_history(self._request.path, fields={self._request.metric_name})
+                points = series.get(self._request.metric_name, (np.empty(0), np.empty(0)))
+            else:
+                from lspr_app.storage.hdf5_export import load_processed_metric_history
+
+                series = load_processed_metric_history(self._request.path, metric_names={self._request.dataset_name})
+                points = series.get(self._request.dataset_name, (np.empty(0), np.empty(0)))
+            x_values, y_values = points
+            load_ms = (perf_counter() - load_started) * 1000.0
+        except Exception as exc:  # pragma: no cover - GUI runtime path
+            logger.exception("Secondary axis archive reload failed | path=%s", self._request.path)
+            self.signals.failed.emit(str(exc))
+            return
+        self.signals.finished.emit(
+            SecondaryAxisReloadResult(
+                metric_name=self._request.metric_name,
+                x_values=np.asarray(x_values, dtype=np.float64),
+                y_values=np.asarray(y_values, dtype=np.float64),
+                load_ms=load_ms,
+            )
+        )
+
+
 def _apply_temporal_smoothing(
     processed: Spectrum | None,
     settings: ProcessingSettings,

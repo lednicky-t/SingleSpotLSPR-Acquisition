@@ -113,6 +113,36 @@ def _refresh_sensorgram_control_step_event_labels(window, events: list[dict[str,
     return refreshed
 
 
+def _cached_rebased_and_labeled_events(window, events: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Combine label-refresh + elapsed_s-rebase for `events`, skipping both
+    O(N) passes above when nothing they depend on has changed since the
+    last call.
+
+    Both passes recompute their output fresh every call by design (see
+    their docstrings - the label mode and the display anchor can change
+    without the events list itself changing), but during idle/session view
+    `_visible_sensorgram_control_step_events` hands back the exact same
+    list object unchanged on every tick (see its docstring), so id(events)
+    is a cheap, stable proxy for "did the events themselves change" -
+    combined with the anchor and label mode, that covers everything either
+    pass's output actually depends on. Without this, both passes reran on
+    every single render tick against the whole session's accumulated event
+    list (which never shrinks), which is what made the sensorgram overlay
+    sync cost grow with total session length instead of staying flat.
+    """
+    anchor = display_time_anchor(window)
+    experiment_control_window = getattr(window, "_experiment_control_window", None)
+    label_mode = getattr(experiment_control_window, "_experiment_control_timeline_label_mode", None)
+    cache_key = (id(events), len(events), anchor, label_mode)
+    cache = getattr(window, "_sensorgram_control_step_overlay_rebase_cache", None)
+    if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == cache_key:
+        return cache[1]
+    labeled = _refresh_sensorgram_control_step_event_labels(window, events)
+    rebased = _rebase_sensorgram_control_step_events(window, labeled)
+    window._sensorgram_control_step_overlay_rebase_cache = (cache_key, rebased)
+    return rebased
+
+
 def _visible_sensorgram_control_step_events(window, events: list[dict[str, object]]) -> list[dict[str, object]]:
     """Restrict events to the current measurement while one is actively
     recording, so "measurement" view keeps showing only the current
@@ -131,6 +161,18 @@ def _visible_sensorgram_control_step_events(window, events: list[dict[str, objec
     measurement_started_at = getattr(window, "_measurement_started_at", None)
     if not isinstance(measurement_started_at, datetime):
         return events
+    # While actively recording this filter reruns on every render tick, and
+    # `events` is the whole session's accumulated list (never cleared - see
+    # the docstring above), not just this measurement's own events. Without
+    # caching, a long recording pays an O(session-total-events) scan on
+    # every tick for the entire rest of the session, growing steadily as
+    # more measurements/events pile up. id(events) is stable because the
+    # list is appended to in place, so (id, len, start-time) only changes
+    # when a genuinely new event arrives - i.e. amortized O(1) per tick.
+    cache_key = (id(events), len(events), measurement_started_at)
+    cache = getattr(window, "_sensorgram_control_step_overlay_visible_cache", None)
+    if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == cache_key:
+        return cache[1]
     cutoff_ms = measurement_started_at.timestamp() * 1000.0
     visible: list[dict[str, object]] = []
     for event in events:
@@ -139,6 +181,7 @@ def _visible_sensorgram_control_step_events(window, events: list[dict[str, objec
         timestamp_utc_ms = event.get("timestamp_utc_ms")
         if timestamp_utc_ms is None or float(timestamp_utc_ms) >= cutoff_ms - 1.0:
             visible.append(event)
+    window._sensorgram_control_step_overlay_visible_cache = (cache_key, visible)
     return visible
 
 
@@ -150,7 +193,22 @@ def sensorgram_control_step_overlay_current_elapsed_s(window) -> float | None:
             return None
     events = getattr(window, "_sensorgram_control_step_events", None)
     if isinstance(events, list) and events:
-        last_event = _rebase_sensorgram_control_step_events(window, events)[-1]
+        # Only the *last* event's elapsed_s is needed here - rebasing the
+        # whole (session-long, ever-growing) events list just to read one
+        # entry off the end was an O(N) pass on every render tick for no
+        # reason; do the same per-event math _rebase_sensorgram_control_
+        # step_events uses, but only for this one event.
+        last_event = events[-1]
+        if not isinstance(last_event, dict):
+            return None
+        anchor = display_time_anchor(window)
+        timestamp_utc_ms = last_event.get("timestamp_utc_ms")
+        if anchor is not None and timestamp_utc_ms is not None:
+            try:
+                event_at = datetime.fromtimestamp(float(timestamp_utc_ms) / 1000.0, tz=timezone.utc)
+                return max((event_at - anchor).total_seconds(), 0.0)
+            except Exception:
+                pass
         try:
             return max(float(last_event.get("elapsed_s", last_event.get("t_ms", 0.0) / 1000.0)), 0.0)
         except Exception:
@@ -498,9 +556,8 @@ def sync_sensorgram_control_step_overlay(window) -> None:
         return
     x_min, x_max, y_min, y_max = bounds
     current_elapsed_s = sensorgram_control_step_overlay_current_elapsed_s(window)
-    events = _refresh_sensorgram_control_step_event_labels(window, events)
     segments = build_sensorgram_control_step_overlay_segments(
-        _rebase_sensorgram_control_step_events(window, events),
+        _cached_rebased_and_labeled_events(window, events),
         current_elapsed_s=current_elapsed_s,
     )
     if not segments:

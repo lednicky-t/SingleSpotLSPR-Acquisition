@@ -25,12 +25,26 @@ banners below):
 """
 from __future__ import annotations
 
+import pyqtgraph as pg
 from PyQt6.QtCore import QRect, QTimer
-from PyQt6.QtGui import QGuiApplication
+from PyQt6.QtGui import QColor, QGuiApplication
 from PyQt6.QtWidgets import QApplication
 
 from lspr_app.gui.main_window_logging_ui import apply_text_widget_font_size_for
 from lspr_app.gui.main_window_plotting import apply_metric_color_styles_for
+from lspr_app.gui.sensorgram_secondary_axis import (
+    SECONDARY_AXIS_SLOTS,
+    SECONDARY_METRIC_DEFAULT_COLORS,
+    SECONDARY_METRIC_KEYS,
+    _secondary_axis_pen_for_metric,
+    normalize_secondary_axis_metric,
+    normalize_secondary_axis_mode,
+    secondary_axis_color_for,
+    secondary_axis_line_width_for,
+    secondary_axis_metric_axis_label,
+    secondary_axis_opacity_for,
+    update_secondary_axis_visibility,
+)
 from time import perf_counter
 from copy import deepcopy
 
@@ -1033,6 +1047,89 @@ def _restore_residual_view_range(window, ui_state: dict[str, object]) -> None:
                 window._residual_axis_autoscaled = True
 
 
+def _restore_secondary_axis_slot(window, slot: str, ui_state: dict[str, object]) -> None:
+    suffix = "" if slot == "a" else f"_{slot}"
+    metric_name = normalize_secondary_axis_metric(ui_state.get(f"secondary_axis_metric_{slot}", "fwhm"))
+    setattr(window, f"_secondary_axis_metric_{slot}", metric_name)
+    if hasattr(window, "_update_secondary_axis_metric_button_text"):
+        window._update_secondary_axis_metric_button_text(slot)
+    metric_color = secondary_axis_color_for(window, metric_name)
+    axis_item = getattr(window, f"secondary_axis{suffix}", None)
+    if axis_item is not None:
+        axis_item.setLabel(secondary_axis_metric_axis_label(metric_name))
+        # Colored to match the metric, same as the curve - see
+        # gui/sensorgram_secondary_axis.py's _apply_secondary_axis_line_color
+        # (not imported here to avoid pulling in a module-private helper;
+        # this restore path only needs the axis+curve pens, not the
+        # envelope band, which reflows on the next render anyway).
+        axis_item.setPen(pg.mkPen(metric_color))
+        axis_item.setTextPen(pg.mkPen(metric_color))
+    curve = getattr(window, f"secondary_axis_curve{suffix}", None)
+    if curve is not None:
+        curve.setPen(_secondary_axis_pen_for_metric(window, metric_name))
+    auto_button = getattr(window, f"secondary_axis_auto_button{suffix}", None)
+    if auto_button is not None:
+        auto_button.set_color(metric_color)
+
+    y_range = ui_state.get(f"secondary_axis_y_range_{slot}")
+    if (
+        isinstance(y_range, list)
+        and len(y_range) == 2
+        and all(isinstance(item, (int, float)) for item in y_range)
+    ):
+        y_min = float(y_range[0])
+        y_max = float(y_range[1])
+        if y_max > y_min:
+            setattr(window, f"_secondary_axis_y_range_{slot}", [y_min, y_max])
+            view_box = getattr(window, f"secondary_axis_view{suffix}", None)
+            if view_box is not None:
+                view_box.setYRange(y_min, y_max, padding=0.0)
+                view_box._manual_y_zoom = True
+                setattr(window, f"_secondary_axis_autoscaled_{slot}", True)
+
+
+def _restore_secondary_axis_state(window, ui_state: dict[str, object]) -> None:
+    """Restore the sensorgram secondary axes: which mode is active (XY/XYY/
+    XY2Y), which metric each slot shows, their colors, and their saved
+    Y-ranges. See gui/sensorgram_secondary_axis.py."""
+    secondary_axis_colors = ui_state.get("secondary_axis_colors")
+    if isinstance(secondary_axis_colors, dict):
+        colors = dict(SECONDARY_METRIC_DEFAULT_COLORS)
+        for key in SECONDARY_METRIC_KEYS:
+            value = secondary_axis_colors.get(key)
+            if isinstance(value, str) and QColor(value).isValid():
+                colors[key] = value
+        window.SECONDARY_METRIC_COLORS = colors
+
+    secondary_axis_line_widths = ui_state.get("secondary_axis_line_widths")
+    if isinstance(secondary_axis_line_widths, dict):
+        widths = {}
+        for key in SECONDARY_METRIC_KEYS:
+            value = secondary_axis_line_widths.get(key)
+            if isinstance(value, (int, float)) and float(value) > 0:
+                widths[key] = max(float(value), 0.5)
+        window.SECONDARY_METRIC_LINE_WIDTHS = widths
+
+    secondary_axis_opacities = ui_state.get("secondary_axis_opacities")
+    if isinstance(secondary_axis_opacities, dict):
+        opacities = {}
+        for key in SECONDARY_METRIC_KEYS:
+            value = secondary_axis_opacities.get(key)
+            if isinstance(value, (int, float)):
+                opacities[key] = int(max(min(int(value), 100), 0))
+        window.SECONDARY_METRIC_OPACITY = opacities
+
+    for slot in SECONDARY_AXIS_SLOTS:
+        _restore_secondary_axis_slot(window, slot, ui_state)
+
+    window._secondary_axis_mode = normalize_secondary_axis_mode(ui_state.get("secondary_axis_mode", "xy"))
+    update_secondary_axis_visibility(window)
+    if hasattr(window, "_update_secondary_axis_button_icon"):
+        window._update_secondary_axis_button_icon()
+    if hasattr(window, "_update_secondary_axis_metric_button_visibility"):
+        window._update_secondary_axis_metric_button_visibility()
+
+
 def _restore_maximized_and_layout_presets(window, ui_state: dict[str, object]) -> None:
     """Restore the maximized flag and the saved layout presets, then apply the
     selected preset (this runs last since it can override splitter/visibility
@@ -1093,6 +1190,7 @@ def restore_ui_state(window) -> None:
     _restore_diagnostics_panel_visibility(window, ui_state)
     _restore_sensorgram_render_settings(window, ui_state)
     _restore_residual_view_range(window, ui_state)
+    _restore_secondary_axis_state(window, ui_state)
     _restore_maximized_and_layout_presets(window, ui_state)
 
     binder = getattr(window, "_ui_binder", None)
@@ -1130,6 +1228,26 @@ def save_ui_state(window) -> None:
         saved_range = window._residual_y_range
         if len(saved_range) == 2 and all(isinstance(item, (int, float)) for item in saved_range):
             residual_y_range = [float(saved_range[0]), float(saved_range[1])]
+
+    secondary_axis_y_ranges: dict[str, list[float]] = {}
+    for slot in SECONDARY_AXIS_SLOTS:
+        suffix = "" if slot == "a" else f"_{slot}"
+        view_box = getattr(window, f"secondary_axis_view{suffix}", None)
+        y_range: list[float] = []
+        if view_box is not None and view_box.isVisible():
+            try:
+                current_range = view_box.viewRange()[1]
+                y_min = float(current_range[0])
+                y_max = float(current_range[1])
+                if y_max > y_min:
+                    y_range = [y_min, y_max]
+            except Exception:
+                y_range = []
+        elif isinstance(getattr(window, f"_secondary_axis_y_range_{slot}", None), list):
+            saved_range = getattr(window, f"_secondary_axis_y_range_{slot}")
+            if len(saved_range) == 2 and all(isinstance(item, (int, float)) for item in saved_range):
+                y_range = [float(saved_range[0]), float(saved_range[1])]
+        secondary_axis_y_ranges[slot] = y_range
 
     binder_state = {}
     binder = getattr(window, "_ui_binder", None)
@@ -1210,6 +1328,21 @@ def save_ui_state(window) -> None:
             ),
             "trace_stats_metric_name": window._trace_stats_metric_name,
             "residual_y_range": residual_y_range,
+            "secondary_axis_mode": normalize_secondary_axis_mode(getattr(window, "_secondary_axis_mode", "xy")),
+            "secondary_axis_metric_a": normalize_secondary_axis_metric(getattr(window, "_secondary_axis_metric_a", "fwhm")),
+            "secondary_axis_metric_b": normalize_secondary_axis_metric(getattr(window, "_secondary_axis_metric_b", "temperature")),
+            "secondary_axis_y_range_a": secondary_axis_y_ranges.get("a", []),
+            "secondary_axis_y_range_b": secondary_axis_y_ranges.get("b", []),
+            "secondary_axis_colors": {
+                key: str(getattr(window, "SECONDARY_METRIC_COLORS", {}).get(key, SECONDARY_METRIC_DEFAULT_COLORS[key]))
+                for key in SECONDARY_METRIC_KEYS
+            },
+            "secondary_axis_line_widths": {
+                key: secondary_axis_line_width_for(window, key) for key in SECONDARY_METRIC_KEYS
+            },
+            "secondary_axis_opacities": {
+                key: secondary_axis_opacity_for(window, key) for key in SECONDARY_METRIC_KEYS
+            },
             "layout_presets": {
                 key: deepcopy(_coerce_layout_preset_snapshot(key, getattr(window, "_layout_presets", {}).get(key)))
                 for key in LAYOUT_PRESET_KEYS

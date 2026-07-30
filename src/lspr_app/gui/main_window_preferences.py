@@ -76,6 +76,15 @@ class PreferencesDialog(QDialog):
         self.theme_combo.addItem("Dark", "dark")
         self.theme_combo.addItem("Light", "light")
 
+        self.timing_unit_combo = QComboBox()
+        self.timing_unit_combo.addItem("Hz", "hz")
+        self.timing_unit_combo.addItem("ms", "ms")
+        self.timing_unit_combo.setToolTip(
+            "How read-only rate displays (status labels, diagnostics panel, log lines) show "
+            "timing values - as a frequency (Hz) or as the equivalent period (ms = 1000 / Hz). "
+            "Input fields for setting a rate always stay in Hz regardless of this setting."
+        )
+
         # Users - who's using this instrument (see storage/user_profile.py).
         # No password: this list is bookkeeping for settings isolation and
         # HDF5 traceability, not access control.
@@ -212,6 +221,7 @@ class PreferencesDialog(QDialog):
         appearance_layout.setHorizontalSpacing(16)
         appearance_layout.setVerticalSpacing(8)
         appearance_layout.addRow("Theme", self.theme_combo)
+        appearance_layout.addRow("Timing display unit", self.timing_unit_combo)
 
         # ── Users ─────────────────────────────────────────────────────────────
         users_box = _make_section_box("Users")
@@ -360,6 +370,11 @@ class PreferencesDialog(QDialog):
         if index >= 0:
             self.theme_combo.setCurrentIndex(index)
 
+        timing_unit = str(getattr(self._window, "_timing_display_unit", "hz"))
+        timing_unit_index = self.timing_unit_combo.findData(timing_unit)
+        if timing_unit_index >= 0:
+            self.timing_unit_combo.setCurrentIndex(timing_unit_index)
+
         self.start_maximized_check.setChecked(bool(getattr(self._window, "_start_maximized", False)))
         self.freeze_on_startup_check.setChecked(bool(getattr(self._window, "_startup_freeze_plots", False)))
         self.confirm_exit_check.setChecked(bool(getattr(self._window, "_confirm_exit_if_recording", True)))
@@ -393,6 +408,9 @@ class PreferencesDialog(QDialog):
         theme = str(self.theme_combo.currentData() or "dark")
         if hasattr(self._window, "set_theme"):
             self._window.set_theme(theme)
+
+        if hasattr(self._window, "_set_timing_display_unit"):
+            self._window._set_timing_display_unit(str(self.timing_unit_combo.currentData() or "hz"))
 
         if hasattr(self._window, "_set_start_maximized"):
             self._window._set_start_maximized(self.start_maximized_check.isChecked())

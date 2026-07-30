@@ -166,6 +166,27 @@ from lspr_app.gui.main_window_sensorgram_archive import (
     request_sensorgram_metric_archive_reload,
     start_sensorgram_metric_archive_reload_task,
 )
+from lspr_app.gui.sensorgram_secondary_axis import (
+    SECONDARY_METRIC_DEFAULT_COLORS,
+    build_secondary_axis_for,
+    build_secondary_axis_metric_menu,
+    cycle_secondary_axis_mode,
+    handle_secondary_axis_reload_failed,
+    handle_secondary_axis_reload_result,
+    secondary_axis_color_for,
+    secondary_axis_metric_for,
+    secondary_axis_metric_label,
+    secondary_axis_mode_color,
+    secondary_axis_mode_label,
+    secondary_axis_slot_active,
+    set_secondary_axis_metric,
+    set_secondary_axis_metric_color,
+    set_secondary_axis_metric_line_width,
+    set_secondary_axis_metric_opacity,
+    update_secondary_axis_auto_button_visibility,
+    update_secondary_axis_geometry,
+    update_secondary_axis_visibility,
+)
 from lspr_app.gui.main_window_sensorgram_overlay import (
     close_sensorgram_control_step_overlay_segment as close_sensorgram_control_step_overlay_segment_for_sensorgram,
     handle_trace_view_range_changed as handle_trace_view_range_changed_for_sensorgram,
@@ -727,6 +748,8 @@ class MainWindow(QMainWindow):
         if self._theme_mode != "dark":
             self._theme_mode = "dark"
             save_app_setting("theme_mode", self._theme_mode)
+        loaded_timing_unit = str(load_app_setting("timing_display_unit", "hz"))
+        self._timing_display_unit = loaded_timing_unit if loaded_timing_unit in {"hz", "ms"} else "hz"
         self.undo_stack = QUndoStack(self)
         self.undo_stack.setUndoLimit(int(load_app_setting("undo_history_size", DEFAULT_UNDO_HISTORY_SIZE)))
         self._suspend_processing_autosave = False
@@ -793,6 +816,20 @@ class MainWindow(QMainWindow):
         self._sensorgram_line_step_mode = None
         self._sensorgram_line_width_px = 2.2
         self._plot_antialias_enabled = False
+        # Sensorgram secondary axes - "XY" (off) / "XYY" (one independently-
+        # zoomable right-hand axis, slot A) / "XY2Y" (two, slots A and B),
+        # each showing one non-wavelength metric at a time (FWHM/extinction/
+        # temperature/humidity). See gui/sensorgram_secondary_axis.py.
+        # Deliberately separate from the 1Y metrics above - restored from saved
+        # UI state in main_window_state.py, same pattern as show_residual_button.
+        self._secondary_axis_mode = "xy"
+        self._secondary_axis_metric_a = "fwhm"
+        self._secondary_axis_metric_b = "temperature"
+        self._secondary_axis_y_range_a: list[float] | None = None
+        self._secondary_axis_y_range_b: list[float] | None = None
+        self._secondary_axis_autoscaled_a = False
+        self._secondary_axis_autoscaled_b = False
+        self.SECONDARY_METRIC_COLORS = dict(SECONDARY_METRIC_DEFAULT_COLORS)
         # "session" shows the full session from the always-on session file.
         # "measurement" shows only the active recording window.
         # Auto-switches to "measurement" when a recording starts and back to "session" when it stops.
@@ -822,6 +859,46 @@ class MainWindow(QMainWindow):
             "Open sensorgram plot settings.",
             size=30,
         )
+        # [XY] / [XYY] / [XY2Y] - cycles how many secondary axes are shown,
+        # same click-to-cycle pattern as sensorgram_metric_y_axis_mode_button
+        # above, not a checkable toggle anymore now that there are 3 states.
+        self.show_secondary_axis_button = QToolButton(self)
+        self.show_secondary_axis_button.setObjectName("sensorgramSecondaryAxisToggleButton")
+        self.show_secondary_axis_button.setAutoRaise(True)
+        self.show_secondary_axis_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.show_secondary_axis_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.show_secondary_axis_button.clicked.connect(self._cycle_secondary_axis_mode)
+
+        self.secondary_axis_metric_button = QToolButton(self)
+        self.secondary_axis_metric_button.setObjectName("sensorgramSecondaryAxisMetricButton")
+        self.secondary_axis_metric_button.setAutoRaise(True)
+        self.secondary_axis_metric_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.secondary_axis_metric_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.secondary_axis_metric_button.setToolTip("Choose which metric the first secondary axis displays.")
+        self.secondary_axis_metric_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.secondary_axis_metric_menu = build_secondary_axis_metric_menu(self, self.secondary_axis_metric_button)
+        self.secondary_axis_metric_menu.triggered.connect(
+            lambda action: self._on_secondary_axis_metric_selected(action.data(), "a")
+        )
+        self.secondary_axis_metric_button.setMenu(self.secondary_axis_metric_menu)
+
+        self.secondary_axis_metric_button_b = QToolButton(self)
+        self.secondary_axis_metric_button_b.setObjectName("sensorgramSecondaryAxisMetricButton")
+        self.secondary_axis_metric_button_b.setAutoRaise(True)
+        self.secondary_axis_metric_button_b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.secondary_axis_metric_button_b.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.secondary_axis_metric_button_b.setToolTip("Choose which metric the second secondary axis displays.")
+        self.secondary_axis_metric_button_b.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.secondary_axis_metric_menu_b = build_secondary_axis_metric_menu(self, self.secondary_axis_metric_button_b)
+        self.secondary_axis_metric_menu_b.triggered.connect(
+            lambda action: self._on_secondary_axis_metric_selected(action.data(), "b")
+        )
+        self.secondary_axis_metric_button_b.setMenu(self.secondary_axis_metric_menu_b)
+
+        self._update_secondary_axis_button_icon()
+        self._update_secondary_axis_metric_button_text("a")
+        self._update_secondary_axis_metric_button_text("b")
+        self._update_secondary_axis_metric_button_visibility()
         self._sensorgram_control_step_events: list[dict[str, object]] = []
         self._sensorgram_control_step_overlay_items: list[object] = []
         self._last_summary_text: str = ""
@@ -1541,6 +1618,7 @@ class MainWindow(QMainWindow):
         )
         self.trace_plot.getPlotItem().vb.sigRangeChanged.connect(self._handle_trace_view_range_changed)
         self.trace_plot.getPlotItem().vb.sigResized.connect(self._sync_sensorgram_control_step_overlay)
+        build_secondary_axis_for(self)
         self._style_plot_widgets()
         self._apply_sensorgram_display_style()
 
@@ -2176,6 +2254,10 @@ class MainWindow(QMainWindow):
         size = max(int(size), 1)
         save_app_setting("undo_history_size", size)
         self.undo_stack.setUndoLimit(size)
+
+    def _set_timing_display_unit(self, unit: str) -> None:
+        self._timing_display_unit = unit if unit in {"hz", "ms"} else "hz"
+        save_app_setting("timing_display_unit", self._timing_display_unit)
 
     def _set_gui_log_level(self, level: int) -> None:
         self._gui_log_min_level = int(level)
@@ -3247,7 +3329,13 @@ class MainWindow(QMainWindow):
 
     def _refresh_trace_plot(self, trace_label: str) -> None:
         refresh_metric_plot_for(self, trace_label)
-        self._sync_sensorgram_control_step_overlay()
+        # refresh_metric_plot_for already syncs the control-step overlay on
+        # every non-frozen return path; the only path that doesn't is the
+        # early "sensorgram frozen" return, so only sync again there -
+        # calling it unconditionally here was a redundant O(N)-over-session-
+        # events pass on every single tick during live recording.
+        if self._sensorgram_frozen:
+            self._sync_sensorgram_control_step_overlay()
         self._notify_startup_data_rendered("trace")
 
     def _render_trace_series(
@@ -3565,6 +3653,67 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "show_residual_button"):
             return
         self.show_residual_button.setIcon(residual_icon(self.show_residual_button.isChecked()))
+
+    def _update_secondary_axis_geometry(self) -> None:
+        update_secondary_axis_geometry(self)
+
+    def _update_secondary_axis_auto_button_visibility(self, slot: str = "a") -> None:
+        update_secondary_axis_auto_button_visibility(self, slot)
+
+    def _update_secondary_axis_button_icon(self) -> None:
+        # [XY]/[XYY]/[XY2Y] - text + color both reflect the current mode
+        # (see SECONDARY_AXIS_MODE_COLORS), set directly rather than via a
+        # QSS pseudo-state since there are 3 states, not just on/off.
+        if not hasattr(self, "show_secondary_axis_button"):
+            return
+        mode = getattr(self, "_secondary_axis_mode", "xy")
+        self.show_secondary_axis_button.setText(f"[{secondary_axis_mode_label(mode)}]")
+        color = secondary_axis_mode_color(mode)
+        self.show_secondary_axis_button.setStyleSheet(
+            f"QToolButton#sensorgramSecondaryAxisToggleButton {{ color: {color}; }}"
+        )
+
+    def _update_secondary_axis_metric_button_text(self, slot: str = "a") -> None:
+        button = getattr(self, "secondary_axis_metric_button" if slot == "a" else "secondary_axis_metric_button_b", None)
+        if button is None:
+            return
+        metric_name = secondary_axis_metric_for(self, slot)
+        button.setText(f"[{secondary_axis_metric_label(metric_name)}]")
+        color = secondary_axis_color_for(self, metric_name)
+        button.setStyleSheet(f"QToolButton#sensorgramSecondaryAxisMetricButton {{ color: {color}; }}")
+
+    def _update_secondary_axis_metric_button_visibility(self) -> None:
+        mode = getattr(self, "_secondary_axis_mode", "xy")
+        if hasattr(self, "secondary_axis_metric_button"):
+            self.secondary_axis_metric_button.setVisible(secondary_axis_slot_active(self, "a"))
+        if hasattr(self, "secondary_axis_metric_button_b"):
+            self.secondary_axis_metric_button_b.setVisible(secondary_axis_slot_active(self, "b"))
+
+    def _cycle_secondary_axis_mode(self) -> None:
+        cycle_secondary_axis_mode(self)
+        self._update_secondary_axis_button_icon()
+        self._update_secondary_axis_metric_button_visibility()
+
+    def _on_secondary_axis_metric_selected(self, metric_name: str, slot: str = "a") -> None:
+        set_secondary_axis_metric(self, metric_name, slot, save=True)
+        self._update_secondary_axis_metric_button_text(slot)
+
+    def _set_secondary_axis_metric_color(self, metric_name: str, color: str, *, save: bool = False) -> None:
+        set_secondary_axis_metric_color(self, metric_name, color, save=save)
+        self._update_secondary_axis_metric_button_text("a")
+        self._update_secondary_axis_metric_button_text("b")
+
+    def _set_secondary_axis_metric_line_width(self, metric_name: str, width_px: float, *, save: bool = False) -> None:
+        set_secondary_axis_metric_line_width(self, metric_name, width_px, save=save)
+
+    def _set_secondary_axis_metric_opacity(self, metric_name: str, opacity_percent: int, *, save: bool = False) -> None:
+        set_secondary_axis_metric_opacity(self, metric_name, opacity_percent, save=save)
+
+    def _handle_secondary_axis_reload_result(self, slot: str, result) -> None:
+        handle_secondary_axis_reload_result(self, slot, result)
+
+    def _handle_secondary_axis_reload_failed(self, message: str) -> None:
+        handle_secondary_axis_reload_failed(self, message)
 
     def _update_dark_reference_button_icons(self) -> None:
         if hasattr(self, "acquire_dark_button"):

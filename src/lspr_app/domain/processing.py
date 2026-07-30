@@ -166,11 +166,19 @@ def build_dense_analysis_curve(
     return dense_wavelengths, dense_values.astype(np.float64, copy=False), fit_window_meta
 
 
-def polynomial_peak_from_curve(
+def polynomial_peak_xy_from_curve(
     wavelengths: np.ndarray,
     values: np.ndarray,
     order: int,
-) -> float | None:
+) -> tuple[float, float] | None:
+    """Fit a polynomial of the given order and return its (X, Y) peak.
+
+    Used for the sensorgram's extinction/2Y metric (see
+    gui/sensorgram_secondary_axis.py): re-fitting here rather than
+    interpolating the already-sampled fit curve keeps the returned Y exactly
+    the analytic value of the same polynomial model whose root gave the X -
+    not an approximation from a sampled grid.
+    """
     if len(wavelengths) < 3:
         return None
 
@@ -198,13 +206,15 @@ def polynomial_peak_from_curve(
     valid = real_roots[(real_roots >= low) & (real_roots <= high)]
     if valid.size > 0:
         y_valid = poly(valid)
-        return float(valid[int(np.nanargmax(y_valid))])
+        best_index = int(np.nanargmax(y_valid))
+        return float(valid[best_index]), float(y_valid[best_index])
 
     dense_x = np.linspace(low, high, max(int(np.ceil((high - low) / max((high - low) / 2000.0, 1e-6))) + 1, 3), dtype=np.float64)
     dense_y = poly(dense_x)
     if np.count_nonzero(np.isfinite(dense_y)) == 0:
         return None
-    return float(dense_x[int(np.nanargmax(dense_y))])
+    best_index = int(np.nanargmax(dense_y))
+    return float(dense_x[best_index]), float(dense_y[best_index])
 
 
 def centroid_from_curve(
@@ -243,14 +253,32 @@ def centroid_from_curve(
     return float(np.nansum(x * weights) / total)
 
 
-def gaussian_center_from_curve(wavelengths: np.ndarray, values: np.ndarray) -> float | None:
+def gaussian_peak_xy_from_curve(wavelengths: np.ndarray, values: np.ndarray) -> tuple[float, float] | None:
+    """Fit a Gaussian and return its (X, Y) peak.
+
+    For offset + amplitude * exp(-(x-center)^2 / (2*sigma^2)), the value at
+    x = center is exactly offset + amplitude (the exponential term is 1) -
+    analytic, not a curve evaluation, so this is exact given the fitted
+    parameters. Used for the sensorgram's extinction/2Y metric (see
+    gui/sensorgram_secondary_axis.py) when gaussian_center is shown as a
+    display-only overlay metric (fit_method != "gaussian"); when the fit
+    itself is Gaussian, gaussian_amplitude/gaussian_offset are already
+    stored on fit.metadata and should be read directly instead of re-fitting.
+    """
     fit_values, params = _gaussian_fit(wavelengths, values)
     if fit_values is None or params is None:
         return None
-    return float(params[1])
+    amplitude, center_nm, _sigma_nm, offset = params
+    return float(center_nm), float(offset + amplitude)
 
 
-def quadratic_peak_from_curve(wavelengths: np.ndarray, values: np.ndarray) -> float | None:
+def quadratic_peak_xy_from_curve(wavelengths: np.ndarray, values: np.ndarray) -> tuple[float, float] | None:
+    """Fit a local 3-point parabola around the raw peak sample and return its
+    (X, Y) vertex - used for the sensorgram's extinction/2Y metric (see
+    gui/sensorgram_secondary_axis.py) when smoothed_max is the primary
+    tracked metric: the vertex height of the same parabola that located the
+    peak X, not a nearest-sample lookup.
+    """
     if len(wavelengths) < 3:
         return None
 
@@ -263,21 +291,22 @@ def quadratic_peak_from_curve(wavelengths: np.ndarray, values: np.ndarray) -> fl
 
     peak_index = int(np.nanargmax(y))
     if peak_index <= 0 or peak_index >= len(x) - 1:
-        return float(x[peak_index])
+        return float(x[peak_index]), float(y[peak_index])
 
     x_local = x[peak_index - 1 : peak_index + 2]
     y_local = y[peak_index - 1 : peak_index + 2]
     try:
         poly = np.polynomial.Polynomial.fit(x_local, y_local, 2)
     except (np.linalg.LinAlgError, ValueError):
-        return float(x[peak_index])
+        return float(x[peak_index]), float(y[peak_index])
 
     roots = poly.deriv().roots()
     real_roots = roots[np.isreal(roots)].real
     valid = real_roots[(real_roots >= float(x_local[0])) & (real_roots <= float(x_local[-1]))]
     if valid.size == 0:
-        return float(x[peak_index])
-    return float(valid[0])
+        return float(x[peak_index]), float(y[peak_index])
+    vertex_x = float(valid[0])
+    return vertex_x, float(poly(vertex_x))
 
 
 def fit_processed_spectrum(processed: Spectrum | None, settings: ProcessingSettings) -> Spectrum | None:
@@ -300,7 +329,7 @@ def fit_processed_spectrum(processed: Spectrum | None, settings: ProcessingSetti
         effective_order = min(max(int(settings.polynomial_order), 1), max(len(fit_wavelengths) - 1, 1))
         if len(fit_wavelengths) <= effective_order:
             return None
-        fit_values, used_order, polynomial_peak_nm = _stable_polynomial_fit(
+        fit_values, used_order, polynomial_peak_nm, polynomial_peak_value = _stable_polynomial_fit(
             fit_wavelengths,
             fit_values_source,
             effective_order,
@@ -317,6 +346,7 @@ def fit_processed_spectrum(processed: Spectrum | None, settings: ProcessingSetti
                 "requested_polynomial_order": effective_order,
                 "polynomial_order": used_order,
                 "polynomial_peak_nm": polynomial_peak_nm,
+                "polynomial_peak_value": polynomial_peak_value,
                 "mse": _compute_mse(fit_values_source, fit_values),
                 "fwhm_nm": _compute_fwhm_nm(fit_wavelengths, fit_values),
                 "fit_window_width_nm": settings.fit_window_width_nm,
@@ -510,20 +540,20 @@ def _stable_polynomial_fit(
     wavelengths: np.ndarray,
     values: np.ndarray,
     requested_order: int,
-) -> tuple[np.ndarray | None, int, float | None]:
+) -> tuple[np.ndarray | None, int, float | None, float | None]:
     if len(wavelengths) < 2:
-        return None, 0, None
+        return None, 0, None, None
 
     cleaned = _sanitize_curve_values(wavelengths, values)
     if cleaned is None:
-        return None, 0, None
+        return None, 0, None, None
     wavelengths, values, _ = cleaned
 
     low = float(wavelengths[0])
     high = float(wavelengths[-1])
     span = high - low
     if not np.isfinite(span) or span <= 0:
-        return None, 0, None
+        return None, 0, None, None
 
     order = min(requested_order, len(wavelengths) - 1)
 
@@ -532,11 +562,18 @@ def _stable_polynomial_fit(
             poly = np.polynomial.Polynomial.fit(wavelengths, values, order)
             fitted = poly(wavelengths)
             peak_nm = _polynomial_peak_from_model(poly, low, high)
-            return np.asarray(fitted, dtype=np.float64), order, peak_nm
+            # Evaluated from this same poly object, at this same peak_nm - the
+            # extinction/2Y "poly_max" Y (see gui/sensorgram_secondary_axis.py
+            # and get_analysis_metrics in gui/processing_helpers.py) needs a
+            # value guaranteed to match the reported peak position exactly,
+            # not a value independently re-derived or interpolated off a
+            # sampled curve.
+            peak_value = float(poly(peak_nm)) if peak_nm is not None else None
+            return np.asarray(fitted, dtype=np.float64), order, peak_nm, peak_value
         except np.linalg.LinAlgError:
             order -= 1
 
-    return None, 0, None
+    return None, 0, None, None
 
 
 def _polynomial_peak_from_model(

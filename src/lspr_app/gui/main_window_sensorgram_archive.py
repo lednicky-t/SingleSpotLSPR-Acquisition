@@ -6,6 +6,12 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtGui import QColor
 
+from lspr_app.gui.sensorgram_secondary_axis import (
+    SECONDARY_AXIS_SLOTS,
+    request_secondary_axis_archive_reseed,
+    secondary_axis_color_for,
+    secondary_axis_metric_for,
+)
 from lspr_app.gui.workers import (
     MetricArchiveReloadRequest,
     MetricArchiveReloadResult,
@@ -22,6 +28,15 @@ def apply_sensorgram_display_style(window) -> None:
         band_alpha = int(round(max(min(float(getattr(window, "_sensorgram_metric_envelope_overlay_alpha", 16)), 100.0), 0.0) * 2.55))
         band_color.setAlpha(max(min(band_alpha, 255), 0))
         band.setBrush(pg.mkBrush(band_color))
+    for slot in SECONDARY_AXIS_SLOTS:
+        suffix = "" if slot == "a" else f"_{slot}"
+        secondary_axis_band = getattr(window, f"secondary_axis_envelope_band{suffix}", None)
+        if secondary_axis_band is None:
+            continue
+        band_color = QColor(secondary_axis_color_for(window, secondary_axis_metric_for(window, slot)))
+        band_alpha = int(round(max(min(float(getattr(window, "_sensorgram_metric_envelope_overlay_alpha", 16)), 100.0), 0.0) * 2.55))
+        band_color.setAlpha(max(min(band_alpha, 255), 0))
+        secondary_axis_band.setBrush(pg.mkBrush(band_color))
 
 
 def _sensorgram_active_archive_path(window) -> Path | None:
@@ -96,6 +111,17 @@ def request_absolute_sensorgram_metric_archive_reload(window) -> None:
         window._log_warning(f"Sensorgram measurement file not found: {archive_path}")
         return
     window._sensorgram_metric_archive_reload_pending_token = request_token
+    # Fire alongside the primary (1Y) reload, not as part of it: each
+    # secondary axis slot (see gui/sensorgram_secondary_axis.py) has its own
+    # small, independent reload path reading a different HDF5 group for
+    # temperature/humidity, but should rebase at exactly the same moments
+    # (Stop, session/measurement switch, the manual reload button) so it
+    # doesn't show the same stale-anchor discontinuity the 1Y metrics used to
+    # have before docs/sensorgram_improvements.md's C1-C9 fixes. Reseeding
+    # both slots unconditionally is safe/cheap - each is a no-op if not
+    # currently active for the mode.
+    for slot in SECONDARY_AXIS_SLOTS:
+        request_secondary_axis_archive_reseed(window, slot)
     if window._sensorgram_metric_archive_reload_loading:
         return
     start_sensorgram_metric_archive_reload_task(window, request_token)

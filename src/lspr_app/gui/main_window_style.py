@@ -21,6 +21,11 @@ import pyqtgraph as pg
 from PyQt6.QtGui import QColor
 
 from lspr_app.gui.main_window_plotting import apply_metric_color_styles_for
+from lspr_app.gui.sensorgram_secondary_axis import (
+    SECONDARY_AXIS_SLOTS,
+    secondary_axis_color_for,
+    secondary_axis_metric_for,
+)
 
 
 def apply_modern_style_for(window) -> None:
@@ -105,7 +110,9 @@ def apply_modern_style_for(window) -> None:
         QToolButton#sensorgramViewModeButton,
         QToolButton#sensorgramContentModeButton,
         QToolButton#sensorgramYAxisModeButton,
-        QToolButton#sensorgramWindowButton {
+        QToolButton#sensorgramWindowButton,
+        QToolButton#sensorgramSecondaryAxisToggleButton,
+        QToolButton#sensorgramSecondaryAxisMetricButton {
             background: transparent;
             border: none;
             padding: 0px;
@@ -116,16 +123,27 @@ def apply_modern_style_for(window) -> None:
         QToolButton#sensorgramViewModeButton:hover,
         QToolButton#sensorgramContentModeButton:hover,
         QToolButton#sensorgramYAxisModeButton:hover,
-        QToolButton#sensorgramWindowButton:hover {
+        QToolButton#sensorgramWindowButton:hover,
+        QToolButton#sensorgramSecondaryAxisToggleButton:hover,
+        QToolButton#sensorgramSecondaryAxisMetricButton:hover {
             background: transparent;
             border: none;
         }
         QToolButton#sensorgramViewModeButton:pressed,
         QToolButton#sensorgramContentModeButton:pressed,
         QToolButton#sensorgramYAxisModeButton:pressed,
-        QToolButton#sensorgramWindowButton:pressed {
+        QToolButton#sensorgramWindowButton:pressed,
+        QToolButton#sensorgramSecondaryAxisToggleButton:pressed,
+        QToolButton#sensorgramSecondaryAxisMetricButton:pressed {
             background: transparent;
             border: none;
+        }
+        QToolButton#sensorgramSecondaryAxisToggleButton {
+            color: #7a8291;
+        }
+        QToolButton#sensorgramSecondaryAxisMetricButton::menu-indicator {
+            image: none;
+            width: 0px;
         }
         QLabel#traceClearLabel {
             color: %(accent)s;
@@ -504,6 +522,28 @@ def style_plot_widgets_for(window) -> None:
         window.residual_axis.setStyle(tickTextOffset=2)
         window.residual_axis.setTextPen(pg.mkPen(palette["axis_text"]))
         window.residual_axis.setPen(pg.mkPen(palette["axis_pen"]))
+    for slot in SECONDARY_AXIS_SLOTS:
+        suffix = "" if slot == "a" else f"_{slot}"
+        secondary_axis_item = getattr(window, f"secondary_axis{suffix}", None)
+        if secondary_axis_item is None:
+            continue
+        secondary_axis_item.setStyle(tickTextOffset=2)
+        # plot.getPlotItem().showGrid(...) just above re-enables grid on
+        # every axis of this PlotItem, including this one - which would
+        # silently undo gui/sensorgram_secondary_axis.py's setGrid(False)
+        # (needed so AxisItem.boundingRect() doesn't balloon out to the
+        # linked overlay ViewBox's full-plot-width rect; see that module's
+        # _build_secondary_axis_slot for the full explanation). Re-assert it
+        # every time this function runs, not just once at construction.
+        secondary_axis_item.setGrid(False)
+        # Colored to match its metric (see gui/sensorgram_secondary_axis.py),
+        # not the generic theme axis color - re-applied here on every theme
+        # refresh so it stays correct regardless of theme, rather than
+        # overwritten with a theme-neutral color that would defeat the
+        # point of "which axis matches which curve" at a glance.
+        metric_color = secondary_axis_color_for(window, secondary_axis_metric_for(window, slot))
+        secondary_axis_item.setTextPen(pg.mkPen(metric_color))
+        secondary_axis_item.setPen(pg.mkPen(metric_color))
     crosshair_color = "#7f93a8" if window._theme_mode == "dark" else "#666666"
     window.spectrum_vline.setPen(pg.mkPen(crosshair_color, width=1))
     window.spectrum_hline.setPen(pg.mkPen(crosshair_color, width=1))
@@ -528,4 +568,5 @@ def style_plot_widgets_for(window) -> None:
     apply_metric_color_styles_for(window)
     window._update_freeze_button_icon()
     window._update_residual_button_icon()
+    window._update_secondary_axis_button_icon()
     window._update_dark_reference_button_icons()

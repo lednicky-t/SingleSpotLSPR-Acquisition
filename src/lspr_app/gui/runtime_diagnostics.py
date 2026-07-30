@@ -327,7 +327,18 @@ def _queue_depth_max_text(value: object) -> str:
     return str(max(numeric, 0))
 
 
-def _format_rate(value: float | int | None) -> str:
+def format_rate_for_window(window: Any, value: float | int | None, *, decimals: int = 2) -> str:
+    """Format a Hz rate for a read-only display, honoring the user's Hz/ms
+    display preference (Preferences > Appearance > "Timing display unit").
+
+    Display-only by design: input spinboxes (live_rate_spin,
+    sim_output_rate_spin, default_live_rate_spin) always keep their literal
+    " Hz" suffix regardless of this setting - only read-only labels, status
+    text, and log lines route through here. A period display near 0 Hz
+    would blow up toward infinity, so periods are only ever computed above
+    a small rate floor; below it this falls back to Hz either way, since a
+    "huge number of ms" isn't a more readable answer than "0.0X Hz".
+    """
     if value is None:
         return "-"
     try:
@@ -336,7 +347,9 @@ def _format_rate(value: float | int | None) -> str:
         return "-"
     if not np.isfinite(numeric):
         return "-"
-    return f"{numeric:.2f} Hz"
+    if str(getattr(window, "_timing_display_unit", "hz") or "hz") == "ms" and numeric > 1e-6:
+        return f"{1000.0 / numeric:.{decimals}f} ms"
+    return f"{numeric:.{decimals}f} Hz"
 
 
 def _measurement_runtime_text(window: Any) -> tuple[str, str]:
@@ -514,17 +527,17 @@ class SessionDiagnosticsSnapshot:
     def from_window(cls, window: Any) -> "SessionDiagnosticsSnapshot":
         diagnostics = DiagnosticsConfig.from_window(window)
         skip_rate = window._live_skip_rate_hz() if hasattr(window, "_live_skip_rate_hz") else 0.0
-        display_rate_text = f"{float(window.live_rate_spin.value()):.2f} Hz" if hasattr(window, "live_rate_spin") else "-"
+        display_rate_text = format_rate_for_window(window, window.live_rate_spin.value()) if hasattr(window, "live_rate_spin") else "-"
         simulation_rate_text = "-"
         if hasattr(window, "sim_output_rate_spin"):
             try:
-                simulation_rate_text = f"{float(window.sim_output_rate_spin.value()):.2f} Hz"
+                simulation_rate_text = format_rate_for_window(window, window.sim_output_rate_spin.value())
             except (TypeError, ValueError):
                 simulation_rate_text = "-"
         actual_rate_text = "-"
         if getattr(window, "_actual_plot_refresh_rate_hz", None) is not None:
             window_frames = max(2, int(getattr(window, "_plot_refresh_rate_window_frames", 5)))
-            actual_rate_text = f"{float(window._actual_plot_refresh_rate_hz):.2f} Hz (recent {window_frames} frames avg)"
+            actual_rate_text = f"{format_rate_for_window(window, window._actual_plot_refresh_rate_hz)} (recent {window_frames} frames avg)"
         current_runtime_text, total_runtime_text = _measurement_runtime_text(window)
         scheduler = getattr(window, "_ui_task_scheduler", None)
         scheduler_lag_text = _timing_plain_text(getattr(scheduler, "_last_dispatch_lag_ms", None))
@@ -788,7 +801,7 @@ class SessionDiagnosticsSnapshot:
             f"  Acquisition latency: {_timing_plain_text(acquisition_ms)}",
             f"  Acquisition overhead: {_timing_plain_text(getattr(window, '_last_overhead_ms', None))}",
             f"  Frame spacing: {_timing_plain_text(getattr(window, '_last_spacing_ms', None))}",
-            f"  Effective source rate: {_format_rate(getattr(window, '_effective_raw_rate_hz', None))}",
+            f"  Effective source rate: {format_rate_for_window(window, getattr(window, '_effective_raw_rate_hz', None))}",
             f"  Dropped frames: {('-' if getattr(window, '_live_display_dropped_frames', None) is None else str(max(int(window._live_display_dropped_frames), 0)))}",
         ]
         device_timing_lines: list[str] = []
@@ -805,7 +818,7 @@ class SessionDiagnosticsSnapshot:
             display_rate_text=display_rate_text,
             simulation_rate_text=simulation_rate_text,
             actual_refresh_text=actual_rate_text,
-            skip_rate_text=f"{skip_rate:.1f} Hz",
+            skip_rate_text=format_rate_for_window(window, skip_rate, decimals=1),
             measurement_state_text="recording" if getattr(window, "_measurement_active", False) else "idle",
             current_runtime_text=current_runtime_text,
             total_runtime_text=total_runtime_text,
@@ -871,7 +884,7 @@ class SessionDiagnosticsSnapshot:
             acquisition_latency_text=_timing_plain_text(getattr(window, "_last_elapsed_ms", None)),
             acquisition_overhead_text=_timing_plain_text(getattr(window, "_last_overhead_ms", None)),
             frame_spacing_text=_timing_plain_text(getattr(window, "_last_spacing_ms", None)),
-            source_rate_text=_format_rate(getattr(window, "_effective_raw_rate_hz", None)),
+            source_rate_text=format_rate_for_window(window, getattr(window, "_effective_raw_rate_hz", None)),
             dropped_frames_text=(
                 "-"
                 if getattr(window, "_live_display_dropped_frames", None) is None

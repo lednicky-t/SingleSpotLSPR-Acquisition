@@ -26,6 +26,13 @@ from lspr_app.gui.experiment_control_runtime import (
 )
 from lspr_app.gui.main_window_headers import update_source_link_buttons
 from lspr_app.gui.main_window_state import apply_source_mode_for
+from lspr_app.gui.runtime_diagnostics import format_rate_for_window
+from lspr_app.gui.sensorgram_secondary_axis import (
+    SECONDARY_AXIS_SLOTS,
+    normalize_secondary_axis_mode,
+    secondary_axis_metric_for,
+    secondary_axis_slot_active,
+)
 from lspr_app.gui.sensorgram_time_anchor import (
     display_time_anchor,
     measurement_to_session_offset_s,
@@ -300,6 +307,44 @@ def handle_environment_reading(window, temperature_c: float | None, humidity_per
             measurement_writer.append_environment_reading(timestamp_utc_ms, temperature_c, humidity_percent)
         except Exception:
             storage_logger.exception("Failed to record environment reading to measurement file.")
+
+    # Sensorgram secondary axes (see gui/sensorgram_secondary_axis.py).
+    # Unlike FWHM/extinction below, environment readings arrive at a slow
+    # poll-timer cadence (not once per spectrum), so there's no meaningful
+    # "wasted work" cost to maintaining both temperature's and humidity's
+    # cache whenever a reading comes in, regardless of which slot(s) are
+    # currently active or which metric they're showing - keeps switching
+    # instant, with no reseed lag, at negligible extra cost.
+    if normalize_secondary_axis_mode(getattr(window, "_secondary_axis_mode", "xy")) != "xy":
+        reading_at = datetime.fromtimestamp(timestamp_utc_ms / 1000.0, tz=timezone.utc)
+        started_at = display_time_anchor(window)
+        if started_at is not None:
+            elapsed_s = max((reading_at - started_at).total_seconds(), 0.0)
+            plot_view_cache = getattr(window, "_plot_view_cache", None)
+            if plot_view_cache is not None and hasattr(plot_view_cache, "append_live_absolute_metric_point"):
+                target_points = max(int(getattr(window, "_plot_display_points", 512)), 1)
+                recent_tail_points = max(int(getattr(window, "_sensorgram_compression_recent_tail_points", 300)), 0)
+                for metric_name, value in (("temperature", temperature_c), ("humidity", humidity_percent)):
+                    if not isinstance(value, (int, float)) or not np.isfinite(float(value)):
+                        continue
+                    try:
+                        plot_view_cache.append_live_absolute_metric_point(
+                            metric_name,
+                            float(elapsed_s),
+                            float(value),
+                            target_points=target_points,
+                            recent_tail_points=recent_tail_points,
+                        )
+                    except Exception:
+                        pass
+            # Route through the same coalesced/throttled refresh path the 1Y
+            # metrics use (window._ui_task_scheduler, "earliest"-coalesced),
+            # rather than redrawing synchronously here - see the FWHM/
+            # extinction block below for why a direct, uncoalesced call is a
+            # real performance regression at high rates. Environment readings
+            # are low-rate already, but there's no reason to special-case it.
+            if hasattr(window, "_request_deferred_ui_refresh"):
+                window._request_deferred_ui_refresh(trace_plot=True)
 
 
 def flush_live_recording_results(window) -> None:
@@ -612,8 +657,8 @@ def flush_live_acquisition_results(window) -> None:
                 "raw_rate",
                 (
                     "Raw source rate "
-                    f"{window._effective_raw_rate_hz:.2f} Hz | "
-                    f"display_rate={window.live_rate_spin.value():.2f} Hz | "
+                    f"{format_rate_for_window(window, window._effective_raw_rate_hz)} | "
+                    f"display_rate={format_rate_for_window(window, window.live_rate_spin.value())} | "
                     f"sample={getattr(latest_event, 'source_sample_index', 0)}"
                 ),
                 level=logging.DEBUG,
@@ -1400,6 +1445,24 @@ def stop_measurement_run(window) -> None:
         window._update_window_mode_label()
 
 
+def _is_absorbance_plot_mode(window) -> bool:
+    """True while the spectrum plot is showing Absorbance.
+
+    "Extinction" implies an absorbance-like (-log10 transmittance) value;
+    processed.values/fit.values hold whatever PLOT_MODES the user currently
+    has selected (Dark/Reference/Sample/Absorbance), so a Y-value read
+    outside Absorbance mode would be raw counts mislabeled as extinction.
+    Per the maintainer's explicit choice, extinction is only ever recorded/
+    displayed while genuinely in Absorbance mode - not silently
+    recomputed against an absorbance curve while another mode is shown.
+    """
+    plot_modes = getattr(window, "PLOT_MODES", None)
+    plot_selector = getattr(window, "plot_selector", None)
+    if not isinstance(plot_modes, dict) or plot_selector is None:
+        return False
+    return plot_modes.get(plot_selector.currentText()) == "absorbance"
+
+
 def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | None) -> None:
     if not window._live_active:
         return
@@ -1451,6 +1514,55 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
 
     window._trace_display_cursor_s = elapsed_s + display_step_s
 
+    # Sensorgram secondary axes (see gui/sensorgram_secondary_axis.py): FWHM
+    # and extinction are both high-rate (one value per spectrum, same as the
+    # 1Y metrics above), so only maintain caches for metrics some active
+    # slot actually wants - same "don't do wasted work for what isn't
+    # visible" reasoning as the loop above. In "xy2y" mode both slots could
+    # want the same or different high-rate metrics, hence the set union.
+    active_secondary_metrics = {
+        secondary_axis_metric_for(window, slot)
+        for slot in SECONDARY_AXIS_SLOTS
+        if secondary_axis_slot_active(window, slot)
+    }
+    high_rate_metrics = active_secondary_metrics & {"fwhm", "extinction"}
+    if high_rate_metrics:
+        plot_view_cache = getattr(window, "_plot_view_cache", None)
+        target_points = max(int(getattr(window, "_plot_display_points", 512)), 1)
+        recent_tail_points = max(int(getattr(window, "_sensorgram_compression_recent_tail_points", 300)), 0)
+        for metric_name in high_rate_metrics:
+            if metric_name == "fwhm":
+                secondary_value = fit.metadata.get("fwhm_nm", np.nan) if fit is not None else processed.metadata.get("fwhm_nm", np.nan)
+            else:
+                # extinction: only meaningful while genuinely viewing
+                # Absorbance - see _is_absorbance_plot_mode. Outside that
+                # mode there's simply nothing to plot for this point, same
+                # as a metric with no data.
+                secondary_value = metrics.get("extinction_value", np.nan) if _is_absorbance_plot_mode(window) else np.nan
+            if not isinstance(secondary_value, (int, float)) or not np.isfinite(float(secondary_value)):
+                continue
+            if plot_view_cache is not None and hasattr(plot_view_cache, "append_live_absolute_metric_point"):
+                try:
+                    plot_view_cache.append_live_absolute_metric_point(
+                        metric_name,
+                        float(elapsed_s),
+                        float(secondary_value),
+                        target_points=target_points,
+                        recent_tail_points=recent_tail_points,
+                    )
+                except Exception:
+                    pass
+        # No direct redraw call here: window._request_deferred_ui_refresh(...)
+        # a few lines below (inside "if updated:", which always runs) already
+        # marks the plot dirty and goes through the same coalesced/throttled
+        # scheduler the 1Y metrics use - refresh_metric_plot's own tick (see
+        # plot_controller.py) is what actually calls update_secondary_axis_
+        # display for both slots. Calling it directly here as well used to
+        # force a full, uncoalesced curve.setData()+envelope+autoscale on
+        # every single spectrum (up to ~100 Hz) instead of once per coalesced
+        # UI refresh - the same anti-pattern already identified and fixed for
+        # the 1Y metrics in docs/sensorgram_improvements.md (P2).
+
     if updated:
         # Store the derived metric so the live archive and the recording file share the same format.
         acquired_at_unix_ms = int(round(processed.acquired_at.astimezone(timezone.utc).timestamp() * 1000.0))
@@ -1464,6 +1576,10 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
             "fwhm_nm": fit.metadata.get("fwhm_nm", np.nan) if fit is not None else processed.metadata.get("fwhm_nm", np.nan),
             "mse": fit.metadata.get("mse", np.nan) if fit is not None else np.nan,
             "snr": metrics.get("snr", np.nan),
+            # Only ever recorded while genuinely in Absorbance mode - see
+            # _is_absorbance_plot_mode - so this column is never a raw-counts
+            # value silently mislabeled as extinction.
+            "extinction_value": metrics.get("extinction_value", np.nan) if _is_absorbance_plot_mode(window) else np.nan,
         }
 
         # Always write to the session file. acquired_at_unix_ms (absolute,
@@ -1499,7 +1615,7 @@ def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | 
             (
                 "Metric point appended | points="
                 f"{last_metric_points if 'last_metric_points' in locals() else 0} | "
-                f"rate={window.live_rate_spin.value():.2f} Hz"
+                f"rate={format_rate_for_window(window, window.live_rate_spin.value())}"
             ),
             level=logging.DEBUG,
             min_interval=1.0,

@@ -64,6 +64,7 @@ from lspr_app.gui.processing_helpers import (
     processing_cache_token as _processing_cache_token,
 )
 from lspr_app.gui.main_window_logging import build_pipeline_timing_breakdown_for, _timing_plain_text
+from lspr_app.gui.runtime_diagnostics import format_rate_for_window
 from lspr_app.gui.main_window_plot_widgets import _spline_render_series
 from lspr_app.gui.workers import ProcessingRequest, ProcessingResult, ProcessingTask
 
@@ -801,15 +802,15 @@ def update_live_estimate_for(window) -> None:
     skipped_rate_hz = live_skip_rate_hz_for(window)
     proc_text = "-" if window._last_processing_ms is None else f"{window._last_processing_ms:.1f} ms"
     headroom_text = headroom_value_text_for(window._processing_headroom_ratio)
-    source_rate_text = "-" if window._effective_raw_rate_hz is None else f"{window._effective_raw_rate_hz:.1f} Hz"
-    desired_refresh_text = f"{window.live_rate_spin.value():.2f} Hz"
-    actual_refresh_text = "-" if getattr(window, "_actual_plot_refresh_rate_hz", None) is None else f"{window._actual_plot_refresh_rate_hz:.2f} Hz"
+    source_rate_text = format_rate_for_window(window, window._effective_raw_rate_hz, decimals=1)
+    desired_refresh_text = format_rate_for_window(window, window.live_rate_spin.value())
+    actual_refresh_text = format_rate_for_window(window, getattr(window, "_actual_plot_refresh_rate_hz", None))
     wait_text = ""
     if processing_debug_mode_enabled() and window._last_processing_queue_wait_ms is not None:
         wait_text = f" | wait {window._last_processing_queue_wait_ms:.1f} ms"
     window.live_estimate.setText(
         f"src {source_rate_text} | disp target {desired_refresh_text} | recent avg {actual_refresh_text} | "
-        f"proc {proc_text}{wait_text} | head {headroom_text} | skip {skipped_rate_hz:.1f} Hz"
+        f"proc {proc_text}{wait_text} | head {headroom_text} | skip {format_rate_for_window(window, skipped_rate_hz, decimals=1)}"
     )
     window._ui_refresh_state.live_estimate_dirty = False
 
@@ -820,7 +821,7 @@ def build_spectrometer_stats_text_for(window) -> str:
     effective_rate = getattr(window, "_effective_raw_rate_hz", None)
     if effective_rate is not None:
         try:
-            rate_text = f"{float(effective_rate):.1f} Hz"
+            rate_text = format_rate_for_window(window, float(effective_rate), decimals=1)
         except (TypeError, ValueError):
             rate_text = "-"
     overhead_text = _timing_plain_text(getattr(window, "_last_overhead_ms", None))

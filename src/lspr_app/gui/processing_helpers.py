@@ -8,10 +8,10 @@ from lspr_app.domain.models import ProcessingSettings, Spectrum
 from lspr_app.domain.processing import (
     build_dense_analysis_curve,
     centroid_from_curve,
-    gaussian_center_from_curve,
-    polynomial_peak_from_curve,
+    gaussian_peak_xy_from_curve,
+    polynomial_peak_xy_from_curve,
     process_spectrum,
-    quadratic_peak_from_curve,
+    quadratic_peak_xy_from_curve,
     resolve_fit_window,
 )
 
@@ -295,6 +295,7 @@ def get_analysis_metrics(
             "centroid": float("nan"),
             "gaussian_center": float("nan"),
             "poly_max": float("nan"),
+            "extinction_value": float("nan"),
             "fit_r": None,
             "mse": "-",
             "snr": None,
@@ -303,6 +304,7 @@ def get_analysis_metrics(
 
     dense_wavelengths, dense_values, _ = get_dense_analysis_curve(processed, fit, settings)
     dense_max_nm = float("nan")
+    dense_max_value = float("nan")
     if processed is not None and len(processed.wavelengths_nm) >= 3:
         # Refine the peak with a 3-point parabola fit on the real (smoothed) samples
         # within the crop window, not on the densely-interpolated display curve: the
@@ -315,47 +317,81 @@ def get_analysis_metrics(
             np.asarray(processed.values, dtype=np.float64),
             settings,
         )
-        raw_peak = quadratic_peak_from_curve(window_wavelengths, window_values)
-        if raw_peak is not None:
-            dense_max_nm = float(raw_peak)
+        raw_peak_xy = quadratic_peak_xy_from_curve(window_wavelengths, window_values)
+        if raw_peak_xy is not None:
+            dense_max_nm, dense_max_value = raw_peak_xy
     if not np.isfinite(dense_max_nm):
         if len(dense_wavelengths) >= 1 and len(dense_values) >= 1:
             dense_peak_index = _safe_nanargmax_index(dense_values)
             if dense_peak_index is not None and dense_peak_index < len(dense_wavelengths):
                 dense_max_nm = float(dense_wavelengths[dense_peak_index])
+                dense_max_value = float(dense_values[dense_peak_index])
         elif processed is not None and len(processed.wavelengths_nm) > 0:
             processed_peak_index = _safe_nanargmax_index(processed.values)
             if processed_peak_index is not None and processed_peak_index < len(processed.wavelengths_nm):
                 dense_max_nm = float(processed.wavelengths_nm[processed_peak_index])
+                dense_max_value = float(processed.values[processed_peak_index])
 
     centroid_nm = centroid_from_curve(dense_wavelengths, dense_values, threshold_fraction=settings.crop_fraction)
     if centroid_nm is None:
         centroid_nm = dense_max_nm
+    # Centroid is an intensity-weighted *position*, not the peak of any fit
+    # model (deliberately fit-independent - see
+    # test_smoothed_max_and_centroid_do_not_depend_on_fit), so there's no
+    # model to evaluate for its "height". The only physically meaningful
+    # value is the real measured (smoothed) signal at that position -
+    # interpolated from the same dense curve centroid_nm was computed from,
+    # not from the fit.
+    centroid_value = dense_max_value
+    if len(dense_wavelengths) >= 2 and np.isfinite(centroid_nm):
+        centroid_value = float(np.interp(centroid_nm, dense_wavelengths, dense_values))
 
     gaussian_center_nm = float("nan")
+    gaussian_center_value = float("nan")
     if fit is not None and fit.metadata.get("fit_method") == "gaussian":
         center = fit.metadata.get("gaussian_center_nm")
         if isinstance(center, (int, float)) and np.isfinite(float(center)):
             gaussian_center_nm = float(center)
+            # offset + amplitude*exp(0) = offset + amplitude at x=center - exact
+            # given the fitted parameters, no curve evaluation needed.
+            amplitude = fit.metadata.get("gaussian_amplitude")
+            offset = fit.metadata.get("gaussian_offset")
+            if isinstance(amplitude, (int, float)) and isinstance(offset, (int, float)):
+                candidate = float(amplitude) + float(offset)
+                if np.isfinite(candidate):
+                    gaussian_center_value = candidate
     elif needs_gaussian_metric(settings):
-        gaussian_center = gaussian_center_from_curve(dense_wavelengths, dense_values)
-        if gaussian_center is not None:
-            gaussian_center_nm = gaussian_center
+        gaussian_peak_xy = gaussian_peak_xy_from_curve(dense_wavelengths, dense_values)
+        if gaussian_peak_xy is not None:
+            gaussian_center_nm, gaussian_center_value = gaussian_peak_xy
 
     if fit is not None and processed is not None:
         peak_nm = fit.metadata.get("polynomial_peak_nm")
         if isinstance(peak_nm, (int, float)) and np.isfinite(float(peak_nm)):
             poly_peak_nm = float(peak_nm)
+            # Read the value stored alongside it (evaluated from the exact
+            # same polynomial object that produced this X - see
+            # _stable_polynomial_fit in domain/processing.py) rather than
+            # re-fitting or interpolating a sampled curve.
+            peak_value = fit.metadata.get("polynomial_peak_value")
+            poly_peak_value = (
+                float(peak_value)
+                if isinstance(peak_value, (int, float)) and np.isfinite(float(peak_value))
+                else dense_max_value
+            )
         else:
             poly_wavelengths, poly_values, _ = resolve_fit_window(
                 np.asarray(processed.wavelengths_nm, dtype=np.float64),
                 np.asarray(processed.values, dtype=np.float64),
                 settings,
             )
-            peak = polynomial_peak_from_curve(poly_wavelengths, poly_values, settings.polynomial_order)
-            poly_peak_nm = float(peak) if peak is not None else dense_max_nm
+            peak_xy = polynomial_peak_xy_from_curve(poly_wavelengths, poly_values, settings.polynomial_order)
+            if peak_xy is not None:
+                poly_peak_nm, poly_peak_value = peak_xy
+            else:
+                poly_peak_nm, poly_peak_value = dense_max_nm, dense_max_value
     else:
-        poly_peak_nm = dense_max_nm
+        poly_peak_nm, poly_peak_value = dense_max_nm, dense_max_value
 
     metric_values = {
         "smoothed_max": dense_max_nm,
@@ -363,10 +399,23 @@ def get_analysis_metrics(
         "gaussian_center": gaussian_center_nm,
         "poly_max": poly_peak_nm,
     }
+    metric_extinction_values = {
+        "smoothed_max": dense_max_value,
+        "centroid": centroid_value,
+        "gaussian_center": gaussian_center_value,
+        "poly_max": poly_peak_value,
+    }
     primary_mode = settings.spectrum_tracking_mode
     primary_peak_nm = metric_values.get(primary_mode, dense_max_nm)
     if not np.isfinite(float(primary_peak_nm)):
         primary_peak_nm = dense_max_nm
+    # extinction_value is always the Y that goes with *primary_peak_nm* -
+    # i.e. whichever of the four metrics above is the currently-tracked
+    # primary one (settings.spectrum_tracking_mode), not an independent
+    # fifth metric. See gui/sensorgram_secondary_axis.py.
+    primary_extinction_value = metric_extinction_values.get(primary_mode, dense_max_value)
+    if not np.isfinite(float(primary_extinction_value)):
+        primary_extinction_value = dense_max_value
 
     fit_r = compute_fit_r(processed, fit)
     mse = compute_fit_mse(processed, fit)
@@ -382,6 +431,7 @@ def get_analysis_metrics(
         "poly_peak_nm": poly_peak_nm,
         "primary_peak_nm": primary_peak_nm,
         **metric_values,
+        "extinction_value": primary_extinction_value,
         "fit_r": fit_r,
         "mse": mse,
         "snr": snr,

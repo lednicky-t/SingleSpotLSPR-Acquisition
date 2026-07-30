@@ -96,7 +96,7 @@ def normalize_sensorgram_line_mode(window, value: object | None = None) -> str |
 
 def normalize_sensorgram_metric_y_axis_mode(mode: object) -> str:
     normalized = str(mode or "auto").strip().lower().replace(" ", "_").replace("-", "_")
-    if normalized in {"auto", "step_2nm", "step_5nm", "step_10nm", "step_50nm"}:
+    if normalized in {"auto", "manual", "step_2nm", "step_5nm", "step_10nm", "step_50nm"}:
         return normalized
     return "auto"
 
@@ -105,6 +105,7 @@ def sensorgram_metric_y_axis_mode_label(mode: object | None = None) -> str:
     normalized = normalize_sensorgram_metric_y_axis_mode(mode)
     return {
         "auto": "Auto",
+        "manual": "Manual",
         "step_2nm": "2 nm",
         "step_5nm": "5 nm",
         "step_10nm": "10 nm",
@@ -116,8 +117,14 @@ def sensorgram_metric_y_axis_mode_tooltip(window, mode: object | None = None) ->
     normalized = normalize_sensorgram_metric_y_axis_mode(mode or getattr(window, "_sensorgram_metric_y_axis_mode", "auto"))
     if normalized == "auto":
         return (
-            "Current display: Auto y-axis. Click to switch to stepped scaling."
+            "Current display: Auto y-axis. Click to switch to Manual."
             " The sensorgram metric plot will scale itself to the data."
+        )
+    if normalized == "manual":
+        return (
+            "Current display: Manual y-axis. Click to switch to stepped scaling."
+            " The sensorgram metric plot will not auto-scale - it stays exactly"
+            " where you last set it (pan/zoom)."
         )
     step_label = sensorgram_metric_y_axis_mode_label(normalized)
     return (
@@ -141,6 +148,14 @@ def apply_sensorgram_metric_y_axis_mode(window, mode: object, *, save: bool = Fa
     if window._sensorgram_metric_y_axis_mode == "auto":
         if hasattr(window, "_request_trace_autoscale"):
             window._request_trace_autoscale()
+    elif window._sensorgram_metric_y_axis_mode == "manual":
+        # Deliberately does nothing to the Y-range: unlike the stepped
+        # presets (which snap to a quantized range once, right below), and
+        # unlike Auto (which keeps refitting to the data), Manual means
+        # "leave it exactly where the user last set it" - whatever pan/zoom
+        # was already applied, or whatever Auto/a step left it at right
+        # before switching.
+        pass
     else:
         apply_sensorgram_metric_y_axis_mode_once(window)
     if save:
@@ -223,7 +238,7 @@ def apply_sensorgram_metric_y_axis_mode_once(window) -> None:
 
 def cycle_sensorgram_metric_y_axis_mode(window) -> None:
     current = normalize_sensorgram_metric_y_axis_mode(getattr(window, "_sensorgram_metric_y_axis_mode", "auto"))
-    order = ["auto", "step_2nm", "step_5nm", "step_10nm", "step_50nm"]
+    order = ["auto", "manual", "step_2nm", "step_5nm", "step_10nm", "step_50nm"]
     try:
         index = order.index(current)
     except ValueError:
