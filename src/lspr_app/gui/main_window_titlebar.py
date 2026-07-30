@@ -8,7 +8,7 @@ from lspr_app.device.communication_models import DeviceLifecycleState
 from lspr_app.device.device_lifecycle import DeviceLifecycleController
 from lspr_app.device.device_manager import DeviceCommunicationService
 from lspr_app.device.device_types import PUMP, SELECTOR, SWITCH
-from lspr_app.gui.icon_helpers import device_status_icon
+from lspr_app.gui.icon_helpers import device_status_icon, humidity_status_icon, temperature_status_icon
 
 # DeviceCommunicationService labels are fixed for the three canonical
 # devices - see device_lifecycle._DEVICE_LABEL, which this mirrors so the
@@ -123,6 +123,31 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
         item.setLayout(item_layout)
         status_layout.addWidget(item)
         window._hw_status_items.append((key, item, icon_label, text_label))
+
+    # Ambient temperature/humidity, right after the device statuses in this
+    # same row - only shown once the Switch device actually reports a
+    # reading (see update_environment_status_strip), since not every
+    # connected Switch controller has this sensor (see
+    # gui/acquisition_controller.py's poll_environment_sensors).
+    window._environment_status_items = {}
+    for key, icon, unit in (
+        ("temperature", temperature_status_icon(), "°C"),
+        ("humidity", humidity_status_icon(), "% RH"),
+    ):
+        icon_label = QLabel(title_widget)
+        icon_label.setFixedSize(16, 16)
+        icon_label.setPixmap(icon.pixmap(16, 16))
+        text_label = QLabel(title_widget)
+        item = QWidget(title_widget)
+        item_layout = QHBoxLayout()
+        item_layout.setContentsMargins(0, 0, 0, 0)
+        item_layout.setSpacing(4)
+        item_layout.addWidget(icon_label)
+        item_layout.addWidget(text_label)
+        item.setLayout(item_layout)
+        item.setVisible(False)
+        status_layout.addWidget(item)
+        window._environment_status_items[key] = (item, icon_label, text_label, unit)
     status_cluster.setLayout(status_layout)
     status_cluster.setVisible(bool(profile.show_device_statuses))
     window._titlebar_status_cluster = status_cluster
@@ -229,5 +254,43 @@ def refresh_hw_device_status_strip(window) -> None:
         base_text = text_label.text().split(":", 1)[0].strip()
         text_label.setText(base_text if not detail else f"{base_text}: {detail}")
         tooltip = device_status_tooltip(base_text, state, port_name=port_name, detail=detail)
+        icon_label.setToolTip(tooltip)
+        text_label.setToolTip(tooltip)
+
+    if not controller.is_connected_cached(SWITCH):
+        # No Switch device connected at all - can't be reading anything from
+        # it, so drop any stale reading rather than leave a last-known value
+        # showing once it's no longer coming from a live sensor.
+        window._last_temperature_c = None
+        window._last_humidity_percent = None
+    update_environment_status_strip(window)
+
+
+def update_environment_status_strip(window) -> None:
+    """Show/hide and refresh the titlebar's temperature/humidity readings.
+
+    Each one only becomes visible once window._last_temperature_c /
+    _last_humidity_percent actually holds a value - i.e. the Switch device
+    has reported at least one reading (see acquisition_controller.py's
+    handle_environment_reading) - not every connected Switch controller has
+    this sensor (see poll_environment_sensors), so this can't just key off
+    "is a Switch connected" the way the plain device-status dots do.
+    """
+    items = getattr(window, "_environment_status_items", None)
+    if not items:
+        return
+    readings = {
+        "temperature": getattr(window, "_last_temperature_c", None),
+        "humidity": getattr(window, "_last_humidity_percent", None),
+    }
+    for key, (item, icon_label, text_label, unit) in items.items():
+        value = readings.get(key)
+        if not isinstance(value, (int, float)):
+            item.setVisible(False)
+            continue
+        item.setVisible(True)
+        text = f"{float(value):.1f}{unit}"
+        text_label.setText(text)
+        tooltip = f"{key.capitalize()}: {text}"
         icon_label.setToolTip(tooltip)
         text_label.setToolTip(tooltip)

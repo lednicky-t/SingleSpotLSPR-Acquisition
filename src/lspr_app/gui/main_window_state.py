@@ -1071,21 +1071,12 @@ def _restore_secondary_axis_slot(window, slot: str, ui_state: dict[str, object])
     if auto_button is not None:
         auto_button.set_color(metric_color)
 
-    y_range = ui_state.get(f"secondary_axis_y_range_{slot}")
-    if (
-        isinstance(y_range, list)
-        and len(y_range) == 2
-        and all(isinstance(item, (int, float)) for item in y_range)
-    ):
-        y_min = float(y_range[0])
-        y_max = float(y_range[1])
-        if y_max > y_min:
-            setattr(window, f"_secondary_axis_y_range_{slot}", [y_min, y_max])
-            view_box = getattr(window, f"secondary_axis_view{suffix}", None)
-            if view_box is not None:
-                view_box.setYRange(y_min, y_max, padding=0.0)
-                view_box._manual_y_zoom = True
-                setattr(window, f"_secondary_axis_autoscaled_{slot}", True)
+    # Deliberately does not restore a saved manual pan/zoom range at
+    # startup - every session now starts each active secondary axis
+    # autoscaled (matching the main 1Y axis's own default), so the [A]
+    # reset button isn't sitting there visible before the user has ever
+    # touched the axis. A saved secondary_axis_y_range_{slot} from a prior
+    # session is intentionally ignored here.
 
 
 def _restore_secondary_axis_state(window, ui_state: dict[str, object]) -> None:

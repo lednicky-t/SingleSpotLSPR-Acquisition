@@ -1129,8 +1129,19 @@ def render_metric_series(
             return
         if curve_pair is not None:
             min_curve, max_curve = curve_pair
+            # pyqtgraph's FillBetweenItem connects to *both* curves'
+            # sigPlotChanged and rebuilds its whole fill path on each one -
+            # setting min_curve then max_curve separately triggered that
+            # rebuild twice per tick for one logical update. Blocking
+            # min_curve's signal for its own setData() call means only
+            # max_curve's setData() below fires the rebuild, once, already
+            # seeing both curves' new data.
             if hasattr(min_curve, "setData"):
-                min_curve.setData(min_x, min_y)
+                min_curve.blockSignals(True)
+                try:
+                    min_curve.setData(min_x, min_y)
+                finally:
+                    min_curve.blockSignals(False)
             if hasattr(max_curve, "setData"):
                 max_curve.setData(max_x, max_y)
         if band is not None and hasattr(band, "setVisible"):
@@ -1164,7 +1175,6 @@ def render_metric_series(
             continue
 
         # -- pick the downsampled/cached view of this metric to actually draw --
-        series_token = build_metric_series_token(window, metric_name)
         curve.setDownsampling(auto=False, ds=curve_downsampling_factor)
         display_x = x
         display_y = y
@@ -1216,6 +1226,14 @@ def render_metric_series(
                 except Exception:
                     overlay_data = None
         elif cache is not None:
+            # Only computed here, not unconditionally at the top of the loop
+            # like before - build_metric_series_token does a real
+            # archive_path.exists() filesystem stat, and this "not live"
+            # branch is the only place series_token is actually used. During
+            # live acquisition (the `if ... _live_active` branch above) it
+            # was computed and silently discarded every tick, for every
+            # selected metric.
+            series_token = build_metric_series_token(window, metric_name)
             if view_mode == "absolute" and not trace_view_locked:
                 display_x, display_y = cache.absolute_metric_view(
                     series_token,

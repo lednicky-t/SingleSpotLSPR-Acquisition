@@ -343,6 +343,37 @@ class _SecondaryAxisMetricMenuLabel(QLabel):
         super().mousePressEvent(event)
 
 
+_SECONDARY_AXIS_METRIC_UNAVAILABLE_COLOR = "#8a98a8"
+
+
+def secondary_axis_metric_has_data(window, metric_key: str) -> bool:
+    """Whether metric_key currently has real data behind it - used to gray
+    out unavailable entries in the metric picker dropdown below.
+
+    fwhm comes straight from the spectrum, so it's available as soon as
+    anything has been processed. extinction is additionally gated on
+    Absorbance display mode - see acquisition_controller.py's
+    _is_absorbance_plot_mode docstring: it's only ever recorded while
+    genuinely viewing Absorbance, not silently recomputed against an
+    absorbance curve while another plot mode is shown, so outside that mode
+    there's nothing real to show for it either. temperature/humidity depend
+    on hardware - only a connected Switch running ArduinoValveController
+    firmware reports them (see poll_environment_sensors) - so they're only
+    available once at least one real reading has actually arrived.
+    """
+    if metric_key == "extinction":
+        from lspr_app.gui.acquisition_controller import _is_absorbance_plot_mode
+
+        return bool(_is_absorbance_plot_mode(window))
+    if metric_key == "fwhm":
+        return getattr(window, "_last_processed_plot", None) is not None
+    if metric_key == "temperature":
+        return getattr(window, "_last_temperature_c", None) is not None
+    if metric_key == "humidity":
+        return getattr(window, "_last_humidity_percent", None) is not None
+    return True
+
+
 def build_secondary_axis_metric_menu(window, parent) -> QMenu:
     """Build the [FWHM]-style dropdown, one colored entry per metric.
 
@@ -350,8 +381,16 @@ def build_secondary_axis_metric_menu(window, parent) -> QMenu:
     - the same color the curve draws in when that metric is active - so the
     menu itself previews which color you're about to switch to. Slot A and
     slot B each get their own independent instance of this same menu.
+
+    Entries for a metric with no data right now (see
+    secondary_axis_metric_has_data) are grayed out and unclickable -
+    re-evaluated fresh every time the menu opens (aboutToShow), not just
+    once at construction, so e.g. a Switch connecting mid-session or
+    switching into Absorbance mode makes its entry selectable immediately
+    the next time the dropdown is opened, without rebuilding the menu.
     """
     menu = QMenu(parent)
+    entries: dict[str, tuple[QWidgetAction, _SecondaryAxisMetricMenuLabel, str]] = {}
     for metric_key in SECONDARY_METRIC_KEYS:
         color = secondary_axis_color_for(window, metric_key)
         label = _SecondaryAxisMetricMenuLabel(secondary_axis_metric_label(metric_key), menu)
@@ -362,6 +401,19 @@ def build_secondary_axis_metric_menu(window, parent) -> QMenu:
         action.setData(metric_key)
         label.clicked.connect(lambda _checked=False, a=action: (menu.close(), a.trigger()))
         menu.addAction(action)
+        entries[metric_key] = (action, label, color)
+
+    def _refresh_availability() -> None:
+        for metric_key, (action, label, color) in entries.items():
+            available = secondary_axis_metric_has_data(window, metric_key)
+            action.setEnabled(available)
+            label.setEnabled(available)
+            entry_color = color if available else _SECONDARY_AXIS_METRIC_UNAVAILABLE_COLOR
+            label.setStyleSheet(f"QLabel {{ color: {entry_color}; padding: 4px 18px; background: transparent; }}")
+            label.setCursor(Qt.CursorShape.PointingHandCursor if available else Qt.CursorShape.ArrowCursor)
+
+    menu.aboutToShow.connect(_refresh_availability)
+    _refresh_availability()
     return menu
 
 
@@ -376,7 +428,7 @@ class _CompactLabelAxisItem(pg.AxisItem):
     "right", so the fallback is defensive, not a real code path.
     """
 
-    _LABEL_GAP_PX = 4
+    _LABEL_GAP_PX = 0
 
     def resizeEvent(self, ev=None) -> None:  # pragma: no cover - GUI runtime path
         if self.label is None or self.orientation != "right":
@@ -714,8 +766,25 @@ def _position_secondary_axis_auto_button(window, slot: str) -> None:
     if axis_rect.isEmpty() or plot_rect.isEmpty():
         return
     button_width = button.boundingRect().width()
+    button_height = button.boundingRect().height()
     x = axis_rect.center().x() - button_width / 2.0
-    y = plot_rect.top() + 3.0
+    # Vertically centered on the bottom (x) axis's own tick *value* labels,
+    # not the axis title further below - mirrors the same
+    # tickLength/tickTextOffset/textHeight math AxisItem._updateHeight uses
+    # to size itself, read from the real bottom axis so this tracks its
+    # actual font size/tick style instead of a guessed pixel offset. Can't
+    # use the bottom axis's own sceneBoundingRect() here - like the
+    # secondary axes themselves (see _build_secondary_axis_slot's grid
+    # note), it's unioned with the full linked-viewbox height because the
+    # main plot's grid lines are (intentionally) still on for this axis,
+    # so plot_rect.bottom() is the only reliable anchor for "where the
+    # viewbox ends and the axis area begins".
+    bottom_axis = window.trace_plot.getPlotItem().getAxis("bottom")
+    tick_length = max(0.0, float(bottom_axis.style.get("tickLength", 0) or 0))
+    tick_text_offset_y = float(bottom_axis.style.get("tickTextOffset", (0, 0))[1])
+    tick_text_height = float(getattr(bottom_axis, "textHeight", 0) or 0)
+    tick_value_center_y = plot_rect.bottom() + tick_length + tick_text_offset_y + tick_text_height / 2.0
+    y = tick_value_center_y - button_height / 2.0
     button.setPos(x, y)
 
 
@@ -834,7 +903,15 @@ def _update_secondary_axis_envelope(
         min_curve.setData([], [])
         max_curve.setData([], [])
         return
-    min_curve.setData(min_x, min_y)
+    # See plot_controller.py's _update_metric_envelope_overlay: FillBetweenItem
+    # rebuilds its whole fill path on either curve's sigPlotChanged, so setting
+    # both separately rebuilt it twice per tick - block min_curve's signal so
+    # only max_curve's setData() triggers the (now single) rebuild.
+    min_curve.blockSignals(True)
+    try:
+        min_curve.setData(min_x, min_y)
+    finally:
+        min_curve.blockSignals(False)
     max_curve.setData(max_x, max_y)
     band.setVisible(True)
 

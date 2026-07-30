@@ -77,12 +77,25 @@ def reload_icon() -> QIcon:
         return tint_tabler_icon(tabler_icon("refresh"), tint)
 
 
+def temperature_status_icon() -> QIcon:
+    # Same red used for this metric elsewhere (secondary-axis curve/label
+    # color - see SECONDARY_METRIC_DEFAULT_COLORS in
+    # gui/sensorgram_secondary_axis.py), so the titlebar reading is visually
+    # tied to the same metric there.
+    return tint_tabler_icon(tabler_icon("temperature"), QColor("#E45756"))
+
+
+def humidity_status_icon() -> QIcon:
+    return tint_tabler_icon(tabler_icon("droplet"), QColor("#4C78A8"))
+
+
 __all__ = [
     "bulb_icon",
     "dark_icon",
     "device_status_icon",
     "flow_icon",
     "flow_tabler_icon",
+    "humidity_status_icon",
     "math_function_tab_icon",
     "reload_icon",
     "prism_tab_icon",
@@ -92,6 +105,7 @@ __all__ = [
     "storage_compression_icon",
     "storage_save_icon",
     "tabler_icon",
+    "temperature_status_icon",
     "tint_tabler_icon",
     "transport_icon",
     "trash_icon",

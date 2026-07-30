@@ -269,6 +269,27 @@ def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
         start_plot_processing_task_for(window, pending)
 
 
+def _metric_nm_from_analysis(mode: str, analysis_metrics: dict, fallback_nm: float) -> float:
+    """Read one metric's wavelength out of an already-computed analysis-
+    metrics dict, with the same fallback chain compute_metric_nm/
+    compute_centroid_nm use (finite metric value -> dense_max_nm -> the raw
+    peak). Exists so refresh_spectrum_plot_for's marker block can reuse one
+    cached window._get_analysis_metrics() call for poly_max/gaussian_center/
+    centroid instead of each going through its own uncached
+    compute_metric_nm/compute_centroid_nm call - each of which independently
+    rebuilds the full dense analysis curve (a real cost, not free) even
+    though get_analysis_metrics_for already caches exactly this per
+    processed/fit pair. See _analysis_metrics_cache_key.
+    """
+    value = analysis_metrics.get(mode)
+    if isinstance(value, (int, float)) and np.isfinite(float(value)):
+        return float(value)
+    dense_max = analysis_metrics.get("dense_max_nm")
+    if isinstance(dense_max, (int, float)) and np.isfinite(float(dense_max)):
+        return float(dense_max)
+    return float(fallback_nm)
+
+
 def refresh_spectrum_plot_for(window, processed, fit) -> None:
     """Update the spectrum plot curves, markers, and residual display.
 
@@ -430,14 +451,19 @@ def refresh_spectrum_plot_for(window, processed, fit) -> None:
     max_index = int(finite_indices[int(np.argmax(np.asarray(processed.values, dtype=np.float64)[finite_indices]))])
     max_x = float(processed.wavelengths_nm[max_index])
     max_y = float(processed.values[max_index])
-    poly_x = window._compute_metric_nm("poly_max", processed, fit)
+    # One cached analysis-metrics lookup instead of three separate uncached
+    # compute_metric_nm/compute_centroid_nm calls below, each of which used
+    # to independently rebuild the full dense analysis curve per call -
+    # see _metric_nm_from_analysis's docstring.
+    analysis_metrics = window._get_analysis_metrics(processed, fit)
+    poly_x = _metric_nm_from_analysis("poly_max", analysis_metrics, max_x)
     if fit is not None and len(fit.wavelengths_nm) > 0:
         poly_y = float(np.interp(poly_x, fit.wavelengths_nm, fit.values))
     else:
         poly_y = float(np.interp(poly_x, processed.wavelengths_nm, processed.values))
     show_gaussian = window._needs_gaussian_metric()
     if show_gaussian:
-        gaussian_x = window._compute_metric_nm("gaussian_center", processed, fit)
+        gaussian_x = _metric_nm_from_analysis("gaussian_center", analysis_metrics, max_x)
         if fit is not None and fit.metadata.get("fit_method") == "gaussian" and len(fit.wavelengths_nm) > 0:
             gaussian_y = float(np.interp(gaussian_x, fit.wavelengths_nm, fit.values))
         else:
@@ -451,7 +477,7 @@ def refresh_spectrum_plot_for(window, processed, fit) -> None:
     else:
         window.gaussian_marker.setData([], [])
         window.gaussian_marker.hide()
-    centroid_x = window._compute_centroid_nm(processed, fit)
+    centroid_x = _metric_nm_from_analysis("centroid", analysis_metrics, max_x)
     centroid_y = float(np.interp(centroid_x, processed.wavelengths_nm, processed.values))
     window._set_scatter_marker(window.max_marker, max_x, max_y, "max")
     window._set_scatter_marker(window.poly_marker, poly_x, poly_y, "poly")

@@ -615,6 +615,12 @@ class MainWindow(QMainWindow):
         self._environment_poll_timer.setInterval(int(self._environment_poll_interval_s * 1000))
         self._environment_poll_timer.timeout.connect(self._poll_environment_sensors)
         self._environment_poll_timer.start()
+        # Latest ambient reading, for the titlebar's temperature/humidity
+        # display (see main_window_titlebar.py's environment status items) -
+        # None until the Switch device actually reports a reading, and reset
+        # to None when it disconnects, so a stale value can't linger.
+        self._last_temperature_c: float | None = None
+        self._last_humidity_percent: float | None = None
         self._measurement_active = False
         self._measurement_paused = False
         self._measurement_writer: AsyncHDF5MeasurementWriter | None = None

@@ -289,7 +289,14 @@ def handle_environment_reading(window, temperature_c: float | None, humidity_per
     """
     if temperature_c is None and humidity_percent is None:
         return  # nothing readable - e.g. a connected ItsyBitsy/Legacy controller
+    from lspr_app.gui.main_window_titlebar import update_environment_status_strip
     from lspr_app.storage.measurement_archive import ensure_session_writer
+
+    if temperature_c is not None:
+        window._last_temperature_c = float(temperature_c)
+    if humidity_percent is not None:
+        window._last_humidity_percent = float(humidity_percent)
+    update_environment_status_strip(window)
 
     timestamp_utc_ms = int(round(datetime.now(timezone.utc).timestamp() * 1000.0))
     storage_logger = logging.getLogger("lspr_app.storage")

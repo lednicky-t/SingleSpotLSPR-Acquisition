@@ -621,6 +621,38 @@ def build_active_trace_series_token(window) -> tuple[object, ...]:
 
 
 def build_metric_series_token(window, metric_name: str) -> tuple[object, ...]:
+    """Cache-key + change-detection token for one metric's display view (fed
+    into absolute_metric_view / absolute_metric_display_state).
+
+    Mirrors build_active_trace_series_token's own preference order - live
+    cache state first, then the archive file's mtime, then a bare "empty"
+    marker - so the two token builders describe the same three states the
+    same way instead of drifting apart. This one used to skip the live-state
+    check entirely and always fall to a token with a constant tail whenever
+    there was no archive file yet (only true for the sub-second window
+    before a session's first spectrum is processed - see
+    storage/measurement_archive.py's ensure_session_writer, which sets
+    window._metric_archive_path once and never clears it again). Harmless in
+    practice (absolute_metric_view's own len(x) check and
+    display_output_revision's content-based signature both already catch
+    real changes independently of this token), but inconsistent with the
+    sibling for no reason - see docs/sensorgram_improvements.md.
+
+    token[3], when present, is what absolute_metric_view reads as
+    source_revision - the live branch below surfaces the live cache's own
+    display_output_revision there so it means the same thing (worth
+    invalidating the cached view when it changes) it does for the archive
+    branch's mtime.
+    """
+    plot_view_cache = getattr(window, "_plot_view_cache", None)
+    if plot_view_cache is not None:
+        try:
+            live_state = plot_view_cache.live_absolute_metric_state(metric_name)
+        except Exception:
+            live_state = None
+        if live_state is not None:
+            revision = live_state[1] if len(live_state) > 1 else 0
+            return (str(metric_name), "live_absolute", str(live_state), int(revision))
     archive_path = getattr(window, "_metric_archive_path", None)
     archive_path = Path(archive_path).expanduser() if archive_path else None
     if archive_path is not None and archive_path.exists():
@@ -629,14 +661,7 @@ def build_metric_series_token(window, metric_name: str) -> tuple[object, ...]:
         except OSError:
             mtime_ns = 0
         return (str(metric_name), "archive", str(archive_path), int(mtime_ns))
-    # FIXME: unlike its sibling build_metric_view_token (above), this never consults
-    # plot_view_cache.live_absolute_metric_state(metric_name) and always returns an
-    # "empty" token when there's no archive - flagged during a pyflakes/ruff sweep,
-    # not fixed here since changing this token's shape/semantics could affect cache-key
-    # comparisons at both call sites (plot_controller.py) without full context on that
-    # contract. Needs a maintainer decision, not a guess.
-    plot_view_cache = getattr(window, "_plot_view_cache", None)  # noqa: F841
-    return (str(metric_name), "empty", 0, 0, 0)
+    return (str(metric_name), "empty", None)
 
 
 def _peak_preserving_downsample_indices(y: np.ndarray, target_bins: int) -> np.ndarray:
