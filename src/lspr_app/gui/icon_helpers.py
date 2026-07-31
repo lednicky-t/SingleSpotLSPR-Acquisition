@@ -89,8 +89,16 @@ def humidity_status_icon() -> QIcon:
     return tint_tabler_icon(tabler_icon("droplet"), QColor("#4C78A8"))
 
 
+def crosshair_cursor_icon() -> QIcon:
+    # Muted gray, not the overlay's normal light text color (#d7dee6) - this
+    # icon marks the cursor readout as *off*, so it should read as dimmer/
+    # inactive rather than as another live value.
+    return tint_tabler_icon(tabler_icon("crosshair"), QColor("#8a94a6"))
+
+
 __all__ = [
     "bulb_icon",
+    "crosshair_cursor_icon",
     "dark_icon",
     "device_status_icon",
     "flow_icon",

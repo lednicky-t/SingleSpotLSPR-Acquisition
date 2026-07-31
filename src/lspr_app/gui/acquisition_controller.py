@@ -3,14 +3,15 @@
 import multiprocessing as mp
 import queue
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Any
 
 import numpy as np
-from PyQt6.QtGui import QColor
-from PyQt6.QtCore import QTimer
+from PyQt6.QtGui import QColor, QPixmap
+from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import QFileDialog, QInputDialog
 
 from lspr_app.app import create_spectrometer
@@ -21,7 +22,6 @@ from lspr_app.device.simulated import SimulatedSpectrometer, SimulationParameter
 from lspr_app.gui.icon_helpers import flow_tabler_icon, math_function_tab_icon, prism_tab_icon, tint_tabler_icon, transport_icon
 from lspr_app.gui.experiment_control_runtime import (
     experiment_runtime_label,
-    experiment_runtime_snapshot,
     experiment_runtime_state_name,
 )
 from lspr_app.gui.main_window_headers import update_source_link_buttons
@@ -541,7 +541,7 @@ def handle_acquisition_success(window, kind: str, result: AcquisitionResult) -> 
         window._update_dark_reference_button_icons()
         window._log_success(f"{kind.capitalize()} spectrum acquired.")
     elif kind == "sample" and not window._live_active:
-        window._log_success("Sample spectrum acquired.")
+        window._log_success("Raw spectrum acquired.")
     elif kind == "sample":
         window._log_throttled(
             "live_sample",
@@ -549,11 +549,6 @@ def handle_acquisition_success(window, kind: str, result: AcquisitionResult) -> 
             level=logging.DEBUG,
             min_interval=1.0,
         )
-
-    if window._pending_auto_integration:
-        window._pending_auto_integration = False
-        QTimer.singleShot(0, window._auto_set_integration_time)
-        return
 
     if window._pending_source_mode is not None:
         pending_mode = window._pending_source_mode
@@ -638,6 +633,14 @@ def flush_live_acquisition_results(window) -> None:
     if latest_event.error is not None:
         if latest_event.source_epoch != window._source_epoch:
             return
+        auto_exposure_state = getattr(window, "_auto_exposure_state", None)
+        if auto_exposure_state is not None and auto_exposure_state.active:
+            _auto_exposure_finish(
+                window,
+                success=False,
+                status_text="Failed",
+                tooltip=f"Live acquisition stopped unexpectedly: {latest_event.error}",
+            )
         window._live_active = False
         window._live_worker = None
         window._handle_acquisition_error(latest_event.source_epoch, latest_event.error)
@@ -648,6 +651,10 @@ def flush_live_acquisition_results(window) -> None:
             return
         result = latest_event.result
         spectrum = result.spectrum
+        if getattr(window, "_pending_auto_exposure_start", False):
+            window._pending_auto_exposure_start = False
+            _auto_exposure_begin(window)
+        window._auto_exposure_handle_live_frame(spectrum)
         now = latest_event.produced_at_perf if latest_event.produced_at_perf is not None else perf_counter()
         window._last_elapsed_ms = result.elapsed_ms
         _update_live_source_rate_from_event(window, latest_event, now)
@@ -802,57 +809,87 @@ def flush_live_processed_results(window) -> None:
     else:
         window._processing_rate_hz = None
         window._processing_headroom_ratio = None
-    window._last_processed_plot = processed
-    window._last_fit_plot = fit
-    window._processed_cache_key = None
-    window._processed_cache_result = (processed, fit)
-    window._analysis_cache_key = None
-    window._analysis_cache_result = (
-        np.empty(0, dtype=np.float64),
-        np.empty(0, dtype=np.float64),
-        {},
-    )
-    window._analysis_metrics_cache_key = None
-    window._analysis_metrics_cache_result = {}
-    window._update_poly_warning_indicator(fit)
-    window._live_plot_update_counter = int(getattr(window, "_live_plot_update_counter", 0)) + 1
-    spectrum_render_started = perf_counter()
-    try:
-        window._refresh_spectrum_plot(processed, fit)
-        window._autoscale_spectrum_plot()
-        window._update_spectrum_stats(processed, fit)
-        spectrum_render_finished = perf_counter()
-        window._last_plot_refresh_ms = (spectrum_render_finished - spectrum_render_started) * 1000.0
-        previous_finish = getattr(window, "_last_plot_refresh_finished_at", None)
-        window._last_plot_refresh_gap_ms = (
-            None if previous_finish is None else (spectrum_render_finished - float(previous_finish)) * 1000.0
+    # This event's processed/fit always come from the live-processing
+    # worker's raw-sample transform - it has no idea about dark/reference and
+    # never computes absorbance. Rendering it unconditionally here regardless
+    # of plot_selector used to make Dark/Reference/Absorbance flash correctly
+    # for one frame (whatever enqueue_plot_processing_for had just rendered
+    # via the dropdown change), then get immediately overwritten back to raw
+    # by the very next live frame, even though the dropdown still correctly
+    # showed the other mode.
+    plot_mode = window.PLOT_MODES.get(window.plot_selector.currentText(), "sample")
+    if plot_mode == "sample":
+        window._last_processed_plot = processed
+        window._last_fit_plot = fit
+        window._processed_cache_key = None
+        window._processed_cache_result = (processed, fit)
+        window._analysis_cache_key = None
+        window._analysis_cache_result = (
+            np.empty(0, dtype=np.float64),
+            np.empty(0, dtype=np.float64),
+            {},
         )
-        window._last_plot_refresh_finished_at = spectrum_render_finished
-        refresh_timestamps = getattr(window, "_plot_refresh_timestamps", None)
-        if refresh_timestamps is None:
-            refresh_timestamps = []
+        window._analysis_metrics_cache_key = None
+        window._analysis_metrics_cache_result = {}
+        window._update_poly_warning_indicator(fit)
+        window._live_plot_update_counter = int(getattr(window, "_live_plot_update_counter", 0)) + 1
+        spectrum_render_started = perf_counter()
+        try:
+            window._refresh_spectrum_plot(processed, fit)
+            window._autoscale_spectrum_plot()
+            window._update_spectrum_stats(processed, fit)
+            spectrum_render_finished = perf_counter()
+            window._last_plot_refresh_ms = (spectrum_render_finished - spectrum_render_started) * 1000.0
+            previous_finish = getattr(window, "_last_plot_refresh_finished_at", None)
+            window._last_plot_refresh_gap_ms = (
+                None if previous_finish is None else (spectrum_render_finished - float(previous_finish)) * 1000.0
+            )
+            window._last_plot_refresh_finished_at = spectrum_render_finished
+            refresh_timestamps = getattr(window, "_plot_refresh_timestamps", None)
+            if refresh_timestamps is None:
+                refresh_timestamps = []
+                window._plot_refresh_timestamps = refresh_timestamps
+            refresh_timestamps.append(spectrum_render_finished)
+            window_frames = max(2, int(getattr(window, "_plot_refresh_rate_window_frames", 5)))
+            if len(refresh_timestamps) > window_frames:
+                refresh_timestamps = refresh_timestamps[-window_frames:]
             window._plot_refresh_timestamps = refresh_timestamps
-        refresh_timestamps.append(spectrum_render_finished)
-        window_frames = max(2, int(getattr(window, "_plot_refresh_rate_window_frames", 5)))
-        if len(refresh_timestamps) > window_frames:
-            refresh_timestamps = refresh_timestamps[-window_frames:]
-        window._plot_refresh_timestamps = refresh_timestamps
-        if len(window._plot_refresh_timestamps) >= 2:
-            first_timestamp = float(window._plot_refresh_timestamps[0])
-            last_timestamp = float(window._plot_refresh_timestamps[-1])
-            span_s = last_timestamp - first_timestamp
-            if span_s > 0:
-                window._actual_plot_refresh_rate_hz = (len(window._plot_refresh_timestamps) - 1) / span_s
+            if len(window._plot_refresh_timestamps) >= 2:
+                first_timestamp = float(window._plot_refresh_timestamps[0])
+                last_timestamp = float(window._plot_refresh_timestamps[-1])
+                span_s = last_timestamp - first_timestamp
+                if span_s > 0:
+                    window._actual_plot_refresh_rate_hz = (len(window._plot_refresh_timestamps) - 1) / span_s
+                else:
+                    window._actual_plot_refresh_rate_hz = None
             else:
                 window._actual_plot_refresh_rate_hz = None
-        else:
-            window._actual_plot_refresh_rate_hz = None
-    except Exception as exc:
-        window._log_error(f"Spectrum refresh failed: {exc}")
+        except Exception as exc:
+            window._log_error(f"Spectrum refresh failed: {exc}")
+        # Only the "sample" (raw) branch has processed/fit that actually
+        # correspond to what's on screen - see the comment above. Dark/
+        # Reference/Absorbance are rendered via enqueue_plot_processing_for
+        # below, whose own completion handler (handle_plot_processing_result_for,
+        # main_window_plotting.py) is responsible for updating stats/trace for
+        # those modes instead. Appending this raw processed/fit here
+        # unconditionally used to feed the sensorgram trace (and the "Start
+        # Tracking" button) raw-spectrum metrics even while viewing
+        # Absorbance - see the maintainer's report of tracking "the wrong
+        # plot".
+        window._append_processed_trace_history(processed, fit)
+    elif plot_mode == "absorbance":
+        # Not produced by the live-processing worker - session.set_sample()
+        # just above already refreshed session.state.absorbance from this
+        # frame, so route through the normal thread-pool processing path
+        # (enqueue_plot_processing_for) to actually display it. That path
+        # already coalesces correctly if a request from the previous frame is
+        # still in flight, same as a dropdown-triggered switch would.
+        window._enqueue_plot_processing()
+    # "dark"/"reference": intentionally left alone - both are static
+    # snapshots that don't change just because a new live sample arrived.
     refresh_state = window._ui_refresh_state
     refresh_state.live_estimate_dirty = True
     refresh_state.telemetry_dirty = True
-    window._append_processed_trace_history(processed, fit)
     if window._live_processing_worker is not None and window._live_processing_worker.is_alive() and window._live_active:
         _request_live_acquisition_poll_for(window, window._live_ui_refresh_delay_ms)
 
@@ -1060,6 +1097,15 @@ def start_live_acquisition(window) -> None:
 
 def stop_live_acquisition(window, message: str = "Live acquisition stopped.") -> None:
     try:
+        auto_exposure_state = getattr(window, "_auto_exposure_state", None)
+        if auto_exposure_state is not None and auto_exposure_state.active:
+            _auto_exposure_finish(
+                window,
+                success=False,
+                status_text="Failed",
+                tooltip="Live acquisition was stopped before auto exposure finished.",
+            )
+        window._pending_auto_exposure_start = False
         window._live_active = False
         window._live_stop_event.set()
         if hasattr(window, "_live_recording_timer"):
@@ -1173,11 +1219,25 @@ def set_measurement_buttons_enabled(window, enabled: bool) -> None:
 def set_manual_acquisition_buttons_enabled(window, enabled: bool) -> None:
     window.acquire_dark_button.setEnabled(enabled)
     window.acquire_reference_button.setEnabled(enabled)
+    # Auto-exposure needs live acquisition running (it watches the live stream -
+    # see start_auto_exposure_for), so it belongs in the same "still usable
+    # during live" bucket as dark/reference, not in set_measurement_buttons_enabled's
+    # blanket disable. Without this, start_live_acquisition's
+    # set_measurement_buttons_enabled(False) leaves the Auto button permanently
+    # disabled for as long as live acquisition runs - i.e. essentially always,
+    # once a spectrometer is connected.
+    window.auto_integration_button.setEnabled(enabled and window._source_mode == "spectrometer")
 
 
 def set_measurement_ui_locked(window, locked: bool) -> None:
     window.sim_resolution_spin.setEnabled(not locked)
     window.sim_output_rate_spin.setEnabled(not locked and window._source_mode == "simulation")
+    # Toggling tracking off mid-recording would put a gap in the measurement
+    # file's own metrics table (append_processed_trace_history is what's being
+    # gated) - disable the control entirely for the duration of the recording
+    # rather than rely on the maintainer never pressing it by mistake.
+    if hasattr(window, "start_tracking_button"):
+        window.start_tracking_button.setEnabled(not locked)
     if hasattr(window, "_set_recording_context_controls_enabled"):
         window._set_recording_context_controls_enabled(not locked)
     if locked:
@@ -1231,7 +1291,10 @@ def start_measurement_run(window) -> None:
     if window._measurement_active:
         return
 
-    signal_mode = window.plot_selector.currentText().lower()
+    # Derived via PLOT_MODES (display label -> internal kind) rather than a raw
+    # .lower() of the label text, so this stays correct regardless of what the
+    # dropdown currently displays (e.g. "Raw" instead of the old "Sample").
+    signal_mode = window.PLOT_MODES.get(window.plot_selector.currentText(), "sample")
     if signal_mode not in {"sample", "absorbance"}:
         signal_mode = "sample"
 
@@ -1473,6 +1536,14 @@ def _is_absorbance_plot_mode(window) -> bool:
 def append_processed_trace_history(window, processed: Spectrum, fit: Spectrum | None) -> None:
     if not window._live_active:
         return
+    if not getattr(window, "_sensorgram_tracking_active", False):
+        # Tracking hasn't been started (start_tracking_button) - don't plot or
+        # archive a point for whatever is currently displayed. Keeps Dark/
+        # Reference setup, or any pre-tracking fiddling with Sample/Absorbance,
+        # out of the sensorgram and out of both HDF5 metrics tables. See
+        # docs/sensorgram_improvements.md and the maintainer's workflow
+        # discussion on avoiding calibration-time artefacts in the trace.
+        return
 
     # display_time_anchor is measurement-relative while a measurement is
     # recording and session-relative otherwise (see
@@ -1685,25 +1756,61 @@ def update_window_mode_label(window) -> None:
             window._window_mode_icon_label.clear()
             window._window_mode_icon_label.setVisible(False)
         return
+    # Primary state: whether the app is actively recording a measurement,
+    # just live-previewing, or neither - plus which source is feeding it.
+    # This is "the main state" per the maintainer's explicit request; it
+    # used to show only the experiment-control plan's own run/hold/pause
+    # state ("Experiment: stopped"), which is a different concept entirely
+    # (an automated pump/valve program that may or may not be running
+    # regardless of whether a measurement is being recorded) and never
+    # mentioned the source at all outside the tooltip - so the one thing the
+    # maintainer most wanted to see at a glance wasn't there. The plan state
+    # is still appended, but only when it's actually doing something, so the
+    # common case (no plan running) stays a simple two-part label instead of
+    # always saying "stopped".
+    if bool(getattr(window, "_measurement_active", False)):
+        state_text = "Recording"
+        style = "color: #ff5b5b; font-weight: 700;"
+    elif bool(getattr(window, "_live_active", False)):
+        state_text = "Live mode"
+        style = ""
+    else:
+        state_text = "Free mode"
+        style = ""
+    text = f"{state_text} | {source_name}"
+    tooltip = f"{state_text} on the {source_name.lower()} source."
+
     running, holding, paused = _experiment_runtime_flags(window)
-    snapshot = experiment_runtime_snapshot(
-        running=running,
-        holding=holding,
-        paused=paused,
-        recording=bool(getattr(window, "_measurement_active", False)),
-        has_steps=bool(getattr(getattr(window, "_experiment_control_window", None), "_read_experiment_control_steps", lambda: [])()),
-    )
-    text = snapshot.label()
-    tooltip = snapshot.tooltip(source_name=source_name)
+    plan_state = experiment_runtime_state_name(running=running, holding=holding, paused=paused)
+    if plan_state != "stopped":
+        text += f" | Plan: {plan_state}"
+        tooltip += f" Experiment control plan is {plan_state}."
+
     window._window_mode_label.setText(text)
     window._window_mode_label.setToolTip(tooltip)
-    window._window_mode_label.setStyleSheet("")
+    window._window_mode_label.setStyleSheet(style)
     if hasattr(window, "_window_mode_icon_label"):
         if bool(getattr(profile, "show_source_icon", True)):
-            source_icon = prism_tab_icon() if window._source_mode == "spectrometer" else math_function_tab_icon()
-            window._window_mode_icon_label.setPixmap(source_icon.pixmap(16, 16))
-            window._window_mode_icon_label.setToolTip(f"{source_name} source")
-            window._window_mode_icon_label.setVisible(True)
+            if bool(getattr(window, "_measurement_active", False)):
+                # Blinks in step with the measurement-toggle button's own
+                # recording blink (_render_recording_blink_indicator calls
+                # this function on every blink tick) - a still source icon
+                # here looked identical whether or not a recording was
+                # actually in progress, easy to miss at a glance.
+                if bool(getattr(window, "_recording_blink_visible", True)):
+                    record_icon = transport_icon(window._theme_mode, "record")
+                    window._window_mode_icon_label.setPixmap(record_icon.pixmap(16, 16))
+                else:
+                    blank = QPixmap(16, 16)
+                    blank.fill(Qt.GlobalColor.transparent)
+                    window._window_mode_icon_label.setPixmap(blank)
+                window._window_mode_icon_label.setToolTip("Recording is active.")
+                window._window_mode_icon_label.setVisible(True)
+            else:
+                source_icon = prism_tab_icon() if window._source_mode == "spectrometer" else math_function_tab_icon()
+                window._window_mode_icon_label.setPixmap(source_icon.pixmap(16, 16))
+                window._window_mode_icon_label.setToolTip(f"{source_name} source")
+                window._window_mode_icon_label.setVisible(True)
         else:
             window._window_mode_icon_label.clear()
             window._window_mode_icon_label.setToolTip("")
@@ -1741,45 +1848,211 @@ def _is_recording_active(window: Any) -> bool:
     return bool(getattr(window, "_measurement_active", False))
 
 
-def auto_set_integration_time_for(window) -> None:
-    """Auto-tune the spectrometer integration time.
+AUTO_EXPOSURE_WATCHDOG_MS = 8_000
 
-    Defers to ``window._auto_set_integration_time`` for the recursive re-try
-    case so the thin wrapper stays in the call chain.
+
+@dataclass
+class _AutoExposureState:
+    """Tracks one in-progress auto-exposure run. See start_auto_exposure_for."""
+
+    active: bool = True
+    requested_time_us: int = 0
+    iteration: int = 0
+    min_us: int = 1_000
+    max_us: int = 1_000_000
+    watchdog_token: int = 0
+
+
+def _auto_exposure_finish(window, *, success: bool, status_text: str, tooltip: str) -> None:
+    state = getattr(window, "_auto_exposure_state", None)
+    if state is not None:
+        state.active = False
+    window.auto_integration_button.setEnabled(window._source_mode == "spectrometer")
+    window.integration_spin.setEnabled(True)
+    label = window.auto_integration_status_label
+    label.setText(status_text)
+    label.setToolTip(tooltip)
+    label.setStyleSheet(
+        "color: #2e7d32; font-weight: 600;" if success else "color: #c62828; font-weight: 600;"
+    )
+    if success:
+        window._log_success(f"Auto exposure finished: {tooltip}")
+        window.status_label.setText(tooltip)
+    else:
+        window._log_warning(f"Auto exposure failed: {tooltip}")
+        window.status_label.setText(f"Auto exposure failed: {tooltip}")
+
+
+def _auto_exposure_arm_watchdog(window) -> None:
+    state = window._auto_exposure_state
+    state.watchdog_token += 1
+    token = state.watchdog_token
+    QTimer.singleShot(AUTO_EXPOSURE_WATCHDOG_MS, lambda: _auto_exposure_handle_watchdog(window, token))
+
+
+def _auto_exposure_handle_watchdog(window, token: int) -> None:
+    state = getattr(window, "_auto_exposure_state", None)
+    if state is None or not state.active or state.watchdog_token != token:
+        return
+    _auto_exposure_finish(
+        window,
+        success=False,
+        status_text="Failed",
+        tooltip="No new live spectrum arrived in time. Check the live acquisition / spectrometer connection.",
+    )
+
+
+def auto_exposure_handle_live_frame_for(window, spectrum: Spectrum) -> None:
+    """Advance an in-progress auto-exposure run using the latest live frame.
+
+    Called for every live frame from flush_live_acquisition_results - a no-op
+    unless a run is active. Reads the raw sample peak directly (not the
+    processed/cropped plot data) since the goal is the detector's true
+    saturation headroom, not whatever wavelength window is being analyzed.
+    """
+    state = getattr(window, "_auto_exposure_state", None)
+    if state is None or not state.active:
+        return
+
+    metadata_ms = spectrum.metadata.get("integration_time_ms")
+    if not isinstance(metadata_ms, (int, float)) or not np.isfinite(float(metadata_ms)):
+        return
+    observed_us = int(round(float(metadata_ms) * 1000.0))
+    if abs(observed_us - state.requested_time_us) > 2:
+        # Stale frame acquired before the live worker picked up our last
+        # requested integration time - ignore it and wait for the next one.
+        return
+
+    cfg = window._auto_exposure_settings
+    max_intensity = float(window._spectrometer.max_intensity())
+    values = np.asarray(spectrum.values, dtype=np.float64)
+    peak = float(np.max(values)) if values.size else 0.0
+
+    saturation_level = cfg.saturation_fraction * max_intensity
+    band_low = cfg.target_low_fraction * max_intensity
+    target_level = 0.5 * (cfg.target_low_fraction + cfg.saturation_fraction) * max_intensity
+
+    if band_low <= peak < saturation_level:
+        _auto_exposure_finish(
+            window,
+            success=True,
+            status_text="Done",
+            tooltip=(
+                f"Integration time set to {observed_us / 1000.0:.3f} ms "
+                f"(peak {peak / max_intensity * 100:.1f}% of full scale)."
+            ),
+        )
+        return
+
+    current_us = state.requested_time_us
+    too_bright = peak >= saturation_level
+    if too_bright and current_us <= state.min_us + 1:
+        _auto_exposure_finish(
+            window,
+            success=False,
+            status_text="Failed",
+            tooltip="Light source too bright. Lower the intensity.",
+        )
+        return
+    if not too_bright and current_us >= state.max_us - 1:
+        _auto_exposure_finish(
+            window,
+            success=False,
+            status_text="Failed",
+            tooltip="Light source too dark. Check if it is turn on, optic path, etc.",
+        )
+        return
+
+    state.iteration += 1
+    if state.iteration > cfg.max_iterations:
+        _auto_exposure_finish(
+            window,
+            success=False,
+            status_text="Failed",
+            tooltip="Could not converge on a stable integration time within the allowed attempts.",
+        )
+        return
+
+    if peak <= max(max_intensity * 1e-6, 1e-9):
+        # No detectable signal at all - jump straight to the ceiling instead of
+        # a proportional step, since peak/target scaling is meaningless at zero.
+        candidate_us = state.max_us
+    else:
+        candidate_us = int(round(current_us * (target_level / peak)))
+    candidate_us = min(max(candidate_us, state.min_us), state.max_us)
+    if candidate_us == current_us:
+        candidate_us += -1 if too_bright else 1
+        candidate_us = min(max(candidate_us, state.min_us), state.max_us)
+
+    state.requested_time_us = candidate_us
+    # setValue() synchronously triggers _handle_live_setting_change, which
+    # overwrites status_label itself ("Live display window reset after
+    # settings change.") - set our own message after, not before, so it's
+    # the one actually left showing.
+    window.integration_spin.setValue(candidate_us / 1000.0)
+    window.status_label.setText(
+        f"Auto exposure: trying {candidate_us / 1000.0:.3f} ms "
+        f"(attempt {state.iteration}/{cfg.max_iterations})..."
+    )
+    _auto_exposure_arm_watchdog(window)
+
+
+def _auto_exposure_begin(window) -> None:
+    cfg = window._auto_exposure_settings
+    min_us, max_us = cfg.min_integration_time_us, cfg.max_integration_time_us
+    hw_limits = window._spectrometer.integration_time_limits_us()
+    if hw_limits is not None:
+        hw_min_us, hw_max_us = hw_limits
+        min_us = max(min_us, int(hw_min_us))
+        max_us = min(max_us, int(hw_max_us))
+
+    raw_us = int(round(window.integration_spin.value() * 1000.0))
+    current_us = min(max(raw_us, min_us), max_us)
+
+    window._auto_exposure_state = _AutoExposureState(
+        requested_time_us=current_us,
+        min_us=min_us,
+        max_us=max_us,
+    )
+    window.auto_integration_button.setEnabled(False)
+    window.integration_spin.setEnabled(False)
+    window.auto_integration_status_label.setText("")
+    window.auto_integration_status_label.setToolTip("")
+    if current_us != raw_us:
+        # The current spin value was outside the effective [min_us, max_us]
+        # search range (config bounds intersected with hardware limits) -
+        # move it in range before waiting for a matching live frame.
+        window.integration_spin.setValue(current_us / 1000.0)
+    window.status_label.setText("Auto exposure: evaluating current signal...")
+    _auto_exposure_arm_watchdog(window)
+
+
+def start_auto_exposure_for(window) -> None:
+    """Start (or queue the start of) a live auto-exposure run.
+
+    Unlike the old implementation, this never touches window._spectrometer's
+    own hardware connection or stops/restarts live acquisition: it simply
+    watches the frames the live worker is already producing and nudges the
+    integration time (via the normal integration_spin -> live worker settings
+    path) toward the target band. See auto_exposure_handle_live_frame_for for
+    the per-frame convergence logic.
     """
     if window._source_mode == "simulation":
-        window.status_label.setText("Auto integration is only available for the spectrometer source.")
-        window._log_warning("Auto integration requested while simulation source is active.")
+        window.status_label.setText("Auto exposure is only available for the spectrometer source.")
+        window._log_warning("Auto exposure requested while simulation source is active.")
         return
 
-    if window._busy:
-        window._pending_auto_integration = True
-        if window._live_active:
-            window._resume_live_after_auto_integration = True
-            window._live_active = False
-        window.status_label.setText("Auto integration queued. Waiting for current acquisition to finish...")
+    existing = getattr(window, "_auto_exposure_state", None)
+    if existing is not None and existing.active:
         return
 
-    if window._live_active:
-        window._resume_live_after_auto_integration = True
-        window._live_active = False
-        window._reset_live_accumulator()
-        window.status_label.setText("Pausing live acquisition for auto integration...")
-        QTimer.singleShot(0, window._auto_set_integration_time)
+    if not window._live_active:
+        window.status_label.setText("Auto exposure: starting live acquisition...")
+        window._pending_auto_exposure_start = True
+        window._start_live_acquisition()
         return
 
-    try:
-        tuned_ms = window._spectrometer.auto_integration_time_ms(window._current_settings())
-    except Exception as exc:
-        window._show_error(str(exc))
-        return
-
-    window.integration_spin.setValue(round(tuned_ms, 3))
-    window.status_label.setText(f"Integration time set to {tuned_ms:.3f} ms.")
-    window._log_success(f"Integration time tuned to {tuned_ms:.3f} ms.")
-    if window._resume_live_after_auto_integration:
-        window._resume_live_after_auto_integration = False
-        QTimer.singleShot(0, window._start_live_acquisition)
+    _auto_exposure_begin(window)
 
 
 def sync_simulation_backend_from_controls_for(window) -> None:

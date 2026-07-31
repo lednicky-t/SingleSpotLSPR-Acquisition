@@ -19,9 +19,9 @@ from lspr_app.gui.main_window_panels import build_spectra_processing_group, conf
 from lspr_app.gui.icon_helpers import flow_tabler_icon, tint_tabler_icon
 from lspr_app.gui.panel_help import make_help_button
 from lspr_app.gui.panel_help_text import (
-    LIGHT_SOURCE_BODY,
-    LIGHT_SOURCE_TITLE,
-    LIGHT_SOURCE_TOOLTIP,
+    SPECTRAL_SOURCE_BODY,
+    SPECTRAL_SOURCE_TITLE,
+    SPECTRAL_SOURCE_TOOLTIP,
     LOG_BODY,
     LOG_TITLE,
     LOG_TOOLTIP,
@@ -91,25 +91,40 @@ def build_main_layout_for(window) -> None:
     source_layout = QVBoxLayout()
     source_layout.setContentsMargins(0, 0, 0, 0)
     source_layout.setSpacing(6)
+    # spacing/rate/ovh (spectrometer_stats_label) reflects acquisition timing
+    # that applies equally to the Hardware and Simulation tabs - shown once,
+    # here, above both tabs, rather than duplicated inside (or missing from)
+    # either tab's own page. See build_spectrometer_page (main_window_panels.py),
+    # which used to own this row.
+    acquisition_stats_row = QWidget(window)
+    acquisition_stats_layout = QHBoxLayout()
+    acquisition_stats_layout.setContentsMargins(0, 0, 0, 0)
+    acquisition_stats_layout.setSpacing(8)
+    acquisition_stats_layout.addWidget(window.spectrometer_stats_label, 1)
+    acquisition_stats_row.setLayout(acquisition_stats_layout)
+    acquisition_stats_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    source_layout.addWidget(acquisition_stats_row)
     source_layout.addWidget(window.source_tabs)
     source_block.setLayout(source_layout)
     source_block.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
     window.source_tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
+    # plot_selector/spectrum_y_axis_format_button/show_residual_button moved
+    # into spectrum_header_layout (next to the "Processed Spectra" title,
+    # same spot as the Sensorgram title row's [Auto]/[2Y] buttons) - this row
+    # now only holds dark/reference acquisition and the freeze toggle.
     plot_bar = QHBoxLayout()
     plot_bar.setSpacing(6)
-    plot_bar.addWidget(QLabel("Plot"))
-    plot_bar.addWidget(window.plot_selector)
-    plot_bar.addWidget(window.acquire_dark_button)
     plot_bar.addWidget(window.acquire_reference_button)
-    plot_bar.addWidget(window.show_residual_button)
+    plot_bar.addWidget(window.acquire_dark_button)
+    plot_bar.addWidget(window.start_tracking_button)
     plot_bar.addWidget(window.freeze_plots_button)
     plot_bar.addStretch(1)
 
-    spectrum_stats_bar = QHBoxLayout()
-    spectrum_stats_bar.setSpacing(8)
-    spectrum_stats_bar.addWidget(window.spectrum_stats_label, 1)
-    spectrum_stats_bar.addWidget(window.spectrum_cursor_label)
+    # spectrum_stats_label/spectrum_cursor_label used to live in a row here -
+    # they're now an overlay pinned to the top-left corner of spectrum_plot
+    # itself (see _build_spectrum_and_trace_plots's overlay setup), freeing
+    # this vertical space.
 
     trace_title = QLabel("Sensorgram")
     trace_title.setObjectName("sensorgramHeaderLabel")
@@ -144,17 +159,14 @@ def build_main_layout_for(window) -> None:
     trace_left_field.addWidget(window.sensorgram_settings_button, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
     trace_left_field.addStretch(1)
 
+    # trace_stats_label/trace_cursor_label used to live in their own rows here
+    # (trace_metrics_row / a cursor column in trace_noise_cursor_row) - they're
+    # now an overlay pinned to the top-left corner of trace_plot itself (see
+    # _build_spectrum_and_trace_plots's overlay setup), so this side of the
+    # splitter now only holds the Noise controls, freeing the rest of the space.
     trace_right_field = QVBoxLayout()
     trace_right_field.setContentsMargins(0, 0, 0, 0)
     trace_right_field.setSpacing(0)
-
-    trace_metrics_row = QHBoxLayout()
-    trace_metrics_row.setContentsMargins(0, 0, 0, 0)
-    trace_metrics_row.setSpacing(6)
-    trace_metrics_row.addWidget(window.trace_stats_label, 1)
-    trace_metrics_widget = QWidget(window)
-    trace_metrics_widget.setLayout(trace_metrics_row)
-    trace_metrics_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     trace_noise_row = QHBoxLayout()
     trace_noise_row.setContentsMargins(0, 0, 0, 0)
@@ -166,22 +178,8 @@ def build_main_layout_for(window) -> None:
     trace_noise_widget.setLayout(trace_noise_row)
     trace_noise_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-    trace_noise_cursor_row = QHBoxLayout()
-    trace_noise_cursor_row.setContentsMargins(0, 0, 0, 0)
-    trace_noise_cursor_row.setSpacing(6)
-    trace_noise_cursor_row.addWidget(trace_noise_widget, 0, Qt.AlignmentFlag.AlignLeft)
-    trace_noise_cursor_row.addStretch(1)
-    trace_noise_cursor_row.addWidget(window.trace_cursor_label, 0, Qt.AlignmentFlag.AlignRight)
-
-    trace_noise_cursor_widget = QWidget(window)
-    trace_noise_cursor_widget.setLayout(trace_noise_cursor_row)
-    trace_noise_cursor_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-    trace_right_field.addWidget(trace_metrics_widget)
-    trace_right_field.addWidget(trace_noise_cursor_widget)
-    trace_metrics_widget.setFixedHeight(trace_metrics_widget.sizeHint().height())
+    trace_right_field.addWidget(trace_noise_widget)
     trace_noise_widget.setFixedHeight(trace_noise_widget.sizeHint().height())
-    trace_noise_cursor_widget.setFixedHeight(max(trace_noise_widget.sizeHint().height(), window.trace_cursor_label.sizeHint().height()))
 
     trace_left_widget = QWidget(window)
     trace_left_widget.setLayout(trace_left_field)
@@ -205,10 +203,10 @@ def build_main_layout_for(window) -> None:
     window.sensorgram_header_splitter = trace_body_splitter
 
     source_section = CollapsibleSection(
-        "Light source",
+        "Spectral source",
         source_block,
         expanded=True,
-        header_widgets=[make_help_button(LIGHT_SOURCE_TOOLTIP, title=LIGHT_SOURCE_TITLE, body=LIGHT_SOURCE_BODY)],
+        header_widgets=[make_help_button(SPECTRAL_SOURCE_TOOLTIP, title=SPECTRAL_SOURCE_TITLE, body=SPECTRAL_SOURCE_BODY)],
     )
     source_section.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
     spectra_processing_section = CollapsibleSection(
@@ -336,6 +334,9 @@ def build_main_layout_for(window) -> None:
     spectrum_header.installEventFilter(window)
     window._processed_spectra_header_label = spectrum_header
     spectrum_header_layout.addWidget(spectrum_header)
+    spectrum_header_layout.addWidget(window.plot_selector)
+    spectrum_header_layout.addWidget(window.spectrum_y_axis_format_button)
+    spectrum_header_layout.addWidget(window.show_residual_button)
     spectrum_header_layout.addStretch(1)
     spectrum_header_hide_button = _make_hide_panel_button(window, "Hide processed spectra.")
     spectrum_header_hide_button.clicked.connect(lambda _checked=False: window._activate_experiment_control_view())
@@ -343,7 +344,6 @@ def build_main_layout_for(window) -> None:
     spectrum_header_row.setLayout(spectrum_header_layout)
     spectrum_layout.addWidget(spectrum_header_row)
     spectrum_layout.addLayout(plot_bar)
-    spectrum_layout.addLayout(spectrum_stats_bar)
     spectrum_layout.addWidget(window.spectrum_plot, 1)
     spectrum_block.setLayout(spectrum_layout)
     window._spectra_block = spectrum_block
@@ -511,6 +511,7 @@ def apply_control_sizing_for(window) -> None:
         window.integration_spin,
         window.averages_spin,
         window.auto_integration_button,
+        window.auto_integration_status_label,
         window.correct_dark_check,
         window.correct_nonlinearity_check,
         window.live_rate_spin,
@@ -527,12 +528,14 @@ def apply_control_sizing_for(window) -> None:
         window.fit_window_spin,
         window.analysis_resolution_spin,
         window.plot_selector,
+        window.spectrum_y_axis_format_button,
         window.save_processing_button,
         window.load_processing_button,
         window.clear_trace_button,
         window.trace_record_button,
         window.show_residual_button,
         window.freeze_plots_button,
+        window.start_tracking_button,
         window.autoscale_spectrum_button,
         window.autoscale_trace_button,
         window.sim_resolution_spin,
@@ -540,13 +543,15 @@ def apply_control_sizing_for(window) -> None:
     for widget in tall_widgets:
         widget.setMinimumHeight(26)
 
+    # window.plot_selector is a MenuDropdownButton (QToolButton), not a
+    # QComboBox, since the "[Absorbance]" rework - it doesn't have
+    # setSizeAdjustPolicy/view(), so it's sized via tall_widgets above only.
     compact_combos = [
         window.baseline_method_combo,
         window.smoothing_method_combo,
         window.crop_method_combo,
         window.fit_method_combo,
         window.analysis_resolution_spin,
-        window.plot_selector,
     ]
     for combo in compact_combos:
         combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)

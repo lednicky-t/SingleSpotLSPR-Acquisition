@@ -7,9 +7,9 @@ place to review and keep in sync with the UI as it changes.
 
 from __future__ import annotations
 
-LIGHT_SOURCE_TITLE = "Light source"
-LIGHT_SOURCE_TOOLTIP = "Acquisition source, dark/reference capture, and integration time."
-LIGHT_SOURCE_BODY = (
+SPECTRAL_SOURCE_TITLE = "Spectral source"
+SPECTRAL_SOURCE_TOOLTIP = "Acquisition source, dark/reference capture, and integration time."
+SPECTRAL_SOURCE_BODY = (
     "Choose the acquisition source with the Spectrometer / Simulation tabs at the "
     "top of this panel.\n\n"
     "- Spectrometer: acquires from the connected device using Integration time, "
@@ -124,10 +124,11 @@ STATUS_READOUTS_BODY = (
     "display refresh rate; proc = processing time per spectrum; head = "
     "display-period / processing-time (above 1 means comfortable headroom); "
     "skip = dropped GUI updates per second.\n\n"
-    "Spectrometer device panel (Light source > Spectrometer):\n"
+    "Spectral source panel:\n"
     "- spacing / rate / ovh: last frame spacing, effective source acquisition "
     "rate, and acquisition overhead (device latency beyond the requested "
-    "integration/averaging budget).\n\n"
+    "integration/averaging budget). Applies to both the Spectrometer and "
+    "Simulation tabs.\n\n"
     "Enable the Diagnostics panel (View menu) for a fuller per-frame telemetry "
     "breakdown - queue depths, deferred-refresh timings, and more - with a tooltip "
     "on every field there."

@@ -26,17 +26,22 @@ on every attribute. See _slot_suffix.
 
 On z-order ("underlaying" the 1Y metric curves): both secondary ViewBoxes
 are top-level scene siblings of trace_plot's own PlotItem (not its
-children), and Qt paints top-level siblings strictly by zValue. The
-PlotItem's own ViewBox paints an *opaque* background (main_window_style.py's
-plot_bg) before its own curves, and that background+curves pair is one
-atomic subtree from the perspective of anything outside it - there is no
-zValue that puts a sibling "under the curves but over the background",
-only "under both" (fully hidden) or "over both" (currently drawn on top).
-So both secondary axes must stay above the PlotItem's own zValue to be
-visible at all; what's actually achievable, and what's implemented here, is
-relative ordering between the two secondary layers - slot B sits below
-slot A - so within the "extra, less important" layer, A is still the more
-prominent one and B recedes further.
+children), and Qt paints a top-level item's entire subtree as one atomic
+block relative to other top-level siblings - it can't interleave a sibling
+between two of another item's own children. pyqtgraph's ViewBox draws its
+background as exactly that: a QGraphicsRectItem *child* of the ViewBox
+(zValue -1e6, see ViewBox.setBackgroundColor), painted before the ViewBox's
+other children (the curves) but still inside that same atomic subtree. So a
+sibling ViewBox has only two options against that whole block: fully behind
+it (which meant behind the background too, i.e. invisible) or fully in
+front (drawn over the curves - the actual problem this caused). The fix:
+_build_sensorgram_plot_background gives trace_plot its own background as a
+*separate* top-level scene item (hiding the ViewBox's built-in one), so the
+real stacking order is four independent layers instead of two atomic
+blocks: background (lowest) -> secondary slot B -> secondary slot A -> the
+1Y metric curves (highest, in trace_plot_item's own subtree) - see the
+zValue assignments in _build_secondary_axis_slot and
+_build_sensorgram_plot_background.
 """
 
 from __future__ import annotations
@@ -47,7 +52,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QPen
-from PyQt6.QtWidgets import QGraphicsItem, QLabel, QMenu, QWidgetAction
+from PyQt6.QtWidgets import QGraphicsItem, QGraphicsRectItem, QLabel, QMenu, QWidgetAction
 
 
 if TYPE_CHECKING:
@@ -640,12 +645,13 @@ def _build_secondary_axis_slot(window, slot: str, axis_item) -> None:
     if not hasattr(window, f"_secondary_axis_y_range_{slot}"):
         setattr(window, f"_secondary_axis_y_range_{slot}", None)
     trace_plot_item.scene().addItem(view_box)
-    # See the module docstring's "On z-order" note: both slots must stay
-    # above the PlotItem's own zValue to be visible at all (the plot's
-    # opaque background would otherwise fully occlude them); B is kept
-    # below A so the two secondary layers still have a "less important"
-    # ordering between themselves.
-    view_box.setZValue(trace_plot_item.zValue() + (1.0 if slot == "a" else 0.5))
+    # See the module docstring's "On z-order" note: both slots sit below
+    # trace_plot_item's own zValue (so the 1Y metric curves draw on top of
+    # them) but above _build_sensorgram_plot_background's separate
+    # background item (so they're still visible against it); B stays below
+    # A so the two secondary layers keep a "less important" ordering
+    # between themselves too.
+    view_box.setZValue(trace_plot_item.zValue() - (1.0 if slot == "a" else 2.0))
 
     metric_name = secondary_axis_metric_for(window, slot)
     curve = pg.PlotDataItem(pen=_secondary_axis_pen_for_metric(window, metric_name))
@@ -702,6 +708,46 @@ def _build_secondary_axis_slot(window, slot: str, axis_item) -> None:
     _apply_secondary_axis_line_color(window, slot)
 
 
+def _build_sensorgram_plot_background(window) -> None:
+    """Give trace_plot a background that's a genuinely separate, bottom-most
+    scene layer instead of the ViewBox's built-in one - see the module
+    docstring's "On z-order" note for why that's what actually makes the
+    secondary axes render *underneath* the 1Y metric curves instead of over
+    them. Colored in sync with the current theme by
+    set_sensorgram_plot_background_color (main_window_style.py calls this
+    for trace_plot instead of the normal per-plot
+    ViewBox.setBackgroundColor call every other plot still uses).
+    """
+    trace_plot_item = window.trace_plot.getPlotItem()
+    background_item = QGraphicsRectItem()
+    background_item.setPen(pg.mkPen(None))
+    background_item.setZValue(trace_plot_item.zValue() - 10.0)
+    trace_plot_item.scene().addItem(background_item)
+    window._sensorgram_plot_background_item = background_item
+    # Our item replaces it - a visible built-in background would otherwise
+    # still sit directly behind the curves, one atomic paint with them, and
+    # occlude the secondary axes exactly as before.
+    trace_plot_item.getViewBox().setBackgroundColor(None)
+    update_sensorgram_plot_background_geometry(window)
+
+
+def update_sensorgram_plot_background_geometry(window) -> None:
+    background_item = getattr(window, "_sensorgram_plot_background_item", None)
+    if background_item is None:
+        return
+    rect = window.trace_plot.getPlotItem().vb.sceneBoundingRect()
+    if rect.isEmpty():
+        return
+    background_item.setRect(rect)
+
+
+def set_sensorgram_plot_background_color(window, color) -> None:
+    background_item = getattr(window, "_sensorgram_plot_background_item", None)
+    if background_item is None:
+        return
+    background_item.setBrush(pg.mkBrush(color))
+
+
 def build_secondary_axis_for(window) -> None:
     """Build both secondary-axis slots on window.trace_plot.
 
@@ -720,6 +766,7 @@ def build_secondary_axis_for(window) -> None:
     only knows about axes it created itself.
     """
     trace_plot_item = window.trace_plot.getPlotItem()
+    _build_sensorgram_plot_background(window)
 
     # Swap in _CompactLabelAxisItem for the built-in right axis (see that
     # class's docstring) - setAxisItems() removes the stock AxisItem
@@ -744,6 +791,7 @@ def build_secondary_axis_for(window) -> None:
 
 
 def update_secondary_axis_geometry(window) -> None:
+    update_sensorgram_plot_background_geometry(window)
     trace_vb = window.trace_plot.getPlotItem().vb
     rect = trace_vb.sceneBoundingRect()
     for slot in SECONDARY_AXIS_SLOTS:

@@ -19,6 +19,7 @@ from lspr_app.device.simulated import SimulatedSpectrometer
 from lspr_app.gui.device_lifecycle_task import DeviceDisconnectTask, DeviceLifecycleCycleTask, device_io_pool
 from lspr_app.gui.main_window_state import (
     acquisition_state_payload,
+    apply_source_mode_for,
     collapsible_section_state,
     launch_profile_settings,
     persist_acquisition_state,
@@ -28,6 +29,7 @@ from lspr_app.gui.main_window_state import (
     save_ui_state,
     schedule_acquisition_state_persist,
 )
+from lspr_app.gui.main_window_headers import update_source_link_buttons
 from lspr_app.gui.main_window_titlebar import refresh_hw_device_status_strip
 from lspr_app.storage.app_config import save_app_setting
 
@@ -370,10 +372,34 @@ def handle_hardware_init_step_for(window, event: object) -> None:
         # devices - swap it in now, before live acquisition starts, so no
         # restart is needed.
         payload = event.probe
-        if payload is not None and not isinstance(payload, SimulatedSpectrometer):
+        found_real_device = payload is not None and not isinstance(payload, SimulatedSpectrometer)
+        if found_real_device:
             window._spectrometer = payload
             window._capabilities = payload.capabilities()
         window._hardware_available = not isinstance(window._spectrometer, SimulatedSpectrometer)
+        # Repaint the Spectrometer/Simulation tab header link icons now - this
+        # used to only happen incidentally (e.g. locking/unlocking the UI for
+        # a measurement), so the icon stayed on its stale startup state
+        # (gray) until something else happened to trigger a repaint, even
+        # though _hardware_available had already flipped to True here.
+        update_source_link_buttons(window)
+        # Auto-connect to real hardware, but only as part of the initial
+        # startup scan (see MainWindow._init_runtime_state's
+        # _initial_hardware_scan_pending and handle_hardware_init_finished_for
+        # below, which clears it once that first scan completes). The
+        # maintainer's explicit policy: no spectrometer at launch -> stay on
+        # simulation (already the case - see main_window.py's construction-time
+        # fallback); spectrometer found during that same initial scan ->
+        # switch to it automatically; spectrometer connected later (e.g. via
+        # "Reinitialize hardware" after already running a while) -> do not
+        # switch automatically, since the user may be deliberately using
+        # simulation.
+        if (
+            found_real_device
+            and getattr(window, "_initial_hardware_scan_pending", False)
+            and window._source_mode != "spectrometer"
+        ):
+            apply_source_mode_for(window, "spectrometer", restart_live=True)
     elif key == PUMP:
         if event.probe is not None:
             window._discovered_pump_probe = event.probe
@@ -460,6 +486,11 @@ def handle_hardware_init_finished_for(window, report: object) -> None:
     window._emit_hardware_init_progress(100, "Hardware initialization complete.")
     finish_hardware_initialization_for(window, "Hardware initialization complete.")
     sync_experiment_control_startup_ports_for(window)
+    # The initial-scan window closes here, whether or not a spectrometer was
+    # found - any later scan (Reinitialize hardware, or a device-enablement
+    # change) must not auto-switch the active source. See
+    # handle_hardware_init_step_for's use of this flag.
+    window._initial_hardware_scan_pending = False
 
 
 def close_event_for(window, event) -> None:  # pragma: no cover - GUI runtime path
@@ -520,10 +551,12 @@ def close_event_for(window, event) -> None:  # pragma: no cover - GUI runtime pa
         ecw.close()
     window._pending_manual_kind = None
     window._pending_source_mode = None
-    window._pending_auto_integration = False
+    window._pending_auto_exposure_start = False
+    auto_exposure_state = getattr(window, "_auto_exposure_state", None)
+    if auto_exposure_state is not None:
+        auto_exposure_state.active = False
     window._resume_live_after_manual = False
     window._resume_live_after_source_switch = False
-    window._resume_live_after_auto_integration = False
     window._live_active = False
     window._simulation_refresh_timer.stop()
     window._ui_task_scheduler.clear()
@@ -590,6 +623,16 @@ def event_filter_for(window, obj, event) -> bool | None:
         if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             window._cycle_trace_stats_metric()
             return True
+    if obj is getattr(window, "spectrum_cursor_label", None):
+        event_type = event.type()
+        if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            window._toggle_spectrum_cursor_enabled()
+            return True
+    if obj is getattr(window, "trace_cursor_label", None):
+        event_type = event.type()
+        if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            window._toggle_trace_cursor_enabled()
+            return True
     if obj is getattr(window, "_processed_spectra_header_label", None):
         event_type = event.type()
         if event_type == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
@@ -642,6 +685,32 @@ def event_filter_for(window, obj, event) -> bool | None:
     if obj is window._title_bar_widget:
         event_type = event.type()
         if event_type == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+            menu_bar = getattr(window, "_menu_bar", None)
+            if menu_bar is not None:
+                # Double-clicking File/Edit/View/... (e.g. the second click of
+                # a quick click-to-open-then-click-to-close on a menu) can
+                # still land as a MouseButtonDblClick on title_widget itself
+                # rather than the menu bar - check position, not just obj
+                # identity, so only clicks outside the menu bar's own area
+                # maximize/restore the window.
+                #
+                # X-only check, not a full rect containment: menu_bar's own
+                # widget height is whatever QMenuBar's natural sizeHint is,
+                # which can be a few pixels shorter than the title bar row it
+                # sits in (it's vertically centered there, not stretched to
+                # fill it - see build_title_bar's left_cluster). A double-
+                # click landing within the menu's horizontal span but just
+                # above/below its exact rect (easy to do - the whole row
+                # reads as "the menu" to the eye) fell through this check
+                # entirely and still maximized/restored the window, per the
+                # maintainer's report. The menu bar can't usefully be
+                # double-clicked at all (it only responds to single
+                # press/release to open a menu), so treating its full
+                # horizontal span as off-limits for the whole row's height
+                # has no downside.
+                local_to_menu_bar = menu_bar.mapFromGlobal(event.globalPosition().toPoint())
+                if 0 <= local_to_menu_bar.x() <= menu_bar.width():
+                    return None
             window._toggle_window_max_restore()
             return True
         if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:

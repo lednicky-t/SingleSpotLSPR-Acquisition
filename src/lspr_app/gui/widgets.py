@@ -6,11 +6,12 @@ from time import perf_counter
 import pyqtgraph as pg
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QFontMetrics, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLayout,
+    QMenu,
     QSplitter,
     QSplitterHandle,
     QToolButton,
@@ -141,12 +142,26 @@ class FlexibleTimeAxis(pg.AxisItem):
         return result
 
 
+_SI_PREFIXES_LARGE = [(1e9, "G"), (1e6, "M"), (1e3, "k")]
+_SI_PREFIXES_SMALL = [(1e-3, "m"), (1e-6, "µ"), (1e-9, "n")]
+
+
 class ScientificAxis(pg.AxisItem):
     def __init__(self, orientation: str = "left") -> None:
         super().__init__(orientation=orientation)
         self.enableAutoSIPrefix(False)
         self._diagnostics_owner = None
         self._diagnostics_prefix = ""
+        self._format_mode = "scientific"
+
+    def set_format_mode(self, mode: str) -> None:
+        """Switch between "scientific" (6.55e+04) and "si" (65.5k) tick labels."""
+        normalized = mode if mode in {"scientific", "si"} else "scientific"
+        if self._format_mode == normalized:
+            return
+        self._format_mode = normalized
+        self.picture = None
+        self.update()
 
     def _record_tickstrings(self, count: int, elapsed_ms: float) -> None:
         owner = getattr(self, "_diagnostics_owner", None)
@@ -177,27 +192,108 @@ class ScientificAxis(pg.AxisItem):
         except Exception:
             return
 
+    @staticmethod
+    def _format_normal_range(numeric: float, abs_value: float) -> str:
+        if abs_value < 1:
+            return f"{numeric:.4f}"
+        if abs_value < 10:
+            return f"{numeric:.3f}"
+        if abs_value < 100:
+            return f"{numeric:.2f}"
+        return f"{numeric:.1f}"
+
+    def _format_scientific(self, numeric: float, abs_value: float) -> str:
+        if abs_value < 1e-2 or abs_value >= 1e4:
+            return f"{numeric:.2e}"
+        return self._format_normal_range(numeric, abs_value)
+
+    def _format_si(self, numeric: float, abs_value: float) -> str:
+        # Same magnitude boundaries as _format_scientific (>=1e4 / <1e-2
+        # switch out of plain decimal) - only the compact notation used
+        # outside that middle range differs (65.5k instead of 6.55e+04).
+        for threshold, suffix in _SI_PREFIXES_LARGE:
+            if abs_value >= threshold:
+                return f"{numeric / threshold:.3g}{suffix}"
+        if abs_value < 1e-2:
+            for threshold, suffix in _SI_PREFIXES_SMALL:
+                if abs_value >= threshold:
+                    return f"{numeric / threshold:.3g}{suffix}"
+            return f"{numeric:.2e}"  # smaller than 1 nano - vanishingly rare
+        return self._format_normal_range(numeric, abs_value)
+
     def tickStrings(self, values, scale, spacing):  # type: ignore[override]
         started = perf_counter()
+        formatter = self._format_si if self._format_mode == "si" else self._format_scientific
         labels: list[str] = []
         for value in values:
             numeric = float(value)
             abs_value = abs(numeric)
-            if abs_value == 0:
-                labels.append("0")
-            elif abs_value < 1e-2 or abs_value >= 1e4:
-                labels.append(f"{numeric:.2e}")
-            elif abs_value < 1:
-                labels.append(f"{numeric:.4f}")
-            elif abs_value < 10:
-                labels.append(f"{numeric:.3f}")
-            elif abs_value < 100:
-                labels.append(f"{numeric:.2f}")
-            else:
-                labels.append(f"{numeric:.1f}")
+            labels.append("0" if abs_value == 0 else formatter(numeric, abs_value))
         elapsed_ms = (perf_counter() - started) * 1000.0
         self._record_tickstrings(len(values), elapsed_ms)
         return labels
+
+
+class MenuDropdownButton(QToolButton):
+    """A "[Label]" QToolButton that opens a checkable popup menu on click -
+    the same interaction as the sensorgram's 2Y metric pickers
+    (secondary_axis_metric_button) - but exposes a QComboBox-like
+    currentText()/setCurrentText()/currentTextChanged surface, so it's a
+    drop-in replacement anywhere code already talks to a QComboBox in those
+    terms. blockSignals()/signalsBlocked() need no extra handling: they're
+    plain QObject methods Qt already applies to currentTextChanged since
+    it's a normal signal, C++ or Python-defined.
+    """
+
+    currentTextChanged = pyqtSignal(str)
+
+    def __init__(self, sections: list[tuple[str | None, list[str]]], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAutoRaise(True)
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._menu = QMenu(self)
+        self._group = QActionGroup(self._menu)
+        self._group.setExclusive(True)
+        self._actions: dict[str, QAction] = {}
+        first_option: str | None = None
+        for header, options in sections:
+            if header is not None:
+                self._menu.addSection(header)
+            for option in options:
+                if first_option is None:
+                    first_option = option
+                action = QAction(option, self._menu)
+                action.setCheckable(True)
+                action.triggered.connect(lambda _checked=False, text=option: self._select(text))
+                self._group.addAction(action)
+                self._menu.addAction(action)
+                self._actions[option] = action
+        self.setMenu(self._menu)
+        self._current = first_option or ""
+        if self._current:
+            self._actions[self._current].setChecked(True)
+            self.setText(f"[{self._current}]")
+
+    def _select(self, text: str) -> None:
+        if text == self._current:
+            return
+        self._current = text
+        self.setText(f"[{text}]")
+        self.currentTextChanged.emit(text)
+
+    def currentText(self) -> str:
+        return self._current
+
+    def setCurrentText(self, text: str) -> None:
+        action = self._actions.get(text)
+        if action is None or text == self._current:
+            return
+        action.setChecked(True)
+        self._current = text
+        self.setText(f"[{text}]")
+        self.currentTextChanged.emit(text)
 
 
 class CollapsibleSection(QWidget):

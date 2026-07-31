@@ -327,7 +327,71 @@ def _queue_depth_max_text(value: object) -> str:
     return str(max(numeric, 0))
 
 
-def format_rate_for_window(window: Any, value: float | int | None, *, decimals: int = 2) -> str:
+_MS_AUTO_UNIT_HIGH_THRESHOLD_MS = 1500.0
+_MS_AUTO_UNIT_LOW_THRESHOLD_MS = 1000.0
+
+
+def format_ms_auto_unit(
+    window: Any,
+    key: str,
+    value_ms: float | int | None,
+    *,
+    ms_decimals: int = 1,
+    s_decimals: int = 2,
+) -> str:
+    """Format a millisecond duration, switching to seconds once it gets
+    large enough to be unreadable as milliseconds (e.g. a "skip" period of
+    11000 ms reads far more easily as "11.00 s").
+
+    Uses hysteresis, not a single cutoff: once switched to seconds (above
+    _MS_AUTO_UNIT_HIGH_THRESHOLD_MS), it only switches back to milliseconds
+    after dropping below the *lower* _MS_AUTO_UNIT_LOW_THRESHOLD_MS - not
+    immediately after dropping back below the high threshold. A single
+    cutoff would flip units on every update for a value oscillating right
+    around it (e.g. 1480 ms, 1520 ms, 1480 ms, ...), which is far more
+    distracting than the large-number problem this is meant to fix. The gap
+    between the two thresholds is a "dead zone" where whichever unit is
+    already showing just stays, regardless of which of the two thresholds
+    the live value is closer to.
+
+    `key` identifies this particular displayed value (e.g. "spacing",
+    "skip") - each one remembers its own current unit independently on
+    `window`, since e.g. "skip" being in seconds shouldn't force "ovh" into
+    seconds too.
+    """
+    if value_ms is None:
+        return "-"
+    try:
+        value = float(value_ms)
+    except (TypeError, ValueError):
+        return "-"
+    if not np.isfinite(value):
+        return "-"
+    states = getattr(window, "_ms_auto_unit_state", None)
+    if not isinstance(states, dict):
+        states = {}
+        try:
+            window._ms_auto_unit_state = states
+        except Exception:
+            pass
+    current_unit = states.get(key, "ms")
+    if current_unit == "ms" and value > _MS_AUTO_UNIT_HIGH_THRESHOLD_MS:
+        current_unit = "s"
+    elif current_unit == "s" and value < _MS_AUTO_UNIT_LOW_THRESHOLD_MS:
+        current_unit = "ms"
+    states[key] = current_unit
+    if current_unit == "s":
+        return f"{value / 1000.0:.{s_decimals}f} s"
+    return f"{value:.{ms_decimals}f} ms"
+
+
+def format_rate_for_window(
+    window: Any,
+    value: float | int | None,
+    *,
+    decimals: int = 2,
+    auto_seconds_key: str | None = None,
+) -> str:
     """Format a Hz rate for a read-only display, honoring the user's Hz/ms
     display preference (Preferences > Appearance > "Timing display unit").
 
@@ -338,6 +402,14 @@ def format_rate_for_window(window: Any, value: float | int | None, *, decimals: 
     would blow up toward infinity, so periods are only ever computed above
     a small rate floor; below it this falls back to Hz either way, since a
     "huge number of ms" isn't a more readable answer than "0.0X Hz".
+
+    `auto_seconds_key`: opt-in only (None by default, preserving every
+    existing caller's exact output) - pass a key to additionally switch a
+    large period from ms to seconds (with hysteresis - see
+    format_ms_auto_unit) once it crosses the threshold, e.g. a "skip" period
+    at a very low skip rate. Left off for log lines and the diagnostics
+    panel, where a literal ms figure is more useful than a live-updating
+    label and there's no flicker to guard against.
     """
     if value is None:
         return "-"
@@ -348,7 +420,10 @@ def format_rate_for_window(window: Any, value: float | int | None, *, decimals: 
     if not np.isfinite(numeric):
         return "-"
     if str(getattr(window, "_timing_display_unit", "hz") or "hz") == "ms" and numeric > 1e-6:
-        return f"{1000.0 / numeric:.{decimals}f} ms"
+        period_ms = 1000.0 / numeric
+        if auto_seconds_key is not None:
+            return format_ms_auto_unit(window, auto_seconds_key, period_ms, ms_decimals=decimals)
+        return f"{period_ms:.{decimals}f} ms"
     return f"{numeric:.{decimals}f} Hz"
 
 

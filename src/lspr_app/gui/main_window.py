@@ -42,7 +42,9 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QToolButton,
     QTabWidget,
+    QGraphicsView,
     QStackedWidget,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -53,7 +55,7 @@ from lspr_app.device.device_manager import DeviceCommunicationService
 from lspr_app.device.reglo_icc import PumpProbe
 
 from lspr_app.device.simulated import SimulatedSpectrometer
-from lspr_app.domain.models import AcquisitionSettings, ProcessingSettings, Spectrum
+from lspr_app.domain.models import AcquisitionSettings, AutoExposureSettings, ProcessingSettings, Spectrum
 from lspr_app.domain.processing import set_processing_debug_mode_enabled
 from lspr_app.domain.session import MeasurementSession
 from lspr_app.storage.app_config import (
@@ -86,7 +88,6 @@ from lspr_app.gui.icon_helpers import (
     dark_icon,
     reference_icon,
     reload_icon,
-    residual_icon,
     flow_tabler_icon,
     snowflake_icon,
     storage_compression_icon,
@@ -287,10 +288,21 @@ from lspr_app.gui.main_window_plotting import (
     request_metric_autoscale_for,
     set_sensorgram_frozen_for,
     set_plots_frozen_for,
+    set_sensorgram_tracking_active_for,
+    handle_start_tracking_button_clicked_for,
     update_poly_warning_indicator_for,
     update_spectrum_stats_for,
     update_metric_stats_for,
     update_live_estimate_for,
+    apply_spectrum_y_axis_format_mode_for,
+    cycle_spectrum_y_axis_format_mode_for,
+    update_spectrum_y_axis_format_button_for,
+    build_spectrum_corner_overlay_for,
+    build_trace_corner_overlay_for,
+    reposition_spectrum_corner_overlay_for,
+    reposition_trace_corner_overlay_for,
+    toggle_spectrum_cursor_enabled_for,
+    toggle_trace_cursor_enabled_for,
 )
 from lspr_app.gui.plot_view_cache import (
     PlotViewCache,
@@ -320,7 +332,8 @@ from lspr_app.gui.main_window_logging import (
 )
 from lspr_app.gui.acquisition_controller import (
     append_processed_trace_history,
-    auto_set_integration_time_for,
+    auto_exposure_handle_live_frame_for,
+    start_auto_exposure_for,
     sync_simulation_backend_from_controls_for,
     flush_measurement_frames,
     flush_live_acquisition_results,
@@ -376,6 +389,7 @@ from lspr_app.gui.ui_helpers import (
 from lspr_app.gui.widgets import (
     ElidingLabel,
     FlexibleTimeAxis,
+    MenuDropdownButton,
     ScientificAxis,
 )
 from lspr_app.gui.main_window_plot_widgets import (
@@ -405,12 +419,27 @@ ADD_NEW_USER_LABEL = "Add new user…"
 class MainWindow(QMainWindow):
     hardware_init_progress = pyqtSignal(int, str)
     hardware_init_finished = pyqtSignal()
+    # Display label -> internal Spectrum/session kind. "sample" is kept as the
+    # internal identifier (session.py, HDF5 metadata "kind", CSV export, etc.
+    # all use it) even though the dropdown now shows "Raw" - renaming the
+    # on-disk/data-model identifier is a separate, much bigger change (touches
+    # the HDF5 schema and other apps reading it), not just a label.
     PLOT_MODES = {
-        "Dark": "dark",
-        "Reference": "reference",
-        "Sample": "sample",
+        "Raw": "sample",
         "Absorbance": "absorbance",
+        "Reference": "reference",
+        "Dark": "dark",
     }
+    # Section headers shown in plot_selector's dropdown, each followed by the
+    # display labels (above) that belong under it - see _build_plot_selector.
+    # "Live" = recomputed from every new live frame (session.set_sample() runs
+    # on every frame and set_sample() also triggers _recompute_absorbance());
+    # "Stale" = fixed snapshots that only change when you explicitly re-acquire
+    # them.
+    PLOT_MODE_SECTIONS = [
+        ("Live", ["Raw", "Absorbance"]),
+        ("Stale", ["Reference", "Dark"]),
+    ]
     TRACE_METRIC_LABELS = {
         "smoothed_max": "Smoothed max",
         "poly_max": "Polynomial max",
@@ -553,6 +582,15 @@ class MainWindow(QMainWindow):
         self._session = self._hardware_session
         self._source_mode = self._launch_profile_spec.source_mode
         self._hardware_available = not isinstance(spectrometer, SimulatedSpectrometer)
+        # Gates the auto-connect-to-spectrometer behavior in
+        # handle_hardware_init_step_for (main_window_lifecycle.py) to the
+        # very first hardware scan since launch - cleared for good in
+        # handle_hardware_init_finished_for once that first scan completes,
+        # regardless of whether it found anything. A spectrometer connected
+        # later (e.g. via "Reinitialize hardware") never auto-switches the
+        # active source, since the maintainer may be deliberately using
+        # simulation by then.
+        self._initial_hardware_scan_pending = True
         self._thread_pool = QThreadPool.globalInstance()
         self._simulation_refresh_timer = QTimer(self)
         self._simulation_refresh_timer.setSingleShot(True)
@@ -650,8 +688,9 @@ class MainWindow(QMainWindow):
         self._pending_source_mode: str | None = None
         self._resume_live_after_source_switch = False
         self._resume_live_after_manual = False
-        self._pending_auto_integration = False
-        self._resume_live_after_auto_integration = False
+        self._auto_exposure_settings = AutoExposureSettings()
+        self._auto_exposure_state = None
+        self._pending_auto_exposure_start = False
         self._display_window_ms = 0.0
         self._raw_last_finish_ts: float | None = None
         self._raw_last_sample_index: int | None = None
@@ -982,8 +1021,8 @@ class MainWindow(QMainWindow):
         self._last_ui_state_total_ms: float | None = None
         self._hardware_init_task: DeviceLifecycleCycleTask | None = None
         self._hardware_init_scheduled = False
-        self._spectrum_cursor_text = "cursor: -"
-        self._trace_cursor_text = "cursor: -"
+        self._spectrum_cursor_text = "-"
+        self._trace_cursor_text = "-"
         self._start_maximized = bool(load_app_setting("start_maximized", False))
         self._experiment_control_window: ExperimentControlWindow | None = None
         self._main_content_widget: QWidget | None = None
@@ -1133,8 +1172,13 @@ class MainWindow(QMainWindow):
         self.averages_spin.setValue(3)
 
         self.auto_integration_button = QPushButton("Auto", self)
-        self.auto_integration_button.setToolTip("Automatically set integration time.")
-        self.auto_integration_button.clicked.connect(self._auto_set_integration_time)
+        self.auto_integration_button.setToolTip(
+            "Automatically raise or lower the integration time from the live view "
+            "until the peak sits just below detector saturation."
+        )
+        self.auto_integration_button.clicked.connect(self._start_auto_exposure)
+
+        self.auto_integration_status_label = QLabel("", self)
 
         self.correct_dark_check = QCheckBox("Elec. dark correction", self)
         self.correct_dark_check.setChecked(True)
@@ -1206,12 +1250,17 @@ class MainWindow(QMainWindow):
         self.live_estimate.setFont(footer_font)
         self.spectrometer_stats_label.setFont(footer_font)
         self.telemetry_label.setFont(footer_font)
-        self.spectrum_stats_label = QLabel("peak: - | centroid: - | FWHM: - | MSE: - | R: - | S/N: -", self)
+        self.spectrum_stats_label = QLabel("peak: -<br>centroid: -<br>FWHM: -<br>MSE: -<br>R: -<br>S/N: -", self)
         self.spectrum_stats_label.setWordWrap(True)
+        # RichText so the peak/centroid/FWHM lines can be tinted to match
+        # their sensorgram trace colors (see update_spectrum_stats,
+        # plot_controller.py) - <br> instead of \n throughout, since Qt's
+        # rich-text engine collapses literal newlines like plain HTML does.
+        self.spectrum_stats_label.setTextFormat(Qt.TextFormat.RichText)
         self.spectrum_stats_label.setToolTip(
             "Spectrum stats: peak position, centroid, FWHM, fit error (MSE), fit quality (R), and signal-to-noise."
         )
-        self.spectrum_cursor_label = QLabel("cursor: -", self)
+        self.spectrum_cursor_label = QLabel("-", self)
         self.spectrum_cursor_label.setToolTip("Spectrum cursor readout under the mouse pointer.")
         self.trace_stats_label = QLabel("latest: - | min/max: - | span: - | dt -", self)
         self.trace_stats_label.setWordWrap(False)
@@ -1222,7 +1271,7 @@ class MainWindow(QMainWindow):
         )
         self.trace_stats_label.setCursor(Qt.CursorShape.PointingHandCursor)
         self.trace_stats_label.installEventFilter(self)
-        self.trace_cursor_label = QLabel("cursor: -", self)
+        self.trace_cursor_label = QLabel("-", self)
         self.trace_cursor_label.setToolTip("Metric cursor readout under the mouse pointer.")
         self.trace_noise_window_spin = InlineWheelDoubleLabel(10.0, self)
         self.trace_noise_window_spin.setObjectName("traceNoiseWindowLabel")
@@ -1237,11 +1286,17 @@ class MainWindow(QMainWindow):
         self.trace_noise_summary_label.setWordWrap(False)
         self.trace_noise_summary_label.setTextFormat(Qt.TextFormat.RichText)
         self.trace_noise_summary_label.setToolTip("Noise estimate for each trace metric over the selected window.")
-        self.show_residual_button = self._make_frameless_icon_button(
-            residual_icon(False),
-            "Show or hide the fit residual on the right axis.",
-            size=30,
-        )
+        # "[y-y]" - two Y axes sharing one X (the residual on the right axis) -
+        # matches the "[Label]" bracket-text buttons in the Sensorgram title
+        # row (spectrumPlotModeButton/spectrumYAxisFormatButton alongside it,
+        # sensorgramSecondaryAxisToggleButton over there) rather than an icon.
+        self.show_residual_button = QToolButton(self)
+        self.show_residual_button.setObjectName("spectrumResidualToggleButton")
+        self.show_residual_button.setAutoRaise(True)
+        self.show_residual_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.show_residual_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.show_residual_button.setText("[y-y]")
+        self.show_residual_button.setToolTip("Show or hide the fit residual on the right axis.")
         self.show_residual_button.setCheckable(True)
         self.show_residual_button.toggled.connect(self._handle_residual_toggle)
         self.freeze_plots_button = self._make_frameless_icon_button(
@@ -1251,6 +1306,15 @@ class MainWindow(QMainWindow):
         )
         self.freeze_plots_button.setCheckable(True)
         self.freeze_plots_button.toggled.connect(self._set_plots_frozen)
+        self.start_tracking_button = self._make_frameless_icon_button(
+            transport_icon(self._theme_mode, "play"),
+            "Start tracking the sensorgram from whatever spectrum/mode is currently shown. "
+            "Off by default: no metric points or archive rows are recorded until this is on. "
+            "Toggle off to pause tracking without losing what's already recorded.",
+            size=30,
+        )
+        self.start_tracking_button.setCheckable(True)
+        self.start_tracking_button.clicked.connect(self._handle_start_tracking_button_clicked)
         self.sensorgram_freeze_button = self._make_frameless_icon_button(
             snowflake_icon(self._theme_mode, False),
             "Freeze only the sensorgram trace so you can inspect it while acquisition continues.",
@@ -1437,10 +1501,31 @@ class MainWindow(QMainWindow):
         self.sim_slope_value = QLabel(self)
         self.sim_noise_value = QLabel(self)
 
-        self.plot_selector = QComboBox(self)
-        self.plot_selector.addItems(self.PLOT_MODES.keys())
-        self.plot_selector.setCurrentText("Sample")
+        # "[Absorbance]"-style popup picker, same widget/interaction as the
+        # sensorgram's 2Y metric buttons (secondary_axis_metric_button) - see
+        # MenuDropdownButton. Live/Stale sections come from PLOT_MODE_SECTIONS;
+        # defaults to the first option listed there ("Raw").
+        self.plot_selector = MenuDropdownButton(self.PLOT_MODE_SECTIONS, self)
+        self.plot_selector.setObjectName("spectrumPlotModeButton")
         self.plot_selector.currentTextChanged.connect(self._refresh_plot)
+
+        # "[Sci]"/"[SI]" - toggles the spectrum plot's Y-axis tick labels
+        # between scientific notation (6.55e+04) and SI-prefix notation
+        # (65.5k) - see ScientificAxis.set_format_mode.
+        self._spectrum_y_axis_format_mode = "scientific"
+        self.spectrum_y_axis_format_button = QToolButton(self)
+        self.spectrum_y_axis_format_button.setObjectName("spectrumYAxisFormatButton")
+        self.spectrum_y_axis_format_button.setAutoRaise(True)
+        self.spectrum_y_axis_format_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.spectrum_y_axis_format_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.spectrum_y_axis_format_button.clicked.connect(self._cycle_spectrum_y_axis_format_mode)
+        self._update_spectrum_y_axis_format_button()
+        self._ui_binder.bind_custom(
+            "spectrum_y_axis_format_mode",
+            get=lambda: getattr(self, "_spectrum_y_axis_format_mode", "scientific"),
+            set_=self._apply_spectrum_y_axis_format_mode,
+            default="scientific",
+        )
 
         self.source_tabs = QTabWidget(self)
 
@@ -1450,7 +1535,20 @@ class MainWindow(QMainWindow):
         self.spectrum_left_axis._diagnostics_prefix = "spectrum_left_axis"
         self.spectrum_plot = TimedPlotWidget(axisItems={"left": self.spectrum_left_axis}, background="w", paint_owner=self, paint_prefix="spectrum_plot")
         if hasattr(self.spectrum_plot, "setMenuEnabled"):
-            self.spectrum_plot.setMenuEnabled(False)
+            self.spectrum_plot.setMenuEnabled(True)
+        # pyqtgraph's default (MinimalViewportUpdate) only repaints the scene's
+        # own dirty rect on each change (e.g. just where the crosshair moved) -
+        # spectrum_stats_overlay/spectrum_cursor_overlay are translucent plain
+        # QWidgets sitting on top of the viewport (not scene items), and a
+        # partial repaint underneath them doesn't reliably recomposite them
+        # against the freshly-drawn background. That's invisible while the
+        # spectrum plot keeps getting full redraws from new data, but once
+        # frozen (no more data-driven redraws) the only remaining updates are
+        # crosshair moves, and stale/ghosted pixels became visible right where
+        # the overlay boxes sit. Forcing a full viewport repaint on every
+        # change is the standard fix for this exact translucent-overlay class
+        # of Qt bug, and is cheap here regardless (no complex content).
+        self.spectrum_plot.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         self.spectrum_plot.showGrid(x=True, y=True, alpha=0.18)
         self.spectrum_plot.setLabel("bottom", "Wavelength (nm)")
         self.spectrum_plot.setMouseEnabled(x=True, y=True)
@@ -1544,6 +1642,18 @@ class MainWindow(QMainWindow):
         self.spectrum_plot.addItem(self.poly_marker)
         self.spectrum_plot.addItem(self.gaussian_marker)
         self.spectrum_plot.addItem(self.centroid_marker)
+        # Warns when the raw signal is approaching detector saturation (its ADC
+        # full-scale count) during auto-exposure or manual integration-time tuning.
+        # Hidden outside raw-counts plot modes - see _update_saturation_line_for.
+        self.saturation_line = pg.InfiniteLine(
+            angle=0,
+            pos=0.95 * self._spectrometer.max_intensity(),
+            movable=False,
+            pen=pg.mkPen("#d32f2f", width=1.2, style=Qt.PenStyle.DashLine),
+        )
+        self.saturation_line.setVisible(False)
+        self.spectrum_plot.addItem(self.saturation_line, ignoreBounds=True)
+
         def _make_crosshair_line(angle: int) -> pg.InfiniteLine:
             return pg.InfiniteLine(angle=angle, movable=False, pen=pg.mkPen("#666666", width=1))
 
@@ -1557,6 +1667,7 @@ class MainWindow(QMainWindow):
             slot=self._handle_spectrum_mouse_moved,
         )
         self.spectrum_plot.viewport().installEventFilter(self)
+        self._build_spectrum_corner_overlay()
 
         self.trace_left_axis = ScientificAxis("left")
         self.trace_left_axis._diagnostics_owner = self
@@ -1569,6 +1680,11 @@ class MainWindow(QMainWindow):
         )
         if hasattr(self.trace_plot, "setMenuEnabled"):
             self.trace_plot.setMenuEnabled(True)
+        # See the matching comment on spectrum_plot above - same translucent
+        # corner-overlay-over-a-partially-repainted-viewport risk applies
+        # here (trace_stats_overlay/trace_cursor_overlay), just not yet
+        # observed in the same frozen-plot combination.
+        self.trace_plot.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         self.trace_plot.showGrid(x=True, y=True, alpha=0.18)
         self.trace_plot.setMouseEnabled(x=True, y=True)
         self.trace_curves = {
@@ -1606,6 +1722,7 @@ class MainWindow(QMainWindow):
             self.trace_metric_envelope_bands[metric_name] = band
             self.trace_metric_envelope_curves[metric_name] = (min_curve, max_curve)
         self.trace_plot.viewport().installEventFilter(self)
+        self._build_trace_corner_overlay()
         self.trace_legend = self.trace_plot.addLegend(offset=(10, 10))
         self.trace_legend._diagnostics_owner = self
         self.trace_legend._diagnostics_prefix = "trace_plot"
@@ -1627,6 +1744,24 @@ class MainWindow(QMainWindow):
         build_secondary_axis_for(self)
         self._style_plot_widgets()
         self._apply_sensorgram_display_style()
+
+    def _build_spectrum_corner_overlay(self) -> None:
+        build_spectrum_corner_overlay_for(self)
+
+    def _build_trace_corner_overlay(self) -> None:
+        build_trace_corner_overlay_for(self)
+
+    def _reposition_spectrum_corner_overlay(self) -> None:
+        reposition_spectrum_corner_overlay_for(self)
+
+    def _reposition_trace_corner_overlay(self) -> None:
+        reposition_trace_corner_overlay_for(self)
+
+    def _toggle_spectrum_cursor_enabled(self) -> None:
+        toggle_spectrum_cursor_enabled_for(self)
+
+    def _toggle_trace_cursor_enabled(self) -> None:
+        toggle_trace_cursor_enabled_for(self)
 
     def _build_session_summary_panel(self) -> None:
         self.session_summary = QTextEdit()
@@ -1812,6 +1947,14 @@ class MainWindow(QMainWindow):
     @_sensorgram_metric_archive_reload_pending_token.setter
     def _sensorgram_metric_archive_reload_pending_token(self, value) -> None:
         self._sensorgram_display.reload_pending_token = value
+
+    @property
+    def _sensorgram_tracking_active(self) -> bool:
+        return self._sensorgram_display.tracking_active
+
+    @_sensorgram_tracking_active.setter
+    def _sensorgram_tracking_active(self, value: bool) -> None:
+        self._sensorgram_display.tracking_active = bool(value)
 
     def _initialize_logging_ui(self) -> None:
         initialize_logging_ui_for(self)
@@ -2652,8 +2795,11 @@ class MainWindow(QMainWindow):
             axis_size,
         )
 
-    def _auto_set_integration_time(self) -> None:
-        auto_set_integration_time_for(self)
+    def _start_auto_exposure(self) -> None:
+        start_auto_exposure_for(self)
+
+    def _auto_exposure_handle_live_frame(self, spectrum: Spectrum) -> None:
+        auto_exposure_handle_live_frame_for(self, spectrum)
 
     def _start_acquisition(self, kind: str) -> None:
         start_acquisition(self, kind)
@@ -3288,6 +3434,12 @@ class MainWindow(QMainWindow):
     def _set_sensorgram_frozen(self, frozen: bool) -> None:
         set_sensorgram_frozen_for(self, frozen)
 
+    def _set_sensorgram_tracking_active(self, active: bool) -> None:
+        set_sensorgram_tracking_active_for(self, active)
+
+    def _handle_start_tracking_button_clicked(self, checked: bool) -> None:
+        handle_start_tracking_button_clicked_for(self, checked)
+
     def _clear_trace_history(self) -> None:
         clear_trace_history_for(self)
 
@@ -3442,6 +3594,15 @@ class MainWindow(QMainWindow):
 
     def _cycle_sensorgram_metric_y_axis_mode(self) -> None:
         cycle_sensorgram_metric_y_axis_mode(self)
+
+    def _update_spectrum_y_axis_format_button(self) -> None:
+        update_spectrum_y_axis_format_button_for(self)
+
+    def _apply_spectrum_y_axis_format_mode(self, mode: object) -> None:
+        apply_spectrum_y_axis_format_mode_for(self, mode)
+
+    def _cycle_spectrum_y_axis_format_mode(self) -> None:
+        cycle_spectrum_y_axis_format_mode_for(self)
 
     def _active_trace_series(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
         return active_trace_series_for(self)
@@ -3655,10 +3816,21 @@ class MainWindow(QMainWindow):
             return
         self.sensorgram_freeze_button.setIcon(snowflake_icon(self._theme_mode, self._sensorgram_frozen))
 
-    def _update_residual_button_icon(self) -> None:
-        if not hasattr(self, "show_residual_button"):
+    def _update_start_tracking_button_icon(self) -> None:
+        if not hasattr(self, "start_tracking_button"):
             return
-        self.show_residual_button.setIcon(residual_icon(self.show_residual_button.isChecked()))
+        kind = "pause" if self._sensorgram_tracking_active else "play"
+        self.start_tracking_button.setIcon(transport_icon(self._theme_mode, kind))
+
+    def _update_residual_button_icon(self) -> None:
+        # No-op now that show_residual_button is a "[y-y]" text button: its
+        # checked/unchecked color comes entirely from the
+        # #spectrumResidualToggleButton QSS rules (see main_window_style.py),
+        # which Qt already reapplies on toggle and on theme change. Kept as a
+        # callable (rather than removed) since callers across
+        # main_window_plotting.py/main_window_state.py/main_window_style.py
+        # still call it unconditionally after those events.
+        return
 
     def _update_secondary_axis_geometry(self) -> None:
         update_secondary_axis_geometry(self)

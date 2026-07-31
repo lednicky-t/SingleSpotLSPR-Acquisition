@@ -16,6 +16,14 @@ class SensorgramDisplayState:
     reload_task: "MetricArchiveReloadTask | None" = None
     reload_request_token: tuple[object, ...] | None = None
     reload_pending_token: tuple[object, ...] | None = None
+    # Off by default every session/app start - no sensorgram point is built
+    # (and no metrics row is written to either HDF5 file) until the user
+    # explicitly starts tracking via the spectrum plot's toggle button. See
+    # append_processed_trace_history in acquisition_controller.py. A pausable
+    # toggle, not a one-shot latch: turning it off again stops new points
+    # without discarding history already recorded, so a mid-run detour back
+    # to Dark/Reference doesn't have to be followed by a full Clear.
+    tracking_active: bool = False
 
     def begin_measurement(self) -> None:
         """Atomic transition for start_measurement_run().

@@ -76,11 +76,14 @@ def ensure_session_writer(window: Any, spectrum: Any = None) -> Any:
     session_name = getattr(getattr(window, "_session", None), "name", None) or "session"
     started_at = getattr(window, "_live_trace_started_at", None) or spectrum.acquired_at
 
+    # Derived via PLOT_MODES (display label -> internal kind), not a raw
+    # .lower() of the label text, so this stays correct regardless of what the
+    # dropdown currently displays (e.g. "Raw" instead of the old "Sample").
     signal_mode = "sample"
     try:
-        text = window.plot_selector.currentText().lower()
-        if text in {"sample", "absorbance"}:
-            signal_mode = text
+        mode = window.PLOT_MODES.get(window.plot_selector.currentText())
+        if mode in {"sample", "absorbance"}:
+            signal_mode = mode
     except Exception:
         pass
 

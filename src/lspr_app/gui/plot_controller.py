@@ -16,7 +16,7 @@ from lspr_app.gui.main_window_sensorgram import (
     normalize_sensorgram_time_axis_mode,
     sensorgram_time_axis_label_text,
 )
-from lspr_app.gui.sensorgram_secondary_axis import update_secondary_axis_display
+from lspr_app.gui.sensorgram_secondary_axis import secondary_axis_color_for, update_secondary_axis_display
 from lspr_app.gui.plot_view_cache import (
     build_metric_series_token,
     downsample_metric_series_for_view as _downsample_metric_series_for_view,
@@ -1430,42 +1430,140 @@ def _show_trace_plot_unavailable(window, *, axis_mode: str) -> None:
     window._visible_trace_mode = axis_mode
 
 
-def update_spectrum_stats(window, processed: Spectrum | None, fit: Spectrum | None) -> None:
-    if processed is None:
-        window.spectrum_stats_label.setText("peak: - | centroid: - | FWHM: - | MSE: - | R: - | S/N: -")
-        window.spectrum_cursor_label.setText("cursor: -")
-        return
+_SPECTRUM_STATS_PLACEHOLDER = "peak: -<br>centroid: -<br>FWHM: -<br>MSE: -<br>R: -<br>S/N: -"
 
-    peak_mode = window._current_processing_settings().spectrum_tracking_mode
-    label_map = {
-        "smoothed_max": "S_Max",
-        "poly_max": "P_Max",
-        "gaussian_center": "G_Ctr",
-        "centroid": "Cent",
-    }
-    analysis = window._get_analysis_metrics(processed, fit)
-    primary_peak = analysis.get("primary_peak_nm", float("nan"))
-    centroid = analysis.get("centroid_nm", float("nan"))
-    fit_r = analysis.get("fit_r")
-    mse = analysis.get("mse", "-")
-    snr = analysis.get("snr")
-    fwhm = analysis.get("fwhm", "-")
-    if not isinstance(primary_peak, (int, float)) or not np.isfinite(float(primary_peak)):
-        primary_peak = window._compute_peak_metric_nm(processed, fit)
-    if not isinstance(centroid, (int, float)) or not np.isfinite(float(centroid)):
-        centroid = window._compute_centroid_nm(processed, fit)
-    window.spectrum_stats_label.setText(
-        f"{label_map.get(peak_mode, 'peak')}: {float(primary_peak):.3f} nm"
-        f" | centroid: {float(centroid):.3f} nm"
-        f" | FWHM: {fwhm}"
-        f" | MSE: {mse}"
-        f" | R: {fit_r if fit_r is not None else '-'}"
-        f" | S/N: {snr if snr is not None else '-'}"
-    )
-    window.spectrum_cursor_label.setText(window._spectrum_cursor_text)
+
+def _spectrum_cursor_display_text(window) -> str | None:
+    """Text for spectrum_cursor_label while its cursor readout is enabled, or
+    None while disabled - callers must treat None as "leave the label alone"
+    rather than blanking it, since while disabled the label is instead
+    showing a small crosshair icon (see toggle_spectrum_cursor_enabled_for /
+    _show_cursor_off_state in main_window_plotting.py); calling setText here
+    would clobber that icon on every stats/mouse-move refresh.
+    """
+    if not getattr(window, "_spectrum_cursor_enabled", True):
+        return None
+    return getattr(window, "_spectrum_cursor_text", "-")
+
+
+def _sync_spectrum_cursor_label(window) -> None:
+    text = _spectrum_cursor_display_text(window)
+    if text is not None:
+        window.spectrum_cursor_label.setText(text)
+
+
+def _resize_corner_overlay_for_new_text(window, reposition_method_name: str) -> None:
+    """Re-run a corner overlay's adjustSize()+move() after its label text
+    changed. The overlay containers are floating widgets positioned by
+    explicit geometry (see _make_corner_overlay_container/_reposition_corner_overlay
+    in main_window_plotting.py), not managed by a parent layout, so nothing
+    resizes them automatically when their label's text (and therefore
+    sizeHint) changes - only a ViewBox sigResized signal did, via
+    reposition_spectrum_corner_overlay_for/reposition_trace_corner_overlay_for.
+    That left the box sized for whatever text it last saw at the previous
+    resize (typically the short "-" startup placeholder), clipping real
+    values until some unrelated resize happened to fix it. Calling this
+    after every setText keeps the box correctly sized immediately. Guarded
+    with getattr/callable since plot_controller.py's stats functions are
+    also exercised in unit tests against minimal fake windows that don't
+    define these methods.
+    """
+    reposition = getattr(window, reposition_method_name, None)
+    if callable(reposition):
+        reposition()
+
+
+def update_spectrum_stats(window, processed: Spectrum | None, fit: Spectrum | None) -> None:
+    try:
+        if processed is None:
+            window.spectrum_stats_label.setText(_SPECTRUM_STATS_PLACEHOLDER)
+            _sync_spectrum_cursor_label(window)
+            return
+
+        peak_mode = window._current_processing_settings().spectrum_tracking_mode
+        analysis = window._get_analysis_metrics(processed, fit)
+        fit_r = analysis.get("fit_r")
+        mse = analysis.get("mse", "-")
+        snr = analysis.get("snr")
+        fwhm = analysis.get("fwhm", "-")
+
+        # Show every peak-position metric currently selected/visible on the
+        # sensorgram (same set and order as its own legend - see
+        # _selected_trace_metrics), not just whichever one happens to be the
+        # "primary" tracked mode plus a hardcoded centroid line. Before this,
+        # a metric plotted right there on the sensorgram (S_Max is visible by
+        # default) could be entirely missing from the spectrum panel if the
+        # primary tracking mode was set to something else - see the
+        # maintainer's report ("missing s_max metric"). The primary mode is
+        # always included even if somehow not in the selected set, since
+        # that's the one value actually being archived to the trace/session
+        # file (append_processed_trace_history), and bolded to mark it as
+        # such - same convention trace_stats_label already uses for its own
+        # primary metric.
+        short_labels = getattr(window, "TRACE_METRIC_SHORT_LABELS", {})
+        trace_metric_colors = getattr(window, "TRACE_METRIC_COLORS", {})
+        selected_metrics_fn = getattr(window, "_selected_trace_metrics", None)
+        selected_metrics = list(selected_metrics_fn()) if callable(selected_metrics_fn) else ["smoothed_max", "centroid"]
+        if peak_mode not in selected_metrics:
+            selected_metrics = [peak_mode, *selected_metrics]
+
+        compute_metric = getattr(window, "_compute_metric_nm", None)
+        peak_lines = []
+        for metric_name in selected_metrics:
+            value = analysis.get(metric_name, float("nan"))
+            if (not isinstance(value, (int, float)) or not np.isfinite(float(value))) and callable(compute_metric):
+                value = compute_metric(metric_name, processed, fit)
+            value_text = f"{float(value):.3f} nm" if isinstance(value, (int, float)) and np.isfinite(float(value)) else "-"
+            label_text = short_labels.get(metric_name, metric_name)
+            color = trace_metric_colors.get(metric_name, "#d7dee6")
+            is_primary = metric_name == peak_mode
+            peak_lines.append(
+                f"{_metric_label_span(label_text, color, bold=is_primary)}: "
+                f"{_metric_label_span(value_text, color, bold=is_primary)}"
+            )
+
+        # FWHM/MSE/R/S-N have no sensorgram trace selection of their own -
+        # FWHM still gets its secondary-axis color (see the maintainer's
+        # earlier color-consistency request), MSE/R/S-N stay in the box's
+        # plain default color.
+        fwhm_color = secondary_axis_color_for(window, "fwhm")
+        lines = [
+            *peak_lines,
+            f"{_metric_label_span('FWHM', fwhm_color)}: {_metric_label_span(str(fwhm), fwhm_color)}",
+            f"MSE: {escape(str(mse))}",
+            f"R: {escape(str(fit_r if fit_r is not None else '-'))}",
+            f"S/N: {escape(str(snr if snr is not None else '-'))}",
+        ]
+        window.spectrum_stats_label.setText("<br>".join(lines))
+        _sync_spectrum_cursor_label(window)
+    finally:
+        _resize_corner_overlay_for_new_text(window, "_reposition_spectrum_corner_overlay")
+
+
+def _trace_cursor_display_text(window) -> str | None:
+    """See _spectrum_cursor_display_text - same None-while-disabled contract
+    so a stats/mouse-move refresh doesn't clobber the crosshair icon shown
+    while the trace plot's cursor readout is off.
+    """
+    if not getattr(window, "_trace_cursor_enabled", True):
+        return None
+    return getattr(window, "_trace_cursor_text", "-")
+
+
+def _sync_trace_cursor_label(window) -> None:
+    text = _trace_cursor_display_text(window)
+    if text is not None:
+        window.trace_cursor_label.setText(text)
 
 
 def update_metric_stats(window) -> None:
+    try:
+        _update_metric_stats_body(window)
+    finally:
+        _resize_corner_overlay_for_new_text(window, "_reposition_trace_corner_overlay")
+
+
+def _update_metric_stats_body(window) -> None:
     started = perf_counter()
     series = window._active_trace_series()
     metric_name = window._trace_stats_metric()
@@ -1486,14 +1584,14 @@ def update_metric_stats(window) -> None:
         if not series:
             window.trace_stats_label.setText(f"{_metric_label_span(metric_label, metric_color)}: - | min/max: - | span: - | dt -")
             window.trace_noise_summary_label.setText("noise: -")
-            window.trace_cursor_label.setText("cursor: -")
+            _sync_trace_cursor_label(window)
             return
         visible_series = [tuple(np.asarray(item, dtype=np.float64) for item in series_values) for series_values in series.values()]
 
     if not visible_series:
         window.trace_stats_label.setText(f"{_metric_label_span(metric_label, metric_color)}: - | min/max: - | span: - | dt -")
         window.trace_noise_summary_label.setText("noise: -")
-        window.trace_cursor_label.setText("cursor: -")
+        _sync_trace_cursor_label(window)
         return
 
     selected_metrics = list(window._selected_trace_metrics())
@@ -1513,7 +1611,7 @@ def update_metric_stats(window) -> None:
     if len(x_values) == 0 or len(y_values) == 0:
         window.trace_stats_label.setText(f"{_metric_label_span(metric_label, metric_color)}: - | min/max: - | span: - | dt -")
         window.trace_noise_summary_label.setText("noise: -")
-        window.trace_cursor_label.setText("cursor: -")
+        _sync_trace_cursor_label(window)
         return
 
     y_min = float(np.min(y_values))
@@ -1558,7 +1656,7 @@ def update_metric_stats(window) -> None:
         f" | compr.: {escape(compression_level_text)}"
     )
     window.trace_noise_summary_label.setText(" | ".join(noise_chunks))
-    window.trace_cursor_label.setText(window._trace_cursor_text)
+    _sync_trace_cursor_label(window)
 
     if bool(getattr(window, "_deep_timing_enabled", False)):
         elapsed_ms = (perf_counter() - started) * 1000.0
@@ -1596,8 +1694,8 @@ def handle_spectrum_mouse_moved(window, event) -> None:
         y = float(mouse_point.y())
     window.spectrum_vline.setPos(x)
     window.spectrum_hline.setPos(y)
-    window._spectrum_cursor_text = f"cursor: {x:.3f} nm, {y:.3f}"
-    window.spectrum_cursor_label.setText(window._spectrum_cursor_text)
+    window._spectrum_cursor_text = f"{x:.3f} nm, {y:.3f}"
+    _sync_spectrum_cursor_label(window)
 
 
 def handle_metric_mouse_moved(window, event) -> None:
@@ -1626,8 +1724,8 @@ def handle_metric_mouse_moved(window, event) -> None:
     window.trace_vline.setPos(x)
     window.trace_hline.setPos(y)
     cursor_x = _sensorgram_format_time_value(window, _sensorgram_time_axis_mode(window), float(x))
-    window._trace_cursor_text = f"cursor: {cursor_x}, {y:.3f} nm"
-    window.trace_cursor_label.setText(window._trace_cursor_text)
+    window._trace_cursor_text = f"{cursor_x}, {y:.3f} nm"
+    _sync_trace_cursor_label(window)
 
 
 _current_trace_view_state = _current_metric_view_state

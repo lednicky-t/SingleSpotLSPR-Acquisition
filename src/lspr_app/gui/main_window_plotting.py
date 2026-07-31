@@ -9,7 +9,7 @@ from pyqtgraph import exporters as _pg_exporters
 
 from lspr_app.gui.main_window_startup_diagnostics import notify_startup_data_rendered_for as _notify_startup_data_rendered
 
-from PyQt6.QtWidgets import QFileDialog
+from PyQt6.QtWidgets import QFileDialog, QMessageBox, QVBoxLayout, QWidget
 
 from lspr_app.storage.csv_export import export_spectrum_to_csv as _export_spectrum_to_csv
 
@@ -17,10 +17,10 @@ import numpy as np
 
 from lspr_app.domain.models import ProcessingSettings, Spectrum
 from lspr_app.domain.processing import fit_processed_spectrum, processing_debug_mode_enabled
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QPixmap
+from PyQt6.QtCore import Qt, QPointF
+from PyQt6.QtGui import QColor
 
-from lspr_app.gui.icon_helpers import math_function_tab_icon, prism_tab_icon, transport_icon
+from lspr_app.gui.icon_helpers import crosshair_cursor_icon
 from lspr_app.gui.plot_controller import (
     apply_processing_range_to_spectrum_plot as _apply_processing_range_to_spectrum_plot,
     flush_deferred_display_refreshes as _flush_deferred_display_refreshes,
@@ -259,9 +259,23 @@ def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
     try:
         refresh_spectrum_plot_for(window, processed, fit)
         window._autoscale_spectrum_plot()
+        # The "sample" (raw) live path (acquisition_controller.py,
+        # handle_live_processing_result) updates spectrum_stats_label and the
+        # sensorgram trace itself for that mode. This is the equivalent
+        # completion point for Dark/Reference/Absorbance - without this,
+        # spectrum_stats_label stayed frozen on whatever it last showed in
+        # Sample mode, and the sensorgram trace/"Start Tracking" button never
+        # saw Absorbance data at all (it only ever received the raw
+        # processed/fit - see the comment removed from that call site).
+        window._update_spectrum_stats(processed, fit)
     except Exception as exc:
         window._log_error(f"Spectrum refresh failed: {exc}")
     window._update_poly_warning_indicator(fit)
+    plot_mode = window.PLOT_MODES.get(window.plot_selector.currentText())
+    if plot_mode == "absorbance":
+        # Dark/Reference are static snapshots - excluded from the trace/
+        # tracking on purpose, same as the raw live path already does.
+        window._append_processed_trace_history(processed, fit)
     window._request_deferred_ui_refresh(trace_plot=True, live_estimate=True, telemetry=True, trace_label="Metric position (nm)")
     if window._pending_plot_request is not None:
         pending = window._pending_plot_request
@@ -288,6 +302,39 @@ def _metric_nm_from_analysis(mode: str, analysis_metrics: dict, fallback_nm: flo
     if isinstance(dense_max, (int, float)) and np.isfinite(float(dense_max)):
         return float(dense_max)
     return float(fallback_nm)
+
+
+_RAW_COUNTS_Y_LABEL = "Intensity (counts)"
+SATURATION_WARNING_FRACTION = 0.95
+
+
+def _update_saturation_line_for(window, processed) -> None:
+    """Position the red saturation-warning line at 95% of the detector's full scale.
+
+    Only meaningful for raw hardware counts (not simulation "a.u." values or the
+    derived Absorbance plot), since those are not bounded by the spectrometer's
+    ADC bit depth.
+    """
+    saturation_line = getattr(window, "saturation_line", None)
+    if saturation_line is None:
+        return
+    if processed is None or processed.y_label != _RAW_COUNTS_Y_LABEL:
+        saturation_line.setVisible(False)
+        return
+    max_intensity_fn = getattr(window._spectrometer, "max_intensity", None)
+    if not callable(max_intensity_fn):
+        saturation_line.setVisible(False)
+        return
+    try:
+        max_intensity = float(max_intensity_fn())
+    except Exception:
+        saturation_line.setVisible(False)
+        return
+    if not np.isfinite(max_intensity) or max_intensity <= 0:
+        saturation_line.setVisible(False)
+        return
+    saturation_line.setPos(max_intensity * SATURATION_WARNING_FRACTION)
+    saturation_line.setVisible(True)
 
 
 def refresh_spectrum_plot_for(window, processed, fit) -> None:
@@ -347,6 +394,7 @@ def refresh_spectrum_plot_for(window, processed, fit) -> None:
         window._last_spectrum_fit_update_ms = None
         window._last_spectrum_marker_update_ms = None
         window._last_spectrum_residual_update_ms = None
+        _update_saturation_line_for(window, None)
         return
 
     low = float(np.min(processed.wavelengths_nm))
@@ -439,6 +487,7 @@ def refresh_spectrum_plot_for(window, processed, fit) -> None:
             window._spectrum_fit_region_bounds = fit_bounds
     window._update_residual_axis_visibility(residual_visible)
     window.spectrum_plot.setLabel("left", processed.y_label)
+    _update_saturation_line_for(window, processed)
     marker_started = perf_counter()
     finite_indices = np.flatnonzero(np.isfinite(processed.values))
     if len(finite_indices) == 0:
@@ -712,6 +761,61 @@ def set_sensorgram_frozen_for(window, frozen: bool) -> None:
     window._schedule_acquisition_state_persist()
 
 
+def set_sensorgram_tracking_active_for(window, active: bool) -> None:
+    """Toggle whether new spectra feed the sensorgram trace/metrics archive.
+
+    Off by default - append_processed_trace_history (acquisition_controller.py)
+    returns immediately while this is False, so nothing is plotted or written
+    to either HDF5 file's metrics table until the user explicitly starts
+    tracking on whatever spectrum/mode is currently displayed. Pausable: this
+    only gates future points, existing history is untouched either way, so
+    turning tracking off and back on (e.g. to glance back at Dark/Reference
+    mid-run) just leaves a time gap rather than losing anything.
+    """
+    window._sensorgram_tracking_active = active
+    if hasattr(window, "start_tracking_button") and window.start_tracking_button.isChecked() != active:
+        window.start_tracking_button.blockSignals(True)
+        window.start_tracking_button.setChecked(active)
+        window.start_tracking_button.blockSignals(False)
+    if hasattr(window, "_update_start_tracking_button_icon"):
+        window._update_start_tracking_button_icon()
+    if hasattr(window, "status_label"):
+        tracking_state = "started" if active else "paused"
+        window.status_label.setText(f"Sensorgram tracking {tracking_state}.")
+    window._schedule_acquisition_state_persist()
+
+
+def handle_start_tracking_button_clicked_for(window, checked: bool) -> None:
+    """Confirm before pausing an already-active tracking session.
+
+    Starting tracking (checked=True) always proceeds immediately - it's a
+    deliberate, low-risk action. Pausing an active session (checked=False)
+    breaks the trace's continuity (a time gap, per
+    set_sensorgram_tracking_active_for's own docstring), which is easy to
+    trigger by an accidental click, so confirm first. If the maintainer backs
+    out, the button's check state (already flipped by Qt before this click
+    handler runs) is reverted without ever calling
+    set_sensorgram_tracking_active_for - tracking keeps running.
+    """
+    was_active = bool(getattr(window, "_sensorgram_tracking_active", False))
+    if not checked and was_active:
+        answer = QMessageBox.question(
+            window,
+            "Pause tracking",
+            "Are you sure to pause tracing the spectra?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            button = getattr(window, "start_tracking_button", None)
+            if button is not None:
+                button.blockSignals(True)
+                button.setChecked(True)
+                button.blockSignals(False)
+            return
+    set_sensorgram_tracking_active_for(window, checked)
+
+
 def clear_trace_history_for(window) -> None:
     if hasattr(window, "_metric_render_display_cache"):
         window._metric_render_display_cache.clear()
@@ -828,15 +932,21 @@ def update_live_estimate_for(window) -> None:
     skipped_rate_hz = live_skip_rate_hz_for(window)
     proc_text = "-" if window._last_processing_ms is None else f"{window._last_processing_ms:.1f} ms"
     headroom_text = headroom_value_text_for(window._processing_headroom_ratio)
-    source_rate_text = format_rate_for_window(window, window._effective_raw_rate_hz, decimals=1)
-    desired_refresh_text = format_rate_for_window(window, window.live_rate_spin.value())
-    actual_refresh_text = format_rate_for_window(window, getattr(window, "_actual_plot_refresh_rate_hz", None))
+    # auto_seconds_key: in "ms" timing-display mode, a low rate's period can
+    # get large enough to be unreadable (e.g. live_rate_spin allows down to
+    # 0.1 Hz, a 10 s period) - each gets its own key so switching one to
+    # seconds (with hysteresis, see format_ms_auto_unit) doesn't affect the
+    # others.
+    source_rate_text = format_rate_for_window(window, window._effective_raw_rate_hz, decimals=1, auto_seconds_key="live_estimate_src")
+    desired_refresh_text = format_rate_for_window(window, window.live_rate_spin.value(), decimals=1, auto_seconds_key="live_estimate_disp_target")
+    actual_refresh_text = format_rate_for_window(window, getattr(window, "_actual_plot_refresh_rate_hz", None), decimals=1, auto_seconds_key="live_estimate_recent_avg")
     wait_text = ""
     if processing_debug_mode_enabled() and window._last_processing_queue_wait_ms is not None:
         wait_text = f" | wait {window._last_processing_queue_wait_ms:.1f} ms"
     window.live_estimate.setText(
         f"src {source_rate_text} | disp target {desired_refresh_text} | recent avg {actual_refresh_text} | "
-        f"proc {proc_text}{wait_text} | head {headroom_text} | skip {format_rate_for_window(window, skipped_rate_hz, decimals=1)}"
+        f"proc {proc_text}{wait_text} | head {headroom_text} | "
+        f"skip {format_rate_for_window(window, skipped_rate_hz, decimals=1, auto_seconds_key='live_estimate_skip')}"
     )
     window._ui_refresh_state.live_estimate_dirty = False
 
@@ -889,6 +999,10 @@ def refresh_telemetry_for(window) -> None:
 
 def build_pipeline_telemetry_text_for(window) -> str:
     breakdown = build_pipeline_timing_breakdown_for(window)
+    # Deliberately plain ms throughout, not auto-unit - see
+    # test_build_pipeline_telemetry_text_uses_plain_times: this is a
+    # side-by-side performance breakdown, where consistent units across all
+    # fields matter more than any single field being "readable" on its own.
     spacing = _timing_plain_text(getattr(window, "_last_spacing_ms", None))
     overhead = _timing_plain_text(getattr(window, "_last_overhead_ms", None))
     latency = _timing_plain_text(getattr(window, "_last_elapsed_ms", None))
@@ -975,41 +1089,6 @@ def handle_simulation_output_rate_change_for(window) -> None:
         window._request_deferred_ui_refresh(trace_plot=True, live_estimate=True)
         window._request_trace_autoscale()
     window._schedule_acquisition_state_persist()
-
-
-def update_window_mode_label_for(window) -> None:
-    if not hasattr(window, "_window_mode_label"):
-        return
-    source_name = "Spectrometer" if window._source_mode == "spectrometer" else "Simulation"
-    if window._measurement_active:
-        text = f"Recording | {source_name}"
-        tooltip = "A measurement is currently saving data."
-        window._window_mode_label.setStyleSheet("color: #ff5b5b; font-weight: 700;")
-        blink_visible = bool(getattr(window, "_recording_blink_visible", True))
-    elif window._live_active:
-        text = f"Live mode | {source_name}"
-        tooltip = "Live acquisition is running."
-        window._window_mode_label.setStyleSheet("")
-    else:
-        text = f"Free mode | {source_name}"
-        tooltip = "The app is open but no measurement is running."
-        window._window_mode_label.setStyleSheet("")
-    window._window_mode_label.setText(text)
-    window._window_mode_label.setToolTip(tooltip)
-    if hasattr(window, "_window_mode_icon_label"):
-        if window._measurement_active:
-            if blink_visible:
-                source_icon = transport_icon(window._theme_mode, "record")
-                window._window_mode_icon_label.setPixmap(source_icon.pixmap(16, 16))
-            else:
-                blank = QPixmap(16, 16)
-                blank.fill(Qt.GlobalColor.transparent)
-                window._window_mode_icon_label.setPixmap(blank)
-            window._window_mode_icon_label.setToolTip("Recording is active.")
-        else:
-            source_icon = prism_tab_icon() if window._source_mode == "spectrometer" else math_function_tab_icon()
-            window._window_mode_icon_label.setPixmap(source_icon.pixmap(16, 16))
-            window._window_mode_icon_label.setToolTip(f"{source_name} source")
 
 
 # Convenience aliases for window delegation.
@@ -1105,3 +1184,286 @@ def apply_metric_color_styles_for(window) -> None:
         band_alpha = int(round(max(min(float(getattr(window, "_sensorgram_metric_envelope_overlay_alpha", 16)), 100.0), 0.0) * 2.55))
         base_color.setAlpha(band_alpha)
         band.setBrush(pg.mkBrush(base_color))
+
+
+_SPECTRUM_Y_AXIS_FORMAT_LABELS = {"scientific": "Sci", "si": "SI"}
+
+
+def _normalize_spectrum_y_axis_format_mode(mode: object) -> str:
+    normalized = str(mode or "scientific").strip().lower()
+    return normalized if normalized in _SPECTRUM_Y_AXIS_FORMAT_LABELS else "scientific"
+
+
+def update_spectrum_y_axis_format_button_for(window) -> None:
+    button = getattr(window, "spectrum_y_axis_format_button", None)
+    if button is None:
+        return
+    mode = _normalize_spectrum_y_axis_format_mode(getattr(window, "_spectrum_y_axis_format_mode", "scientific"))
+    other_mode = "si" if mode == "scientific" else "scientific"
+    button.setText(f"[{_SPECTRUM_Y_AXIS_FORMAT_LABELS[mode]}]")
+    button.setToolTip(
+        f"Y-axis numbers: {_SPECTRUM_Y_AXIS_FORMAT_LABELS[mode]} notation "
+        f"(e.g. {'6.55e+04' if mode == 'scientific' else '65.5k'}). "
+        f"Click to switch to {_SPECTRUM_Y_AXIS_FORMAT_LABELS[other_mode]}."
+    )
+
+
+def apply_spectrum_y_axis_format_mode_for(window, mode: object) -> None:
+    normalized = _normalize_spectrum_y_axis_format_mode(mode)
+    window._spectrum_y_axis_format_mode = normalized
+    update_spectrum_y_axis_format_button_for(window)
+    axis = getattr(window, "spectrum_left_axis", None)
+    if axis is not None:
+        axis.set_format_mode(normalized)
+
+
+def cycle_spectrum_y_axis_format_mode_for(window) -> None:
+    current = _normalize_spectrum_y_axis_format_mode(getattr(window, "_spectrum_y_axis_format_mode", "scientific"))
+    next_mode = "si" if current == "scientific" else "scientific"
+    apply_spectrum_y_axis_format_mode_for(window, next_mode)
+    if hasattr(window, "_schedule_ui_state_persist"):
+        window._schedule_ui_state_persist()
+
+
+_CORNER_OVERLAY_MARGIN = 6
+_CURSOR_OFF_TEXT = "cursor: off (click to enable)"
+
+
+_CORNER_OVERLAY_OBJECT_NAMES = (
+    "spectrumStatsOverlay",
+    "spectrumCursorOverlay",
+    "traceStatsOverlay",
+    "traceCursorOverlay",
+)
+
+
+def _style_corner_overlay_container(container: QWidget) -> None:
+    container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    # Deliberately theme-invariant (not %(fg)s/%(bg)s from main_window_style.py):
+    # this box needs to stay readable sitting on top of whatever the plot is
+    # currently drawing underneath it, in either light or dark app theme, so a
+    # fixed dark translucent backdrop + fixed light text is safer than
+    # tracking the app theme.
+    selectors = ", ".join(f"QWidget#{name}" for name in _CORNER_OVERLAY_OBJECT_NAMES)
+    label_selectors = ", ".join(f"QWidget#{name} QLabel" for name in _CORNER_OVERLAY_OBJECT_NAMES)
+    container.setStyleSheet(
+        f"{selectors} {{ background: rgba(15, 17, 20, 0.72); border-radius: 6px; }}"
+        f" {label_selectors} {{ background: transparent; color: #d7dee6; }}"
+    )
+
+
+class _CornerOverlayContainer(QWidget):
+    """Corner overlay box that forwards unhandled right-clicks to the plot
+    underneath instead of swallowing them.
+
+    WA_TransparentForMouseEvents was tried first and reverted - per Qt's own
+    docs that attribute "disables the delivery of mouse events to the widget
+    AND ITS CHILDREN", which also silently broke
+    trace_stats_label/spectrum_cursor_label/trace_cursor_label's own
+    click-to-cycle/toggle handlers (installEventFilter-based, watching for
+    left-button MouseButtonPress) - a real regression, reported by the
+    maintainer. Overriding contextMenuEvent instead only intercepts the
+    right-click/context-menu request specifically: a click landing on the
+    container's own background/margin generates a QContextMenuEvent that
+    reaches this override directly; a click landing on the label itself is
+    offered to the label first, and QLabel doesn't handle context menu
+    events, so Qt propagates the ignored event up to this parent - either
+    way it ends up here, while ordinary mouse press/release events (what the
+    label's own toggle logic watches for) are never touched.
+    """
+
+    def __init__(self, parent_viewport, plot_widget) -> None:
+        super().__init__(parent_viewport)
+        self._plot_widget = plot_widget
+
+    def contextMenuEvent(self, event) -> None:
+        plot_widget = self._plot_widget
+        try:
+            view_box = plot_widget.getPlotItem().vb
+        except Exception:
+            event.ignore()
+            return
+        if view_box is None or not view_box.menuEnabled():
+            event.ignore()
+            return
+        # QContextMenuEvent.globalPos() returns a plain QPoint (unlike
+        # QMouseEvent, it has no globalPosition()/QPointF variant in PyQt6) -
+        # wrap it in QPointF since raiseContextMenu calls .toPoint() on
+        # whatever screenPos() returns, matching pyqtgraph's own
+        # MouseClickEvent.screenPos() contract.
+        screen_pos = QPointF(event.globalPos())
+        shim = type("_MenuEventShim", (), {"screenPos": lambda self, _pos=screen_pos: _pos})()
+        view_box.raiseContextMenu(shim)
+        event.accept()
+
+
+def _make_corner_overlay_container(parent_viewport, object_name: str, label, plot_widget) -> QWidget:
+    container = _CornerOverlayContainer(parent_viewport, plot_widget)
+    container.setObjectName(object_name)
+    layout = QVBoxLayout()
+    layout.setContentsMargins(6, 4, 6, 4)
+    layout.setSpacing(2)
+    layout.addWidget(label)
+    container.setLayout(layout)
+    _style_corner_overlay_container(container)
+    return container
+
+
+def build_spectrum_corner_overlay_for(window) -> None:
+    """Pin spectrum_stats_label to the plot's top-left corner and
+    spectrum_cursor_label to its top-right corner, each in its own separate
+    box, instead of a shared row above the plot (see main_window_layout.py,
+    where that row used to be built) - frees the vertical space that row
+    used to take.
+    """
+    window.spectrum_stats_label.setWordWrap(False)
+    window.spectrum_cursor_label.setCursor(Qt.CursorShape.PointingHandCursor)
+    window.spectrum_cursor_label.setToolTip(
+        "Spectrum cursor readout under the mouse pointer. Click to show/hide (also hides the plot crosshair)."
+    )
+    window._spectrum_cursor_enabled = True
+    window._spectrum_cursor_off_icon = crosshair_cursor_icon()
+
+    viewport = window.spectrum_plot.viewport()
+    window.spectrum_stats_overlay = _make_corner_overlay_container(viewport, "spectrumStatsOverlay", window.spectrum_stats_label, window.spectrum_plot)
+    window.spectrum_cursor_overlay = _make_corner_overlay_container(viewport, "spectrumCursorOverlay", window.spectrum_cursor_label, window.spectrum_plot)
+    window.spectrum_cursor_label.installEventFilter(window)
+
+    window.spectrum_plot.getPlotItem().vb.sigResized.connect(window._reposition_spectrum_corner_overlay)
+    window.spectrum_stats_overlay.show()
+    window.spectrum_cursor_overlay.show()
+    reposition_spectrum_corner_overlay_for(window)
+
+
+def build_trace_corner_overlay_for(window) -> None:
+    """Same idea as build_spectrum_corner_overlay_for, for trace_plot -
+    trace_stats_label (top-left) keeps its existing click-to-cycle-metric
+    behavior (see main_window_lifecycle.py's event_filter_for);
+    trace_cursor_label (top-right) gains the same click-to-show/hide toggle
+    as the spectrum plot's cursor label. Both shift down out of the way when
+    the experiment-control-step timeline bar is shown at the top of this
+    plot - see _sensorgram_overlay_top_margin_px.
+    """
+    window.trace_cursor_label.setCursor(Qt.CursorShape.PointingHandCursor)
+    window.trace_cursor_label.setToolTip(
+        "Metric cursor readout under the mouse pointer. Click to show/hide (also hides the plot crosshair)."
+    )
+    window._trace_cursor_enabled = True
+    window._trace_cursor_off_icon = crosshair_cursor_icon()
+
+    viewport = window.trace_plot.viewport()
+    window.trace_stats_overlay = _make_corner_overlay_container(viewport, "traceStatsOverlay", window.trace_stats_label, window.trace_plot)
+    window.trace_cursor_overlay = _make_corner_overlay_container(viewport, "traceCursorOverlay", window.trace_cursor_label, window.trace_plot)
+    window.trace_cursor_label.installEventFilter(window)
+
+    window.trace_plot.getPlotItem().vb.sigResized.connect(window._reposition_trace_corner_overlay)
+    window.trace_stats_overlay.show()
+    window.trace_cursor_overlay.show()
+    reposition_trace_corner_overlay_for(window)
+
+
+def _reposition_corner_overlay(plot_widget, container, *, align: str, vertical: str = "top") -> None:
+    if plot_widget is None or container is None:
+        return
+    try:
+        view_box = plot_widget.getPlotItem().vb
+        scene_rect = view_box.sceneBoundingRect()
+        # QGraphicsView.mapFromScene() returns viewport-relative coordinates
+        # (per Qt docs) - container is parented on plot_widget.viewport(), not
+        # plot_widget itself, so this lines up directly with no further offset.
+        if vertical == "bottom":
+            corner_scene = scene_rect.bottomRight() if align == "right" else scene_rect.bottomLeft()
+        else:
+            corner_scene = scene_rect.topRight() if align == "right" else scene_rect.topLeft()
+        corner = plot_widget.mapFromScene(corner_scene)
+    except Exception:
+        return
+    container.adjustSize()
+    if vertical == "bottom":
+        top = int(corner.y()) - container.height() - _CORNER_OVERLAY_MARGIN
+    else:
+        top = int(corner.y()) + _CORNER_OVERLAY_MARGIN
+    if align == "right":
+        left = int(corner.x()) - container.width() - _CORNER_OVERLAY_MARGIN
+    else:
+        left = int(corner.x()) + _CORNER_OVERLAY_MARGIN
+    container.move(left, top)
+    container.raise_()
+
+
+def _sensorgram_overlay_top_margin_px(window) -> int:
+    """Whether trace_plot's corner overlays need to move out of the way of
+    the experiment-control-step timeline bar (main_window_sensorgram_overlay.py)
+    - nonzero (the configured bar height) whenever that bar is shown at the
+    top of the plot, 0 whenever it's disabled or positioned at the bottom
+    instead. reposition_trace_corner_overlay_for uses this only as a
+    yes/no signal (move the overlays to the bottom corners instead of the
+    top) - not as a pixel offset added to the top position, since sitting
+    right under the timeline bar would put the stats at an arbitrary height
+    unrelated to the plot's own axis.
+    """
+    enabled = bool(getattr(window, "_sensorgram_control_step_overlay_enabled", True))
+    position = str(getattr(window, "_sensorgram_control_step_overlay_position", "top")).strip().lower()
+    if not enabled or position != "top":
+        return 0
+    bar_height_px = max(int(getattr(window, "_sensorgram_control_step_overlay_bar_height_px", 18)), 1)
+    return bar_height_px + 6
+
+
+def reposition_spectrum_corner_overlay_for(window) -> None:
+    plot = getattr(window, "spectrum_plot", None)
+    _reposition_corner_overlay(plot, getattr(window, "spectrum_stats_overlay", None), align="left")
+    _reposition_corner_overlay(plot, getattr(window, "spectrum_cursor_overlay", None), align="right")
+
+
+def reposition_trace_corner_overlay_for(window) -> None:
+    plot = getattr(window, "trace_plot", None)
+    # When the control-step timeline bar occupies the top of the plot, move
+    # the overlays to the bottom corners (near the plot's own x-axis) instead
+    # of nudging them down by the bar's height - keeps them readable next to
+    # the axis regardless of where the timeline bar or the data happens to
+    # sit, per the maintainer's explicit preference.
+    vertical = "bottom" if _sensorgram_overlay_top_margin_px(window) > 0 else "top"
+    _reposition_corner_overlay(plot, getattr(window, "trace_stats_overlay", None), align="left", vertical=vertical)
+    _reposition_corner_overlay(plot, getattr(window, "trace_cursor_overlay", None), align="right", vertical=vertical)
+
+
+def _show_cursor_off_state(label, off_icon) -> None:
+    """Collapse a cursor-readout label to a small crosshair icon while its
+    cursor is disabled, instead of the old "cursor: off (click to enable)"
+    sentence - takes far less corner space and reads at a glance. Falls back
+    to the text placeholder if no icon was precomputed (e.g. a minimal fake
+    window in a pure-logic unit test that never called
+    build_spectrum_corner_overlay_for/build_trace_corner_overlay_for).
+    """
+    if off_icon is None or not hasattr(label, "setPixmap"):
+        label.setText(_CURSOR_OFF_TEXT)
+        return
+    size = label.fontMetrics().height()
+    label.setPixmap(off_icon.pixmap(size, size))
+
+
+def toggle_spectrum_cursor_enabled_for(window) -> None:
+    window._spectrum_cursor_enabled = not getattr(window, "_spectrum_cursor_enabled", True)
+    if window._spectrum_cursor_enabled:
+        window.spectrum_cursor_label.setText(getattr(window, "_spectrum_cursor_text", "-"))
+    else:
+        _show_cursor_off_state(window.spectrum_cursor_label, getattr(window, "_spectrum_cursor_off_icon", None))
+    for line_name in ("spectrum_vline", "spectrum_hline"):
+        line = getattr(window, line_name, None)
+        if line is not None:
+            line.setVisible(window._spectrum_cursor_enabled)
+    reposition_spectrum_corner_overlay_for(window)
+
+
+def toggle_trace_cursor_enabled_for(window) -> None:
+    window._trace_cursor_enabled = not getattr(window, "_trace_cursor_enabled", True)
+    if window._trace_cursor_enabled:
+        window.trace_cursor_label.setText(getattr(window, "_trace_cursor_text", "-"))
+    else:
+        _show_cursor_off_state(window.trace_cursor_label, getattr(window, "_trace_cursor_off_icon", None))
+    for line_name in ("trace_vline", "trace_hline"):
+        line = getattr(window, line_name, None)
+        if line is not None:
+            line.setVisible(window._trace_cursor_enabled)
+    reposition_trace_corner_overlay_for(window)

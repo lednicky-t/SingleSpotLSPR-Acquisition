@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -14,15 +13,9 @@ from seabreeze.spectrometers import list_devices  # noqa: E402 - must follow sea
 from lspr_app.device.base import Spectrometer, SpectrometerCapabilities, SpectrometerError  # noqa: E402 - must follow seabreeze.use()
 from lspr_app.domain.models import AcquisitionSettings, Spectrum  # noqa: E402 - must follow seabreeze.use()
 
-log = logging.getLogger(__name__)
-
 
 class OceanSpectrometer(Spectrometer):
     """Hardware backend for Ocean Insight / Ocean Optics devices via SeaBreeze."""
-
-    _AUTO_TARGET_FRACTION = 0.85
-    _AUTO_TOLERANCE_FRACTION = 0.08
-    _AUTO_MAX_ITERATIONS = 6
 
     def __init__(self) -> None:
         devices = list_devices()
@@ -54,13 +47,15 @@ class OceanSpectrometer(Spectrometer):
             supports_trigger=True,
         )
 
-    def auto_integration_time_ms(self, settings: AcquisitionSettings) -> float:
-        tuned_us = self._resolve_integration_time_us(settings, auto_optimize=True)
-        return tuned_us / 1000.0
+    def max_intensity(self) -> float:
+        return self._max_intensity
+
+    def integration_time_limits_us(self) -> tuple[int, int]:
+        return (int(self._integration_limits_us[0]), int(self._integration_limits_us[1]))
 
     def acquire_spectrum(self, settings: AcquisitionSettings) -> Spectrum:
         settings = replace(settings)
-        integration_time_us = self._resolve_integration_time_us(settings, auto_optimize=False)
+        integration_time_us = self._resolve_integration_time_us(settings)
 
         try:
             self._spectrometer.trigger_mode(settings.trigger_mode)
@@ -100,46 +95,6 @@ class OceanSpectrometer(Spectrometer):
     def close(self) -> None:
         self._spectrometer.close()
 
-    def _resolve_integration_time_us(self, settings: AcquisitionSettings, auto_optimize: bool) -> int:
+    def _resolve_integration_time_us(self, settings: AcquisitionSettings) -> int:
         requested_us = int(max(settings.integration_time_ms * 1000.0, 1_000.0))
-        requested_us = int(np.clip(requested_us, *self._integration_limits_us))
-        if not auto_optimize:
-            return requested_us
-
-        target = self._max_intensity * self._AUTO_TARGET_FRACTION
-        tolerance = self._max_intensity * self._AUTO_TOLERANCE_FRACTION
-        integration_us = requested_us
-
-        try:
-            self._spectrometer.trigger_mode(settings.trigger_mode)
-        except Exception:
-            log.warning(
-                "Failed to set trigger mode %r before auto-integration; "
-                "continuing with the spectrometer's current trigger mode.",
-                settings.trigger_mode,
-                exc_info=True,
-            )
-
-        for _ in range(self._AUTO_MAX_ITERATIONS):
-            self._spectrometer.integration_time_micros(integration_us)
-            intensities = np.asarray(
-                self._spectrometer.intensities(
-                    correct_dark_counts=settings.correct_dark_counts,
-                    correct_nonlinearity=settings.correct_nonlinearity,
-                ),
-                dtype=np.float64,
-            )
-            peak = float(np.max(intensities))
-            if peak <= 0.0:
-                integration_us = min(integration_us * 4, self._integration_limits_us[1])
-                continue
-            if abs(peak - target) <= tolerance:
-                return integration_us
-
-            scaled = int(integration_us * target / peak)
-            next_integration_us = int(np.clip(scaled, *self._integration_limits_us))
-            if next_integration_us == integration_us:
-                return integration_us
-            integration_us = next_integration_us
-
-        return integration_us
+        return int(np.clip(requested_us, *self._integration_limits_us))

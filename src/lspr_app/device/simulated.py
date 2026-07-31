@@ -53,13 +53,6 @@ class SimulatedSpectrometer(Spectrometer):
             supports_trigger=True,
         )
 
-    def auto_integration_time_ms(self, settings: AcquisitionSettings) -> float:
-        settings = replace(settings)
-        reference_signal = self._build_sample_signal(self.wavelength_axis()).max()
-        target_signal = 52_000.0
-        estimated_ms = 50.0 * target_signal / max(reference_signal, 1.0)
-        return float(np.clip(estimated_ms, 1.0, 10_000.0))
-
     def acquire_spectrum(self, settings: AcquisitionSettings) -> Spectrum:
         settings = replace(settings)
         return self.acquire_kind_spectrum("sample", settings)

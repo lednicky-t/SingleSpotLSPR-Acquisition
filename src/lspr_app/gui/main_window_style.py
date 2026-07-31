@@ -25,6 +25,7 @@ from lspr_app.gui.sensorgram_secondary_axis import (
     SECONDARY_AXIS_SLOTS,
     secondary_axis_color_for,
     secondary_axis_metric_for,
+    set_sensorgram_plot_background_color,
 )
 
 
@@ -112,7 +113,10 @@ def apply_modern_style_for(window) -> None:
         QToolButton#sensorgramYAxisModeButton,
         QToolButton#sensorgramWindowButton,
         QToolButton#sensorgramSecondaryAxisToggleButton,
-        QToolButton#sensorgramSecondaryAxisMetricButton {
+        QToolButton#sensorgramSecondaryAxisMetricButton,
+        QToolButton#spectrumPlotModeButton,
+        QToolButton#spectrumYAxisFormatButton,
+        QToolButton#spectrumResidualToggleButton {
             background: transparent;
             border: none;
             padding: 0px;
@@ -125,7 +129,10 @@ def apply_modern_style_for(window) -> None:
         QToolButton#sensorgramYAxisModeButton:hover,
         QToolButton#sensorgramWindowButton:hover,
         QToolButton#sensorgramSecondaryAxisToggleButton:hover,
-        QToolButton#sensorgramSecondaryAxisMetricButton:hover {
+        QToolButton#sensorgramSecondaryAxisMetricButton:hover,
+        QToolButton#spectrumPlotModeButton:hover,
+        QToolButton#spectrumYAxisFormatButton:hover,
+        QToolButton#spectrumResidualToggleButton:hover {
             background: transparent;
             border: none;
         }
@@ -134,14 +141,22 @@ def apply_modern_style_for(window) -> None:
         QToolButton#sensorgramYAxisModeButton:pressed,
         QToolButton#sensorgramWindowButton:pressed,
         QToolButton#sensorgramSecondaryAxisToggleButton:pressed,
-        QToolButton#sensorgramSecondaryAxisMetricButton:pressed {
+        QToolButton#sensorgramSecondaryAxisMetricButton:pressed,
+        QToolButton#spectrumPlotModeButton:pressed,
+        QToolButton#spectrumYAxisFormatButton:pressed,
+        QToolButton#spectrumResidualToggleButton:pressed {
             background: transparent;
             border: none;
         }
-        QToolButton#sensorgramSecondaryAxisToggleButton {
+        QToolButton#sensorgramSecondaryAxisToggleButton,
+        QToolButton#spectrumResidualToggleButton {
             color: #7a8291;
         }
-        QToolButton#sensorgramSecondaryAxisMetricButton::menu-indicator {
+        QToolButton#spectrumResidualToggleButton:checked {
+            color: #e8d85f;
+        }
+        QToolButton#sensorgramSecondaryAxisMetricButton::menu-indicator,
+        QToolButton#spectrumPlotModeButton::menu-indicator {
             image: none;
             width: 0px;
         }
@@ -504,7 +519,15 @@ def style_plot_widgets_for(window) -> None:
         # into its surroundings; the ViewBox background (the actual plotting
         # area behind the data) keeps the previous, separately-set dark color.
         plot.setBackground(palette["bg"])
-        plot.getPlotItem().getViewBox().setBackgroundColor(palette["plot_bg"])
+        if plot is window.trace_plot:
+            # trace_plot's plotting-area fill is its own separate scene item,
+            # not the ViewBox's built-in one - see
+            # sensorgram_secondary_axis.py's _build_sensorgram_plot_background
+            # for why (it's what lets the secondary axes render underneath
+            # the 1Y metric curves instead of on top of them).
+            set_sensorgram_plot_background_color(window, palette["plot_bg"])
+        else:
+            plot.getPlotItem().getViewBox().setBackgroundColor(palette["plot_bg"])
         plot.getPlotItem().getViewBox().setBorder(pg.mkPen(palette["plot_border"]))
         bottom_axis = plot.getPlotItem().getAxis("bottom")
         left_axis = plot.getPlotItem().getAxis("left")

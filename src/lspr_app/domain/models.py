@@ -20,6 +20,26 @@ class AcquisitionSettings:
 
 
 @dataclass(slots=True)
+class AutoExposureSettings:
+    """Hard bounds and target band for the live auto-exposure procedure.
+
+    Deliberately a plain data holder, not wired to any settings dialog yet -
+    see gui/acquisition_controller.py's auto-exposure functions for how these
+    are used, and MainWindow._auto_exposure_settings for where an instance
+    lives. min/max_integration_time_us are further intersected with whatever
+    the connected spectrometer's own hardware limits are (see
+    Spectrometer.integration_time_limits_us), so the effective search range is
+    never wider than what the hardware actually accepts.
+    """
+
+    min_integration_time_us: int = 1_000
+    max_integration_time_us: int = 1_000_000
+    saturation_fraction: float = 0.95
+    target_low_fraction: float = 0.90
+    max_iterations: int = 15
+
+
+@dataclass(slots=True)
 class ProcessingSettings:
     wavelength_min_nm: float = 400.0
     wavelength_max_nm: float = 900.0
@@ -33,7 +53,13 @@ class ProcessingSettings:
     polynomial_order: int = 2
     fit_window_width_nm: float = 120.0
     analysis_resolution_nm: float = 0.001
-    spectrum_tracking_mode: str = "poly_max"
+    # Matches trace_metrics' own default ("smoothed_max", "centroid") below -
+    # poly_max previously left the spectrum stats box (main_window's
+    # spectrum_stats_label) and the sensorgram's default primary metric
+    # showing different labels/values (P_Max vs S_Max) out of the box, with
+    # no way to tell they weren't already supposed to agree. See the
+    # maintainer's report of that exact mismatch.
+    spectrum_tracking_mode: str = "smoothed_max"
     trace_noise_window_s: float = 10.0
     trace_metrics: list[str] = field(
         default_factory=lambda: ["smoothed_max", "centroid"]

@@ -1219,6 +1219,11 @@ class SensorgramPlotSettingsDialog(QDialog):
                 window._sync_sensorgram_control_step_overlay()
             except Exception:
                 pass
+        if hasattr(window, "_reposition_trace_corner_overlay"):
+            try:
+                window._reposition_trace_corner_overlay()
+            except Exception:
+                pass
         if hasattr(window, "_update_trace_stats"):
             try:
                 window._update_trace_stats()

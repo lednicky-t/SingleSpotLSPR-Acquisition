@@ -31,6 +31,7 @@ def build_spectrometer_page(window) -> QWidget:
     integration_row.setSpacing(8)
     integration_row.addWidget(window.integration_spin)
     integration_row.addWidget(window.auto_integration_button)
+    integration_row.addWidget(window.auto_integration_status_label)
     integration_row.addStretch(1)
     device_layout.addRow("Integration time", integration_row)
 
@@ -50,18 +51,14 @@ def build_spectrometer_page(window) -> QWidget:
     device_layout.addRow("Correct nonlinearity", window.correct_nonlinearity_check)
     device_group.setLayout(device_layout)
 
-    acquisition_stats_row = QWidget(window)
-    acquisition_stats_layout = QHBoxLayout()
-    acquisition_stats_layout.setContentsMargins(0, 0, 0, 0)
-    acquisition_stats_layout.setSpacing(8)
-    acquisition_stats_layout.addWidget(window.spectrometer_stats_label, 1)
-    acquisition_stats_row.setLayout(acquisition_stats_layout)
-    acquisition_stats_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    # spacing/rate/ovh (spectrometer_stats_label) used to live here, but it
+    # reflects acquisition timing that applies equally to the Simulation tab -
+    # it now lives in the shared source-section header, above both tabs, in
+    # main_window_layout.py's source_block construction.
 
     page_layout = QVBoxLayout()
     page_layout.setContentsMargins(0, 0, 0, 0)
     page_layout.addWidget(device_group)
-    page_layout.addWidget(acquisition_stats_row)
     page_layout.addStretch(1)
     page = QWidget(window)
     page.setLayout(page_layout)

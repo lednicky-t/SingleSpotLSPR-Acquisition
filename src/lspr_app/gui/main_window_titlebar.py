@@ -158,6 +158,10 @@ def build_title_bar(window, menu_bar: QMenuBar, brand_icon_path) -> QWidget:
     left_layout.setSpacing(6)
     left_layout.addWidget(menu_bar)
     left_cluster.setLayout(left_layout)
+    # Referenced by event_filter_for (main_window_lifecycle.py) so a
+    # double-click on File/Edit/View/... doesn't also maximize/restore the
+    # window - only the rest of the title bar does that.
+    window._menu_bar = menu_bar
 
     right_cluster = QWidget(title_widget)
     right_layout = QHBoxLayout()

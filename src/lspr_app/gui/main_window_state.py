@@ -976,6 +976,14 @@ def _restore_sensorgram_control_step_overlay(window, ui_state: dict[str, object]
             window._sync_sensorgram_control_step_overlay()
         except Exception:
             pass
+    # The sensorgram's stats/cursor corner overlays shift down to clear this
+    # bar when it's shown at the top of the plot - re-derive their position
+    # now that the restored enabled/position/height are all in place.
+    if hasattr(window, "_reposition_trace_corner_overlay"):
+        try:
+            window._reposition_trace_corner_overlay()
+        except Exception:
+            pass
 
 
 def _restore_diagnostics_panel_visibility(window, ui_state: dict[str, object]) -> None:
@@ -1763,7 +1771,7 @@ def apply_acquisition_state_to_widgets(window, state: dict[str, object]) -> None
 
     window._suspend_acquisition_autosave = True
     try:
-        plot_mode = str(state.get("plot_mode", "Sample"))
+        plot_mode = str(state.get("plot_mode", "Raw"))
         if plot_mode in window.PLOT_MODES:
             window.plot_selector.blockSignals(True)
             window.plot_selector.setCurrentText(plot_mode)
