@@ -26,7 +26,7 @@ banners below):
 from __future__ import annotations
 
 import pyqtgraph as pg
-from PyQt6.QtCore import QRect, QTimer
+from PyQt6.QtCore import QPoint, QRect, QTimer
 from PyQt6.QtGui import QColor, QGuiApplication
 from PyQt6.QtWidgets import QApplication
 
@@ -713,24 +713,36 @@ def set_top_content_mode(window, mode: str, *, save: bool = True) -> None:
 
 
 def _restore_window_geometry(window, ui_state: dict[str, object]) -> None:
-    """Restore saved window size/position, clamped to the current screen."""
+    """Restore saved window size/position, clamped to the screen it last lived on.
+
+    Uses the screen under the saved (x, y) position - not always
+    ``primaryScreen()`` - so a window last placed on a secondary monitor
+    (common on a multi-monitor lab bench) is clamped against *that* monitor's
+    resolution instead of being shrunk/repositioned to fit the primary one
+    every time the app starts.
+    """
     width = ui_state.get("width")
     height = ui_state.get("height")
     x_pos = ui_state.get("x")
     y_pos = ui_state.get("y")
 
+    app = QApplication.instance()
+    screen = None
+    if app and isinstance(x_pos, int) and isinstance(y_pos, int):
+        screen = QGuiApplication.screenAt(QPoint(x_pos, y_pos))
+    if screen is None and app:
+        screen = app.primaryScreen()
+
     if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
-        app = QApplication.instance()
-        if app:
-            screen_geometry = app.primaryScreen().availableGeometry()
+        if screen:
+            screen_geometry = screen.availableGeometry()
             margin = 12
             width = min(width, max(screen_geometry.width() - margin * 2, 640))
             height = min(height, max(screen_geometry.height() - margin * 2, 480))
         window.resize(width, height)
     if isinstance(x_pos, int) and isinstance(y_pos, int):
-        app = QApplication.instance()
-        if app:
-            screen_geometry = app.primaryScreen().availableGeometry()
+        if screen:
+            screen_geometry = screen.availableGeometry()
             margin = 12
             window_rect = QRect(x_pos, y_pos, window.width(), window.height())
             if not screen_geometry.intersects(window_rect):
@@ -1764,6 +1776,16 @@ def schedule_acquisition_state_persist(window) -> None:
             timer.stop()
         return
     window._acquisition_state_requested_at = perf_counter()
+    # Mirrors schedule_ui_state_persist_for's timer.start(): the 100 ms GUI
+    # housekeeping heartbeat (main_window_runtime.py) also drains this request
+    # once it goes "due", but that path silently depends on housekeeping
+    # staying enabled and the heartbeat actually ticking. Starting this timer
+    # too gives acquisition-state saves (live rate, simulation rate, plot
+    # mode, ...) the same independent persistence guarantee window geometry
+    # already has, instead of relying solely on the polling fallback.
+    timer = getattr(window, "_acquisition_state_timer", None)
+    if timer is not None:
+        timer.start()
 
 
 def _restore_cached_dark_reference(window) -> None:

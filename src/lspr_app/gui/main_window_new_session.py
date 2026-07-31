@@ -117,6 +117,17 @@ def _start_new_session_for(window, *, keep_dark: bool, keep_reference: bool) -> 
     # a fresh timestamped path and re-seeds it with the dark/reference kept
     # above the moment the next spectrum arrives.
     close_session_writer(window)
+    # ensure_session_writer() seeds the new file's t=0 anchor from
+    # window._live_trace_started_at when it's set, falling back to the
+    # triggering spectrum's own timestamp ("now") only when it's None. That
+    # attribute is set once when live acquisition starts and otherwise stays
+    # set for as long as Play keeps running - start_measurement_run/
+    # stop_measurement_run already null it out at their own boundaries for
+    # exactly this reason. New Session missed the same reset, so starting a
+    # new session while live acquisition was still running inherited the
+    # original Play-click time as the new session's t=0 instead of resetting
+    # the sensorgram's relative time to 0 - see docs/sensorgram_improvements.md.
+    window._live_trace_started_at = None
     save_dark_reference_cache(dark, reference)
 
     clear_trace_history_for(window)

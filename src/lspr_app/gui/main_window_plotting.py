@@ -1401,14 +1401,20 @@ def build_spectrum_corner_overlay_for(window) -> None:
         window.spectrum_stats_label.toolTip() + " Double-click to show/hide."
     )
     window.spectrum_stats_label.installEventFilter(window)
-    window._spectrum_stats_enabled = True
+    # In-plot stats and the cursor readout/crosshair both start hidden -
+    # the maintainer found them on-by-default too noisy; double-click/click
+    # (see toggle_spectrum_stats_enabled_for/toggle_spectrum_cursor_enabled_for)
+    # still turns them on per-session.
+    window._spectrum_stats_enabled = False
     window._spectrum_stats_off_icon = stats_hidden_icon()
+    _show_off_state(window.spectrum_stats_label, window._spectrum_stats_off_icon, _STATS_OFF_TEXT)
     window.spectrum_cursor_label.setCursor(Qt.CursorShape.PointingHandCursor)
     window.spectrum_cursor_label.setToolTip(
         "Spectrum cursor readout under the mouse pointer. Click to show/hide (also hides the plot crosshair)."
     )
-    window._spectrum_cursor_enabled = True
+    window._spectrum_cursor_enabled = False
     window._spectrum_cursor_off_icon = crosshair_cursor_icon()
+    _show_off_state(window.spectrum_cursor_label, window._spectrum_cursor_off_icon, _CURSOR_OFF_TEXT)
 
     viewport = window.spectrum_plot.viewport()
     window.spectrum_stats_overlay = _make_corner_overlay_container(viewport, "spectrumStatsOverlay", window.spectrum_stats_label, window.spectrum_plot)
@@ -1433,14 +1439,18 @@ def build_trace_corner_overlay_for(window) -> None:
     window.trace_stats_label.setToolTip(
         window.trace_stats_label.toolTip() + " Double-click to show/hide."
     )
-    window._trace_stats_enabled = True
+    # See the matching comment in build_spectrum_corner_overlay_for - both
+    # plots' in-plot stats and cursor/crosshair start hidden by default.
+    window._trace_stats_enabled = False
     window._trace_stats_off_icon = stats_hidden_icon()
+    _show_off_state(window.trace_stats_label, window._trace_stats_off_icon, _STATS_OFF_TEXT)
     window.trace_cursor_label.setCursor(Qt.CursorShape.PointingHandCursor)
     window.trace_cursor_label.setToolTip(
         "Metric cursor readout under the mouse pointer. Click to show/hide (also hides the plot crosshair)."
     )
-    window._trace_cursor_enabled = True
+    window._trace_cursor_enabled = False
     window._trace_cursor_off_icon = crosshair_cursor_icon()
+    _show_off_state(window.trace_cursor_label, window._trace_cursor_off_icon, _CURSOR_OFF_TEXT)
 
     viewport = window.trace_plot.viewport()
     window.trace_stats_overlay = _make_corner_overlay_container(viewport, "traceStatsOverlay", window.trace_stats_label, window.trace_plot)

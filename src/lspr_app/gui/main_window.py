@@ -1705,6 +1705,10 @@ class MainWindow(QMainWindow):
 
         self.spectrum_vline = _make_crosshair_line(90)
         self.spectrum_hline = _make_crosshair_line(0)
+        # Cursor readout starts hidden - see build_spectrum_corner_overlay_for's
+        # matching _spectrum_cursor_enabled default.
+        self.spectrum_vline.setVisible(False)
+        self.spectrum_hline.setVisible(False)
         self.spectrum_plot.addItem(self.spectrum_vline, ignoreBounds=True)
         self.spectrum_plot.addItem(self.spectrum_hline, ignoreBounds=True)
         self.spectrum_proxy = pg.SignalProxy(
@@ -1778,6 +1782,10 @@ class MainWindow(QMainWindow):
         self.trace_vline._diagnostics_prefix = "trace_plot"
         self.trace_hline._diagnostics_owner = self
         self.trace_hline._diagnostics_prefix = "trace_plot"
+        # Cursor readout starts hidden - see build_trace_corner_overlay_for's
+        # matching _trace_cursor_enabled default.
+        self.trace_vline.setVisible(False)
+        self.trace_hline.setVisible(False)
         self.trace_plot.addItem(self.trace_vline, ignoreBounds=True)
         self.trace_plot.addItem(self.trace_hline, ignoreBounds=True)
         self.trace_proxy = pg.SignalProxy(
