@@ -4,19 +4,24 @@ Probes an HDF5 measurement file and lets the user select which sections to
 import into the running application:
   * Processing settings (wavelength range, baseline, smoothing, fitting)
   * Experiment plan (steps, timing, device assignments, labels)
+  * Dark spectrum
+  * Reference spectrum
 
 Usage from the main window::
 
     show_import_from_measurement_for(window)         # opens file picker first
     show_import_from_measurement_for(window, path)   # uses given path directly
+    show_latest_session_import_for(window)           # uses the most recent session file
 """
 from __future__ import annotations
 
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -26,6 +31,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QLabel,
+    QMessageBox,
     QVBoxLayout,
     QWidget,
 )
@@ -52,6 +58,8 @@ class MeasurementFileProbe:
     schema_version: str = ""
     processing: _SectionInfo = field(default_factory=_SectionInfo)
     plan: _SectionInfo = field(default_factory=_SectionInfo)
+    dark: _SectionInfo = field(default_factory=_SectionInfo)
+    reference: _SectionInfo = field(default_factory=_SectionInfo)
     error: str = ""
     warning: str = ""
 
@@ -174,10 +182,61 @@ def probe_measurement_hdf5(path: Path) -> MeasurementFileProbe:
             except Exception:
                 log.debug("Could not probe experiment plan in %s", path, exc_info=True)
 
+            # ── Dark / Reference spectra ──────────────────────────────────
+            try:
+                spectra_group = f.get("data/spectra")
+                for role in ("dark", "reference"):
+                    group = spectra_group.get(role) if spectra_group is not None else None
+                    if group is None or "acquired_at_unix_ms" not in group:
+                        continue
+                    n_rows = group["acquired_at_unix_ms"].shape[0]
+                    if n_rows == 0:
+                        continue
+                    captured_at = datetime.fromtimestamp(
+                        int(group["acquired_at_unix_ms"][-1]) / 1000.0, tz=timezone.utc
+                    )
+                    summary = f"Captured {captured_at.strftime('%Y-%m-%d %H:%M UTC')}"
+                    setattr(probe, role, _SectionInfo(available=True, summary=summary))
+            except Exception:
+                log.debug("Could not probe dark/reference spectra in %s", path, exc_info=True)
+
     except Exception as exc:
         probe.error = str(exc)
         log.debug("Could not open measurement file %s for probing: %s", path, exc)
     return probe
+
+
+def _load_last_baseline_spectrum(path: Path, role: str):
+    """Read the most recently recorded dark/reference row out of *path*.
+
+    Mirrors how AsyncHDF5MeasurementWriter stores these
+    (storage/hdf5_export.py's _create_spectrum_group): a shared
+    ``data/wavelengths_nm`` axis plus one row per capture under
+    ``data/spectra/<role>/intensity`` and ``.../acquired_at_unix_ms``.
+    """
+    from lspr_app.domain.models import Spectrum
+
+    if _h5py is None:
+        return None
+    with _h5py.File(path, "r") as f:
+        wavelengths_ds = f.get("data/wavelengths_nm")
+        group = f.get(f"data/spectra/{role}")
+        if wavelengths_ds is None or group is None or "acquired_at_unix_ms" not in group:
+            return None
+        if group["acquired_at_unix_ms"].shape[0] == 0:
+            return None
+        wavelengths_nm = np.asarray(wavelengths_ds[()], dtype=np.float64)
+        values = np.asarray(group["intensity"][-1], dtype=np.float64)
+        acquired_at = datetime.fromtimestamp(
+            int(group["acquired_at_unix_ms"][-1]) / 1000.0, tz=timezone.utc
+        )
+        return Spectrum(
+            wavelengths_nm=wavelengths_nm,
+            values=values,
+            y_label="Intensity (counts)",
+            acquired_at=acquired_at,
+            metadata={"kind": role, "imported_from": str(path)},
+        )
 
 
 # ── Background probe ─────────────────────────────────────────────────────────
@@ -278,6 +337,26 @@ class ImportFromMeasurementDialog(QDialog):
         )
         form.addRow("", self.runtime_check)
 
+        # Dark spectrum row
+        self.dark_check = QCheckBox("Dark spectrum")
+        self.dark_check.setChecked(self._probe.dark.available)
+        self.dark_check.setEnabled(self._probe.dark.available)
+        dark_detail = QLabel(self._probe.dark.summary)
+        dark_detail.setWordWrap(True)
+        if not self._probe.dark.available:
+            dark_detail.setStyleSheet("color: gray;")
+        form.addRow(self.dark_check, dark_detail)
+
+        # Reference spectrum row
+        self.reference_check = QCheckBox("Reference spectrum")
+        self.reference_check.setChecked(self._probe.reference.available)
+        self.reference_check.setEnabled(self._probe.reference.available)
+        reference_detail = QLabel(self._probe.reference.summary)
+        reference_detail.setWordWrap(True)
+        if not self._probe.reference.available:
+            reference_detail.setStyleSheet("color: gray;")
+        form.addRow(self.reference_check, reference_detail)
+
         layout.addWidget(box)
 
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -299,6 +378,14 @@ class ImportFromMeasurementDialog(QDialog):
     @property
     def wants_runtime(self) -> bool:
         return bool(getattr(self, "runtime_check", None) and self.runtime_check.isChecked())
+
+    @property
+    def wants_dark(self) -> bool:
+        return bool(getattr(self, "dark_check", None) and self.dark_check.isChecked())
+
+    @property
+    def wants_reference(self) -> bool:
+        return bool(getattr(self, "reference_check", None) and self.reference_check.isChecked())
 
 
 # ── Top-level entry point ─────────────────────────────────────────────────────
@@ -328,6 +415,25 @@ def show_import_from_measurement_for(window, path: Path | None = None) -> None:
     signals = _ProbeSignals()
     signals.done.connect(lambda probe: _on_probe_done(window, probe))
     QThreadPool.globalInstance().start(_ProbeTask(path, signals))
+
+
+def show_latest_session_import_for(window) -> None:
+    """Import ▸ Latest Session… - reopens the checklist for the most recent
+    session file (see storage/measurement_archive.py's ensure_session_writer,
+    which records this path), skipping the file picker."""
+    from lspr_app.storage.app_config import load_app_setting
+
+    stored = load_app_setting("last_session_file_path", None)
+    if not stored:
+        QMessageBox.information(window, "Latest session", "No previous session file was found yet.")
+        return
+    path = Path(str(stored))
+    if not path.exists():
+        QMessageBox.information(
+            window, "Latest session", f"The most recent session file could not be found:\n{path}"
+        )
+        return
+    show_import_from_measurement_for(window, path=path)
 
 
 def _on_probe_done(window, probe: MeasurementFileProbe) -> None:
@@ -403,10 +509,37 @@ def _on_probe_done(window, probe: MeasurementFileProbe) -> None:
             log.exception("Experiment plan import failed")
             errors.append(f"Experiment plan: {exc}")
 
+    # ── Dark / Reference spectra ────────────────────────────────────────────
+    if dialog.wants_dark or dialog.wants_reference:
+        try:
+            from lspr_app.storage.app_config import save_dark_reference_cache
+
+            if dialog.wants_dark:
+                spectrum = _load_last_baseline_spectrum(path, "dark")
+                if spectrum is None:
+                    errors.append("Dark spectrum: not found in file.")
+                else:
+                    window._session.set_dark(spectrum)
+                    any_done = True
+            if dialog.wants_reference:
+                spectrum = _load_last_baseline_spectrum(path, "reference")
+                if spectrum is None:
+                    errors.append("Reference spectrum: not found in file.")
+                else:
+                    window._session.set_reference(spectrum)
+                    any_done = True
+            save_dark_reference_cache(window._session.state.dark, window._session.state.reference)
+            window._update_dark_reference_button_icons()
+            window._refresh_plot()
+            if dialog.wants_dark or dialog.wants_reference:
+                window._log_success(f"Dark/reference spectra imported from {path.name}.")
+        except Exception as exc:
+            log.exception("Dark/reference spectrum import failed")
+            errors.append(f"Dark/reference spectrum: {exc}")
+
     if any_done and hasattr(window, "status_label"):
         window.status_label.setText(f"Imported from {path.name}")
     if errors:
-        from PyQt6.QtWidgets import QMessageBox
         QMessageBox.warning(
             window,
             "Import from measurement file",

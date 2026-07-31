@@ -12,18 +12,37 @@ def build_menu_bar(window) -> QMenuBar:
     # ── File ─────────────────────────────────────────────────────────────────
     file_menu = menu_bar.addMenu("File")
 
+    new_session_action = file_menu.addAction("New Session…")
+    new_session_action.setToolTip(
+        "Start a new session: clears the current sample/absorbance trace and starts "
+        "a new measurement file, with the option to keep the dark/reference spectra."
+    )
+    new_session_action.setShortcut(QKeySequence(QKeySequence.StandardKey.New))
+    new_session_action.triggered.connect(window._show_new_session_dialog)
+
+    file_menu.addSeparator()
+
     preferences_action = file_menu.addAction("Preferences…")
     preferences_action.setToolTip("Open the application preferences dialog.")
     preferences_action.triggered.connect(window._show_preferences_dialog)
 
     file_menu.addSeparator()
 
-    import_action = file_menu.addAction("Import from measurement file…")
-    import_action.setToolTip(
-        "Open an HDF5 measurement file and choose which sections to import:\n"
-        "processing settings, experiment plan, or both."
+    import_menu = file_menu.addMenu("Import")
+    import_menu.setToolTip("Import sections from a previous session's HDF5 measurement file.")
+
+    latest_session_action = import_menu.addAction("Latest Session…")
+    latest_session_action.setToolTip(
+        "Reopen the import checklist for the most recent session file, without a file picker."
     )
-    import_action.triggered.connect(window._show_import_from_measurement_dialog)
+    latest_session_action.triggered.connect(window._show_import_latest_session_dialog)
+
+    custom_import_action = import_menu.addAction("Custom…")
+    custom_import_action.setToolTip(
+        "Open an HDF5 measurement file and choose which sections to import:\n"
+        "processing settings, experiment plan, dark spectrum, or reference spectrum."
+    )
+    custom_import_action.triggered.connect(window._show_import_from_measurement_dialog)
 
     open_output_action = file_menu.addAction("Open output folder")
     open_output_action.setToolTip("Open the current measurement output folder in the file browser.")

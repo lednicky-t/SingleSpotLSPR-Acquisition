@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 from PyQt6.QtGui import QColor, QPixmap
 from PyQt6.QtCore import QTimer, Qt
-from PyQt6.QtWidgets import QFileDialog, QInputDialog
+from PyQt6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
 from lspr_app.app import create_spectrometer
 from lspr_app.domain.models import Spectrum
@@ -50,6 +50,7 @@ from lspr_app.gui.workers import (
     MeasurementCompressionTask,
     MeasurementWriterErrorSignals,
 )
+from lspr_app.storage.app_config import save_dark_reference_cache
 from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter
 from lspr_app.storage.measurement_archive import close_temp_measurement_writer
 
@@ -433,7 +434,40 @@ def _restore_spectrometer_backend_after_live(window) -> None:
     window._log_info("Spectrometer backend restored after live acquisition.")
 
 
+_PLOT_MODE_REVERT_DELAY_MS = 1000
+
+
+def _schedule_plot_mode_revert_to_raw(window, shown_plot: str) -> None:
+    """After jumping the spectrum plot to Dark/Reference right after
+    acquiring it (so the user can glance at what was just captured), snap
+    back to Raw a moment later instead of leaving the plot parked on a
+    static view - per the maintainer's request. Only reverts if the plot is
+    still showing exactly the view this call just switched to; if the user
+    (or another dark/reference capture) has since changed it, this is a
+    no-op.
+    """
+    def _revert() -> None:
+        if window.plot_selector.currentText() == shown_plot:
+            window.plot_selector.setCurrentText("Raw")
+
+    QTimer.singleShot(_PLOT_MODE_REVERT_DELAY_MS, _revert)
+
+
 def request_manual_acquisition(window, kind: str) -> None:
+    # Recapturing Dark/Reference while tracking is active changes what
+    # Absorbance means partway through a trace (same continuity concern as
+    # pausing tracking itself - see handle_start_tracking_button_clicked_for)
+    # - confirm first. Not needed when nothing is being tracked.
+    if bool(getattr(window, "_sensorgram_tracking_active", False)):
+        answer = QMessageBox.question(
+            window,
+            f"Capture new {kind}",
+            f"Tracking is active. Are you sure you want to capture a new {kind} spectrum?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
     window._log_info(f"Manual {kind} acquisition requested.")
     if window._live_active:
         current_sample = window._session.state.sample
@@ -455,12 +489,17 @@ def request_manual_acquisition(window, kind: str) -> None:
                 pass
         if window._measurement_writer is not None:
             window._measurement_writer.update_baselines(dark, reference)
+        try:
+            save_dark_reference_cache(dark, reference)
+        except Exception:
+            window._log_warning(f"Could not cache the {kind} spectrum to the user profile.")
         target_plot = "Dark" if kind == "dark" else "Reference"
         if window.plot_selector.currentText() != target_plot:
             window.plot_selector.blockSignals(True)
             window.plot_selector.setCurrentText(target_plot)
             window.plot_selector.blockSignals(False)
         window._refresh_spectrum_plot(window._session.get_plot_data(window.PLOT_MODES[target_plot]), None)
+        _schedule_plot_mode_revert_to_raw(window, target_plot)
         window._update_dark_reference_button_icons()
         window._request_deferred_ui_refresh(telemetry=True)
         window._schedule_acquisition_state_persist()
@@ -539,6 +578,11 @@ def handle_acquisition_success(window, kind: str, result: AcquisitionResult) -> 
         if selected_plot is not None:
             window._refresh_spectrum_plot(selected_plot, None)
         window._update_dark_reference_button_icons()
+        try:
+            save_dark_reference_cache(window._session.state.dark, window._session.state.reference)
+        except Exception:
+            window._log_warning(f"Could not cache the {kind} spectrum to the user profile.")
+        _schedule_plot_mode_revert_to_raw(window, target_plot)
         window._log_success(f"{kind.capitalize()} spectrum acquired.")
     elif kind == "sample" and not window._live_active:
         window._log_success("Raw spectrum acquired.")
@@ -775,13 +819,20 @@ def flush_live_processed_results(window) -> None:
         display_window_ms = max(window._display_window_ms, window._current_simulation_interval_ms())
     else:
         display_window_ms = window._display_window_ms
-    window._session.set_sample(
-        processed.with_metadata(
-            display_average_count=1,
-            display_window_ms=display_window_ms if display_window_ms > 0 else 0.0,
-            display_refresh_hz=window.live_rate_spin.value(),
-        )
+    tagged_processed = processed.with_metadata(
+        display_average_count=1,
+        display_window_ms=display_window_ms if display_window_ms > 0 else 0.0,
+        display_refresh_hz=window.live_rate_spin.value(),
     )
+    if window._source_mode == "simulation":
+        # Simulation output is wired directly to Absorbance - no dark/
+        # reference to subtract (see spectral_processing_pipeline_architecture.md).
+        # set_sample is never called in simulation mode, so state.sample stays
+        # unset there (nothing depends on it: saturation-line logic already
+        # excludes simulation by y_label, auto-exposure is spectrometer-only).
+        window._session.set_absorbance_direct(tagged_processed)
+    else:
+        window._session.set_sample(tagged_processed)
     window._last_display_average_count = 1
     window._last_display_period_ms = display_window_ms
     window._last_processing_ms = result.processing_ms
@@ -1230,14 +1281,17 @@ def set_manual_acquisition_buttons_enabled(window, enabled: bool) -> None:
 
 
 def set_measurement_ui_locked(window, locked: bool) -> None:
+    window._measurement_ui_locked = locked
     window.sim_resolution_spin.setEnabled(not locked)
     window.sim_output_rate_spin.setEnabled(not locked and window._source_mode == "simulation")
     # Toggling tracking off mid-recording would put a gap in the measurement
     # file's own metrics table (append_processed_trace_history is what's being
     # gated) - disable the control entirely for the duration of the recording
-    # rather than rely on the maintainer never pressing it by mistake.
-    if hasattr(window, "start_tracking_button"):
-        window.start_tracking_button.setEnabled(not locked)
+    # rather than rely on the maintainer never pressing it by mistake. Also
+    # only enabled while viewing Absorbance with it actually available - see
+    # _refresh_start_tracking_button_enabled (only Absorbance is trackable).
+    if hasattr(window, "_refresh_start_tracking_button_enabled"):
+        window._refresh_start_tracking_button_enabled()
     if hasattr(window, "_set_recording_context_controls_enabled"):
         window._set_recording_context_controls_enabled(not locked)
     if locked:
@@ -2064,13 +2118,15 @@ def sync_simulation_backend_from_controls_for(window) -> None:
             wavelength_resolution_nm=max(window.sim_resolution_spin.value(), 0.001),
             peak_center_nm=float(window.sim_peak_center_slider.value()),
             peak_width_nm=float(max(window.sim_peak_width_slider.value(), 1)),
-            peak_height=float(window.sim_peak_height_slider.value()),
+            # peak_height/baseline/noise sliders are int, milli-AU steps -
+            # divide by 1000 to get absorbance units (see SimulationParameters).
+            peak_height=float(window.sim_peak_height_slider.value()) / 1000.0,
             secondary_peak_offset_nm=float(window.sim_secondary_peak_offset_slider.value()),
             secondary_peak_height_percent=float(window.sim_secondary_peak_height_slider.value()),
             secondary_peak_width_percent=float(max(window.sim_secondary_peak_width_slider.value(), 1)),
-            baseline=float(window.sim_baseline_slider.value()),
+            baseline=float(window.sim_baseline_slider.value()) / 1000.0,
             slope=float(window.sim_slope_slider.value()) / 100.0,
-            noise=float(window.sim_noise_slider.value()),
+            noise=float(window.sim_noise_slider.value()) / 1000.0,
         )
     )
     if (

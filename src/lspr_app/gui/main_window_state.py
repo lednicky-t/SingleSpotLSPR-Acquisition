@@ -57,6 +57,7 @@ from lspr_app.gui.main_window_processing import (
 from lspr_app.storage import user_profile
 from lspr_app.storage.app_config import (
     load_app_setting,
+    load_dark_reference_cache,
     load_processing_settings,
     save_acquisition_state,
     save_window_ui_state,
@@ -1695,13 +1696,16 @@ def acquisition_state_payload(window) -> dict[str, object]:
         "simulation": {
             "peak_center_nm": float(simulation.peak_center_nm),
             "peak_width_nm": float(simulation.peak_width_nm),
-            "peak_height": float(simulation.peak_height),
+            # peak_height/baseline/noise are stored pre-multiplied back to the
+            # sliders' milli-AU int scale, same convention as slope's *100.0
+            # below - restore does a direct round, no further scaling.
+            "peak_height": float(simulation.peak_height * 1000.0),
             "secondary_peak_offset_nm": float(simulation.secondary_peak_offset_nm),
             "secondary_peak_height_percent": float(simulation.secondary_peak_height_percent),
             "secondary_peak_width_percent": float(simulation.secondary_peak_width_percent),
-            "baseline": float(simulation.baseline),
+            "baseline": float(simulation.baseline * 1000.0),
             "slope": float(simulation.slope * 100.0),
-            "noise": float(simulation.noise),
+            "noise": float(simulation.noise * 1000.0),
             "wavelength_resolution_nm": float(simulation.wavelength_resolution_nm),
             "output_rate_hz": float(window.sim_output_rate_spin.value()),
         },
@@ -1762,8 +1766,26 @@ def schedule_acquisition_state_persist(window) -> None:
     window._acquisition_state_requested_at = perf_counter()
 
 
+def _restore_cached_dark_reference(window) -> None:
+    """Restore any cached Dark/Reference spectra from the active user's
+    profile onto window._session - lives in its own settings key (see
+    save_dark_reference_cache), independent of the "acquisition_state"
+    payload here. Must run after window._session is pointed at the session
+    that's actually going to stay active (apply_source_mode_for below swaps
+    window._session between _hardware_session/_simulation_session), or the
+    restored spectra land on the session about to be swapped away and are
+    silently lost.
+    """
+    cached_dark, cached_reference = load_dark_reference_cache()
+    if cached_dark is not None:
+        window._session.set_dark(cached_dark)
+    if cached_reference is not None:
+        window._session.set_reference(cached_reference)
+
+
 def apply_acquisition_state_to_widgets(window, state: dict[str, object]) -> None:
     if not state:
+        _restore_cached_dark_reference(window)
         window._update_dark_reference_button_icons()
         window._update_freeze_button_icon()
         window._update_residual_button_icon()
@@ -1842,6 +1864,7 @@ def apply_acquisition_state_to_widgets(window, state: dict[str, object]) -> None
             window.source_tabs.setCurrentIndex(0)
             window.source_tabs.blockSignals(False)
         apply_source_mode_for(window, source_mode if source_mode in {"spectrometer", "simulation"} else "spectrometer", restart_live=False)
+        _restore_cached_dark_reference(window)
 
         residual_visible = bool(state.get("show_residual", False))
         window.show_residual_button.blockSignals(True)
@@ -1885,6 +1908,25 @@ def apply_source_mode_for(window, new_mode: str, restart_live: bool) -> None:
     window._source_mode = new_mode
     window._source_epoch += 1
     window._session = window._hardware_session if new_mode == "spectrometer" else window._simulation_session
+    # Keeps source_tabs' visual selection in sync for every caller, including
+    # ones that switch mode programmatically rather than via a tab/link click
+    # (e.g. handle_hardware_init_step_for's auto-connect-on-discovery) - those
+    # callers used to leave the tab widget showing the previous mode even
+    # though _source_mode/_session had already switched. Harmless no-op for
+    # callers that already sync this themselves (main_window_headers.py,
+    # acquisition_controller.py's deferred-switch paths).
+    if hasattr(window, "source_tabs"):
+        window.source_tabs.blockSignals(True)
+        window.source_tabs.setCurrentIndex(0 if new_mode == "spectrometer" else 1)
+        window.source_tabs.blockSignals(False)
+    # Dark/Reference icons and the Dark/Reference/Raw plot views all read
+    # from window._session, which just changed to a *different*
+    # MeasurementSession with its own independent dark/reference/absorbance
+    # state - without this, the icons kept showing the previous session's
+    # captured state, and switching to Dark/Reference in plot_selector
+    # rendered blank until some unrelated event happened to refresh them.
+    if hasattr(window, "_update_dark_reference_button_icons"):
+        window._update_dark_reference_button_icons()
     window._raw_last_finish_ts = None
     window._raw_last_sample_index = None
     window._last_elapsed_ms = None
@@ -1898,12 +1940,15 @@ def apply_source_mode_for(window, new_mode: str, restart_live: bool) -> None:
     window._metric_reference_processed = None
     window._live_trace_started_at = None
     window._reset_live_accumulator()
-    if new_mode == "simulation" and window._session.state.sample is None:
-        window._session.set_sample(window._build_simulation_spectrum("sample"))
+    if new_mode == "simulation" and window._session.state.absorbance is None:
+        # Simulation output is wired directly to Absorbance - see
+        # flush_live_processed_results (acquisition_controller.py).
+        window._session.set_absorbance_direct(window._build_simulation_spectrum("sample"))
     window._log_success(
         f"Active source set to {'spectrometer' if new_mode == 'spectrometer' else 'simulation'}."
     )
     window._configure_source_tabs()
+    window._update_absorbance_only_mode()
     window._refresh_plot()
     window._request_deferred_ui_refresh(telemetry=True, live_estimate=True)
     window._update_simulation_controls_enabled()

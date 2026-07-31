@@ -34,11 +34,43 @@ def process_spectrum(spectrum: Spectrum | None, settings: ProcessingSettings) ->
     timings_ms: dict[str, float] = {}
     timings_cpu_ms: dict[str, float] = {}
 
+    # Baseline/smoothing must run on the full acquired spectrum, before the
+    # wavelength-range crop below - otherwise wherever the crop boundary
+    # currently sits becomes an edge those operations react to, so narrowing
+    # the range changes values at wavelengths still inside it (see
+    # spectral_processing_pipeline_architecture.md). Both are also
+    # absorbance-only per the maintainer's design: Raw/Dark/Reference get
+    # cropped but never baseline-corrected or smoothed.
     stage_started = perf_counter()
     stage_cpu_started = thread_time()
-    mask = (spectrum.wavelengths_nm >= settings.wavelength_min_nm) & (
-        spectrum.wavelengths_nm <= settings.wavelength_max_nm
-    )
+    cleaned = _sanitize_curve_values(spectrum.wavelengths_nm, spectrum.values)
+    timings_ms["sanitize"] = (perf_counter() - stage_started) * 1000.0
+    timings_cpu_ms["sanitize"] = (thread_time() - stage_cpu_started) * 1000.0
+    if cleaned is None:
+        return None, None
+    wavelengths, values, replaced_nonfinite = cleaned
+
+    is_absorbance = spectrum.metadata.get("kind") == "absorbance"
+
+    stage_started = perf_counter()
+    stage_cpu_started = thread_time()
+    if is_absorbance and settings.baseline_method == "linear":
+        values = values - _linear_baseline(values)
+    timings_ms["baseline"] = (perf_counter() - stage_started) * 1000.0
+    timings_cpu_ms["baseline"] = (thread_time() - stage_cpu_started) * 1000.0
+
+    stage_started = perf_counter()
+    stage_cpu_started = thread_time()
+    if is_absorbance and settings.smoothing_method == "moving_average":
+        values = _moving_average(values, settings.smoothing_window)
+    elif is_absorbance and settings.smoothing_method == "savitzky_golay":
+        values = _savitzky_golay(values, settings.smoothing_window)
+    timings_ms["smoothing"] = (perf_counter() - stage_started) * 1000.0
+    timings_cpu_ms["smoothing"] = (thread_time() - stage_cpu_started) * 1000.0
+
+    stage_started = perf_counter()
+    stage_cpu_started = thread_time()
+    mask = (wavelengths >= settings.wavelength_min_nm) & (wavelengths <= settings.wavelength_max_nm)
     timings_ms["mask"] = (perf_counter() - stage_started) * 1000.0
     timings_cpu_ms["mask"] = (thread_time() - stage_cpu_started) * 1000.0
     if not np.any(mask):
@@ -46,35 +78,10 @@ def process_spectrum(spectrum: Spectrum | None, settings: ProcessingSettings) ->
 
     stage_started = perf_counter()
     stage_cpu_started = thread_time()
-    wavelengths = spectrum.wavelengths_nm[mask].copy()
-    values = spectrum.values[mask].copy()
+    wavelengths = wavelengths[mask].copy()
+    values = values[mask].copy()
     timings_ms["slice"] = (perf_counter() - stage_started) * 1000.0
     timings_cpu_ms["slice"] = (thread_time() - stage_cpu_started) * 1000.0
-
-    stage_started = perf_counter()
-    stage_cpu_started = thread_time()
-    cleaned = _sanitize_curve_values(wavelengths, values)
-    timings_ms["sanitize"] = (perf_counter() - stage_started) * 1000.0
-    timings_cpu_ms["sanitize"] = (thread_time() - stage_cpu_started) * 1000.0
-    if cleaned is None:
-        return None, None
-    wavelengths, values, replaced_nonfinite = cleaned
-
-    stage_started = perf_counter()
-    stage_cpu_started = thread_time()
-    if settings.baseline_method == "linear":
-        values = values - _linear_baseline(values)
-    timings_ms["baseline"] = (perf_counter() - stage_started) * 1000.0
-    timings_cpu_ms["baseline"] = (thread_time() - stage_cpu_started) * 1000.0
-
-    stage_started = perf_counter()
-    stage_cpu_started = thread_time()
-    if settings.smoothing_method == "moving_average":
-        values = _moving_average(values, settings.smoothing_window)
-    elif settings.smoothing_method == "savitzky_golay":
-        values = _savitzky_golay(values, settings.smoothing_window)
-    timings_ms["smoothing"] = (perf_counter() - stage_started) * 1000.0
-    timings_cpu_ms["smoothing"] = (thread_time() - stage_cpu_started) * 1000.0
 
     stage_started = perf_counter()
     stage_cpu_started = thread_time()
@@ -101,7 +108,7 @@ def process_spectrum(spectrum: Spectrum | None, settings: ProcessingSettings) ->
 
     stage_started = perf_counter()
     stage_cpu_started = thread_time()
-    fit = fit_processed_spectrum(processed, settings)
+    fit = fit_processed_spectrum(processed, settings) if is_absorbance else None
     timings_ms["fit"] = (perf_counter() - stage_started) * 1000.0
     timings_cpu_ms["fit"] = (thread_time() - stage_cpu_started) * 1000.0
 
@@ -404,9 +411,26 @@ def _moving_average(values: np.ndarray, window: int) -> np.ndarray:
 
 
 def _linear_baseline(values: np.ndarray) -> np.ndarray:
-    if len(values) < 2:
+    """A straight line anchored at each end, subtracted from the whole
+    spectrum.
+
+    Anchors are the *mean of a small window* of points at each end, not a
+    single raw sample: a line drawn between two individually-noisy samples
+    bakes that per-frame sample noise directly into the slope/intercept
+    subtracted from the entire spectrum on every acquired frame, which shows
+    up as jitter in tracked metrics (peak/centroid/fit position) downstream
+    - averaging ~2% of the points at each edge (clamped to 5-50, or fewer
+    for very short arrays) cancels most of that per-sample noise while still
+    anchoring on the true edges, not an arbitrary offset.
+    """
+    n = len(values)
+    if n < 2:
         return np.zeros_like(values, dtype=np.float64)
-    return np.linspace(float(values[0]), float(values[-1]), len(values), dtype=np.float64)
+    window = min(max(int(round(n * 0.02)), 5), 50)
+    window = min(window, max(n // 2, 1))
+    left = float(np.mean(values[:window]))
+    right = float(np.mean(values[-window:]))
+    return np.linspace(left, right, n, dtype=np.float64)
 
 
 def _resolve_fit_window(

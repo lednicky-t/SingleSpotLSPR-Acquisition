@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import logging
+import math
 from time import perf_counter
 import pyqtgraph as pg
 
@@ -193,21 +194,31 @@ class ScientificAxis(pg.AxisItem):
             return
 
     @staticmethod
-    def _format_normal_range(numeric: float, abs_value: float) -> str:
-        if abs_value < 1:
-            return f"{numeric:.4f}"
-        if abs_value < 10:
-            return f"{numeric:.3f}"
-        if abs_value < 100:
-            return f"{numeric:.2f}"
-        return f"{numeric:.1f}"
+    def _decimal_places_for_spacing(spacing: float) -> int:
+        """How many decimal places are needed so that two ticks *spacing*
+        data-units apart never round to the same label - e.g. spacing=0.1 ->
+        1 place, spacing=50 -> 0 places, spacing=0.001 -> 3 places. Same
+        formula pg.AxisItem's own default tickStrings uses
+        (`places = max(0, ceil(-log10(spacing)))`). Replaces the previous
+        fixed-by-magnitude bucketing (always 1 decimal for values >= 100,
+        however tightly the view was zoomed in - the source of duplicate-
+        looking adjacent tick labels), and stays capped so a pathologically
+        tiny spacing can't produce an unreadable wall of digits.
+        """
+        if not math.isfinite(spacing) or spacing <= 0:
+            return 1
+        return min(max(0, math.ceil(-math.log10(spacing))), 6)
 
-    def _format_scientific(self, numeric: float, abs_value: float) -> str:
+    @staticmethod
+    def _format_normal_range(numeric: float, places: int) -> str:
+        return f"{numeric:.{places}f}"
+
+    def _format_scientific(self, numeric: float, abs_value: float, places: int) -> str:
         if abs_value < 1e-2 or abs_value >= 1e4:
             return f"{numeric:.2e}"
-        return self._format_normal_range(numeric, abs_value)
+        return self._format_normal_range(numeric, places)
 
-    def _format_si(self, numeric: float, abs_value: float) -> str:
+    def _format_si(self, numeric: float, abs_value: float, places: int) -> str:
         # Same magnitude boundaries as _format_scientific (>=1e4 / <1e-2
         # switch out of plain decimal) - only the compact notation used
         # outside that middle range differs (65.5k instead of 6.55e+04).
@@ -219,16 +230,17 @@ class ScientificAxis(pg.AxisItem):
                 if abs_value >= threshold:
                     return f"{numeric / threshold:.3g}{suffix}"
             return f"{numeric:.2e}"  # smaller than 1 nano - vanishingly rare
-        return self._format_normal_range(numeric, abs_value)
+        return self._format_normal_range(numeric, places)
 
     def tickStrings(self, values, scale, spacing):  # type: ignore[override]
         started = perf_counter()
+        places = self._decimal_places_for_spacing(spacing * scale)
         formatter = self._format_si if self._format_mode == "si" else self._format_scientific
         labels: list[str] = []
         for value in values:
             numeric = float(value)
             abs_value = abs(numeric)
-            labels.append("0" if abs_value == 0 else formatter(numeric, abs_value))
+            labels.append("0" if abs_value == 0 else formatter(numeric, abs_value, places))
         elapsed_ms = (perf_counter() - started) * 1000.0
         self._record_tickstrings(len(values), elapsed_ms)
         return labels
@@ -294,6 +306,37 @@ class MenuDropdownButton(QToolButton):
         self._current = text
         self.setText(f"[{text}]")
         self.currentTextChanged.emit(text)
+
+    def set_option_enabled(self, name: str, enabled: bool) -> None:
+        """Show/hide and enable/disable one option (e.g. hiding Raw/Dark/
+        Reference from plot_selector in Simulation mode - see
+        MainWindow._update_absorbance_only_mode). No-op if *name* isn't one
+        of this button's options. Hidden options are also excluded from
+        wheelEvent's cycle, so they can't be reached by mouse-wheel either.
+        """
+        action = self._actions.get(name)
+        if action is None:
+            return
+        action.setVisible(enabled)
+        action.setEnabled(enabled)
+
+    def wheelEvent(self, event) -> None:  # pragma: no cover - GUI runtime path
+        # Same up=forward/down=back convention as InlineWheelDoubleLabel's
+        # wheelEvent - cycles through options in the same order they were
+        # passed to __init__ (e.g. plot_selector's Raw/Absorbance/Reference/Dark),
+        # skipping any option hidden via set_option_enabled(False).
+        options = [name for name, action in self._actions.items() if action.isVisible()]
+        if len(options) < 2 or self._current not in options:
+            event.ignore()
+            return
+        delta = event.angleDelta().y()
+        if delta == 0:
+            event.ignore()
+            return
+        step = 1 if delta > 0 else -1
+        next_index = (options.index(self._current) + step) % len(options)
+        self.setCurrentText(options[next_index])
+        event.accept()
 
 
 class CollapsibleSection(QWidget):

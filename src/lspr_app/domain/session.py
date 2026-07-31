@@ -29,6 +29,25 @@ class MeasurementSession:
         self.state = replace(self.state, sample=sample)
         self._recompute_absorbance()
 
+    def set_absorbance_direct(self, spectrum: Spectrum) -> None:
+        """Wire a spectrum straight in as Absorbance, bypassing dark/reference math.
+
+        Used by Simulation mode (see spectral_processing_pipeline_architecture.md):
+        the simulated signal *is* the absorbance curve directly, so there's no
+        dark/reference to capture. Doesn't call _recompute_absorbance itself,
+        but set_dark/set_reference/set_sample all do unconditionally, and
+        will null out a value set here if any of them get called afterward
+        without all three present. Simulation mode must never call
+        set_dark/set_reference/set_sample - its live loop and capture
+        buttons are wired accordingly (see MainWindow._update_absorbance_only_mode).
+        """
+        absorbance = replace(
+            spectrum,
+            y_label="Absorbance (a.u.)",
+            metadata={**spectrum.metadata, "kind": "absorbance"},
+        )
+        self.state = replace(self.state, absorbance=absorbance)
+
     def get_plot_data(self, plot_mode: str) -> Spectrum | None:
         if plot_mode == "dark":
             return self.state.dark

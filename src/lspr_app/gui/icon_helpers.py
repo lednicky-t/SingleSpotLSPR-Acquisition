@@ -96,6 +96,26 @@ def crosshair_cursor_icon() -> QIcon:
     return tint_tabler_icon(tabler_icon("crosshair"), QColor("#8a94a6"))
 
 
+def stats_hidden_icon() -> QIcon:
+    # Same muted gray as crosshair_cursor_icon, for the same "this is off"
+    # reason - a distinct shape (bullet list vs. crosshair) so the two hidden
+    # states in adjacent plot corners aren't easy to confuse at a glance.
+    return tint_tabler_icon(tabler_icon("list"), QColor("#8a94a6"))
+
+
+def tracking_ready_icon(blink_visible: bool) -> QIcon:
+    # Same green as transport_icon's "play" tint (#47a861), but filled and
+    # alpha-pulsed - same alpha-blink idiom acquisition_controller.py's
+    # update_measurement_toggle_button already uses for trace_record_button
+    # while a measurement is active. Shown on start_tracking_button once dark
+    # and reference are both captured (see
+    # MainWindow._refresh_tracking_ready_indicator) so it's visually obvious
+    # tracking can be started, without the button changing shape/position.
+    color = QColor("#47a861")
+    color.setAlpha(255 if blink_visible else 90)
+    return tint_tabler_icon(tabler_icon("player_play_filled"), color)
+
+
 __all__ = [
     "bulb_icon",
     "crosshair_cursor_icon",
@@ -110,11 +130,13 @@ __all__ = [
     "reference_icon",
     "residual_icon",
     "snowflake_icon",
+    "stats_hidden_icon",
     "storage_compression_icon",
     "storage_save_icon",
     "tabler_icon",
     "temperature_status_icon",
     "tint_tabler_icon",
+    "tracking_ready_icon",
     "transport_icon",
     "trash_icon",
 ]

@@ -101,7 +101,7 @@ def build_simulation_page(window) -> QWidget:
         "Peak height",
         window.sim_peak_height_slider,
         window.sim_peak_height_value,
-        "Peak height in the synthetic display model.",
+        "Peak height in absorbance units (AU) - the synthetic curve is wired directly to Absorbance.",
     )
     _add_sim_section_header(simulation_layout, 5, "Secondary peak")
     _add_sim_row(
@@ -134,7 +134,7 @@ def build_simulation_page(window) -> QWidget:
         "Baseline",
         window.sim_baseline_slider,
         window.sim_baseline_value,
-        "Baseline offset in the synthetic display model.",
+        "Baseline offset in absorbance units (AU).",
     )
     _add_sim_row(
         simulation_layout,
@@ -150,7 +150,7 @@ def build_simulation_page(window) -> QWidget:
         "Noise",
         window.sim_noise_slider,
         window.sim_noise_value,
-        "Random noise level added to the synthetic display model.",
+        "Random noise level, in absorbance units (AU), added to the synthetic curve.",
     )
 
     resolution_label = QLabel("Resolution")

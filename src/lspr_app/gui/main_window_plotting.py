@@ -20,7 +20,7 @@ from lspr_app.domain.processing import fit_processed_spectrum, processing_debug_
 from PyQt6.QtCore import Qt, QPointF
 from PyQt6.QtGui import QColor
 
-from lspr_app.gui.icon_helpers import crosshair_cursor_icon
+from lspr_app.gui.icon_helpers import crosshair_cursor_icon, stats_hidden_icon
 from lspr_app.gui.plot_controller import (
     apply_processing_range_to_spectrum_plot as _apply_processing_range_to_spectrum_plot,
     flush_deferred_display_refreshes as _flush_deferred_display_refreshes,
@@ -267,7 +267,13 @@ def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
         # Sample mode, and the sensorgram trace/"Start Tracking" button never
         # saw Absorbance data at all (it only ever received the raw
         # processed/fit - see the comment removed from that call site).
-        window._update_spectrum_stats(processed, fit)
+        # Withheld the same way refresh_spectrum_plot_for withholds the curve
+        # while device discovery hasn't finished yet - no spectra means no
+        # derived stats either.
+        if getattr(window, "_device_discovery_complete", True):
+            window._update_spectrum_stats(processed, fit)
+        else:
+            window._update_spectrum_stats(None, None)
     except Exception as exc:
         window._log_error(f"Spectrum refresh failed: {exc}")
     window._update_poly_warning_indicator(fit)
@@ -305,11 +311,21 @@ def _metric_nm_from_analysis(mode: str, analysis_metrics: dict, fallback_nm: flo
 
 
 _RAW_COUNTS_Y_LABEL = "Intensity (counts)"
-SATURATION_WARNING_FRACTION = 0.95
+# Fallback only - used if window._auto_exposure_settings isn't available for
+# some reason. Normally the line's position tracks
+# AutoExposureSettings.saturation_fraction directly (see below), so the two
+# never drift out of sync the way they used to.
+DEFAULT_SATURATION_WARNING_FRACTION = 0.95
 
 
 def _update_saturation_line_for(window, processed) -> None:
-    """Position the red saturation-warning line at 95% of the detector's full scale.
+    """Position the red saturation-warning line at the same fraction of the
+    detector's full scale as auto-exposure's own "too bright" threshold
+    (AutoExposureSettings.saturation_fraction - see
+    gui/acquisition_controller.py's auto_exposure_handle_live_frame_for), so
+    the line always shows where auto-exposure would actually back off,
+    rather than an independent hardcoded value that can silently disagree
+    with it.
 
     Only meaningful for raw hardware counts (not simulation "a.u." values or the
     derived Absorbance plot), since those are not bounded by the spectrometer's
@@ -333,7 +349,9 @@ def _update_saturation_line_for(window, processed) -> None:
     if not np.isfinite(max_intensity) or max_intensity <= 0:
         saturation_line.setVisible(False)
         return
-    saturation_line.setPos(max_intensity * SATURATION_WARNING_FRACTION)
+    auto_exposure_settings = getattr(window, "_auto_exposure_settings", None)
+    saturation_fraction = getattr(auto_exposure_settings, "saturation_fraction", DEFAULT_SATURATION_WARNING_FRACTION)
+    saturation_line.setPos(max_intensity * saturation_fraction)
     saturation_line.setVisible(True)
 
 
@@ -345,6 +363,25 @@ def refresh_spectrum_plot_for(window, processed, fit) -> None:
     """
     if window._plots_frozen:
         return
+    if not getattr(window, "_device_discovery_complete", True):
+        window.spectrum_curve.setData([], [])
+        window.fit_curve.setData([], [])
+        window._clear_residual_display()
+        window.fit_region_item.hide()
+        window.max_marker.setData([], [])
+        window.poly_marker.setData([], [])
+        window.gaussian_marker.setData([], [])
+        window.centroid_marker.setData([], [])
+        window.spectrum_plot.setLabel("left", "Signal")
+        placeholder = getattr(window, "_discovery_placeholder_text", None)
+        if placeholder is not None:
+            placeholder.setText("Scanning for devices...")
+            placeholder.show()
+            window._reposition_discovery_placeholder()
+        return
+    placeholder = getattr(window, "_discovery_placeholder_text", None)
+    if placeholder is not None:
+        placeholder.hide()
     view_x_min = view_x_max = view_width_px = None
     try:
         view_box = window.spectrum_plot.getPlotItem().vb
@@ -777,7 +814,12 @@ def set_sensorgram_tracking_active_for(window, active: bool) -> None:
         window.start_tracking_button.blockSignals(True)
         window.start_tracking_button.setChecked(active)
         window.start_tracking_button.blockSignals(False)
-    if hasattr(window, "_update_start_tracking_button_icon"):
+    if hasattr(window, "_refresh_tracking_ready_indicator"):
+        # Stops the ready-to-track blink the moment tracking starts, and
+        # re-evaluates it (resumes blinking if dark/reference are still
+        # captured) when tracking is paused again.
+        window._refresh_tracking_ready_indicator()
+    elif hasattr(window, "_update_start_tracking_button_icon"):
         window._update_start_tracking_button_icon()
     if hasattr(window, "status_label"):
         tracking_state = "started" if active else "paused"
@@ -1077,7 +1119,7 @@ def handle_live_setting_change_for(window) -> None:
         window._request_trace_autoscale()
         window.status_label.setText("Live display window reset after settings change.")
     elif window._source_mode == "simulation":
-        window._session.set_sample(window._build_simulation_spectrum("sample"))
+        window._session.set_absorbance_direct(window._build_simulation_spectrum("sample"))
         window._schedule_processing_refresh()
         window._request_trace_autoscale()
     window._schedule_acquisition_state_persist()
@@ -1227,6 +1269,9 @@ def cycle_spectrum_y_axis_format_mode_for(window) -> None:
 
 _CORNER_OVERLAY_MARGIN = 6
 _CURSOR_OFF_TEXT = "cursor: off (click to enable)"
+_STATS_OFF_TEXT = "stats hidden (double-click to show)"
+_SPECTRUM_STATS_FALLBACK_TEXT = "peak: -<br>centroid: -<br>FWHM: -<br>MSE: -<br>R: -<br>S/N: -"
+_TRACE_STATS_FALLBACK_TEXT = "latest: - | min/max: - | span: - | dt -"
 
 
 _CORNER_OVERLAY_OBJECT_NAMES = (
@@ -1259,10 +1304,11 @@ class _CornerOverlayContainer(QWidget):
     WA_TransparentForMouseEvents was tried first and reverted - per Qt's own
     docs that attribute "disables the delivery of mouse events to the widget
     AND ITS CHILDREN", which also silently broke
-    trace_stats_label/spectrum_cursor_label/trace_cursor_label's own
-    click-to-cycle/toggle handlers (installEventFilter-based, watching for
-    left-button MouseButtonPress) - a real regression, reported by the
-    maintainer. Overriding contextMenuEvent instead only intercepts the
+    spectrum_stats_label/trace_stats_label/spectrum_cursor_label/trace_cursor_label's
+    own click-to-cycle/toggle/hide handlers (installEventFilter-based,
+    watching for left-button MouseButtonPress and MouseButtonDblClick) - a
+    real regression, reported by the maintainer. Overriding contextMenuEvent
+    instead only intercepts the
     right-click/context-menu request specifically: a click landing on the
     container's own background/margin generates a QContextMenuEvent that
     reaches this override directly; a click landing on the label itself is
@@ -1317,6 +1363,13 @@ def build_spectrum_corner_overlay_for(window) -> None:
     used to take.
     """
     window.spectrum_stats_label.setWordWrap(False)
+    window.spectrum_stats_label.setCursor(Qt.CursorShape.PointingHandCursor)
+    window.spectrum_stats_label.setToolTip(
+        window.spectrum_stats_label.toolTip() + " Double-click to show/hide."
+    )
+    window.spectrum_stats_label.installEventFilter(window)
+    window._spectrum_stats_enabled = True
+    window._spectrum_stats_off_icon = stats_hidden_icon()
     window.spectrum_cursor_label.setCursor(Qt.CursorShape.PointingHandCursor)
     window.spectrum_cursor_label.setToolTip(
         "Spectrum cursor readout under the mouse pointer. Click to show/hide (also hides the plot crosshair)."
@@ -1344,6 +1397,11 @@ def build_trace_corner_overlay_for(window) -> None:
     the experiment-control-step timeline bar is shown at the top of this
     plot - see _sensorgram_overlay_top_margin_px.
     """
+    window.trace_stats_label.setToolTip(
+        window.trace_stats_label.toolTip() + " Double-click to show/hide."
+    )
+    window._trace_stats_enabled = True
+    window._trace_stats_off_icon = stats_hidden_icon()
     window.trace_cursor_label.setCursor(Qt.CursorShape.PointingHandCursor)
     window.trace_cursor_label.setToolTip(
         "Metric cursor readout under the mouse pointer. Click to show/hide (also hides the plot crosshair)."
@@ -1428,16 +1486,16 @@ def reposition_trace_corner_overlay_for(window) -> None:
     _reposition_corner_overlay(plot, getattr(window, "trace_cursor_overlay", None), align="right", vertical=vertical)
 
 
-def _show_cursor_off_state(label, off_icon) -> None:
-    """Collapse a cursor-readout label to a small crosshair icon while its
-    cursor is disabled, instead of the old "cursor: off (click to enable)"
+def _show_off_state(label, off_icon, fallback_text: str) -> None:
+    """Collapse a corner-overlay label to a small icon while its content is
+    toggled off, instead of a "click to enable"/"double-click to show"
     sentence - takes far less corner space and reads at a glance. Falls back
-    to the text placeholder if no icon was precomputed (e.g. a minimal fake
-    window in a pure-logic unit test that never called
+    to the given placeholder text if no icon was precomputed (e.g. a minimal
+    fake window in a pure-logic unit test that never called
     build_spectrum_corner_overlay_for/build_trace_corner_overlay_for).
     """
     if off_icon is None or not hasattr(label, "setPixmap"):
-        label.setText(_CURSOR_OFF_TEXT)
+        label.setText(fallback_text)
         return
     size = label.fontMetrics().height()
     label.setPixmap(off_icon.pixmap(size, size))
@@ -1448,7 +1506,7 @@ def toggle_spectrum_cursor_enabled_for(window) -> None:
     if window._spectrum_cursor_enabled:
         window.spectrum_cursor_label.setText(getattr(window, "_spectrum_cursor_text", "-"))
     else:
-        _show_cursor_off_state(window.spectrum_cursor_label, getattr(window, "_spectrum_cursor_off_icon", None))
+        _show_off_state(window.spectrum_cursor_label, getattr(window, "_spectrum_cursor_off_icon", None), _CURSOR_OFF_TEXT)
     for line_name in ("spectrum_vline", "spectrum_hline"):
         line = getattr(window, line_name, None)
         if line is not None:
@@ -1461,9 +1519,27 @@ def toggle_trace_cursor_enabled_for(window) -> None:
     if window._trace_cursor_enabled:
         window.trace_cursor_label.setText(getattr(window, "_trace_cursor_text", "-"))
     else:
-        _show_cursor_off_state(window.trace_cursor_label, getattr(window, "_trace_cursor_off_icon", None))
+        _show_off_state(window.trace_cursor_label, getattr(window, "_trace_cursor_off_icon", None), _CURSOR_OFF_TEXT)
     for line_name in ("trace_vline", "trace_hline"):
         line = getattr(window, line_name, None)
         if line is not None:
             line.setVisible(window._trace_cursor_enabled)
+    reposition_trace_corner_overlay_for(window)
+
+
+def toggle_spectrum_stats_enabled_for(window) -> None:
+    window._spectrum_stats_enabled = not getattr(window, "_spectrum_stats_enabled", True)
+    if window._spectrum_stats_enabled:
+        window.spectrum_stats_label.setText(getattr(window, "_spectrum_stats_html", _SPECTRUM_STATS_FALLBACK_TEXT))
+    else:
+        _show_off_state(window.spectrum_stats_label, getattr(window, "_spectrum_stats_off_icon", None), _STATS_OFF_TEXT)
+    reposition_spectrum_corner_overlay_for(window)
+
+
+def toggle_trace_stats_enabled_for(window) -> None:
+    window._trace_stats_enabled = not getattr(window, "_trace_stats_enabled", True)
+    if window._trace_stats_enabled:
+        window.trace_stats_label.setText(getattr(window, "_trace_stats_html", _TRACE_STATS_FALLBACK_TEXT))
+    else:
+        _show_off_state(window.trace_stats_label, getattr(window, "_trace_stats_off_icon", None), _STATS_OFF_TEXT)
     reposition_trace_corner_overlay_for(window)

@@ -10,9 +10,16 @@ from numpy.typing import NDArray
 ArrayF64 = NDArray[np.float64]
 
 
+# Spectrometer default integration time at startup, in a fresh session with
+# no saved state to restore - the GUI's integration_spin also uses this as
+# its allowed minimum (see gui/main_window.py), so a fresh app load starts
+# at the fastest/safest exposure rather than an arbitrary fixed guess.
+DEFAULT_INTEGRATION_TIME_MS = 1.0
+
+
 @dataclass(slots=True)
 class AcquisitionSettings:
-    integration_time_ms: float = 50.0
+    integration_time_ms: float = DEFAULT_INTEGRATION_TIME_MS
     averages: int = 1
     correct_dark_counts: bool = False
     correct_nonlinearity: bool = False
@@ -34,8 +41,19 @@ class AutoExposureSettings:
 
     min_integration_time_us: int = 1_000
     max_integration_time_us: int = 1_000_000
-    saturation_fraction: float = 0.95
-    target_low_fraction: float = 0.90
+    # Target band lowered from the textbook ADC fractions (0.95/0.90) after
+    # the maintainer found the detector's apparent "saturation plateau"
+    # isn't a fixed count - it drifted from ~59,300 to ~61,000 counts as
+    # integration time dropped from 100 ms to 30 ms while still saturated
+    # (likely dark-count subtraction, which scales with integration time,
+    # removing more signal from an equally-saturated raw reading at the
+    # longer exposure). That drift sat right inside the old
+    # [58,982, 62,258) target window (0.90-0.95 x a 65535-count full
+    # scale), so auto-exposure could report success on a peak that was
+    # already saturated. Lowered to clear that ambiguous zone - target band
+    # is now ~56,000-58,000 counts for a 65535-count detector.
+    saturation_fraction: float = 0.885
+    target_low_fraction: float = 0.855
     max_iterations: int = 15
 
 

@@ -55,7 +55,13 @@ from lspr_app.device.device_manager import DeviceCommunicationService
 from lspr_app.device.reglo_icc import PumpProbe
 
 from lspr_app.device.simulated import SimulatedSpectrometer
-from lspr_app.domain.models import AcquisitionSettings, AutoExposureSettings, ProcessingSettings, Spectrum
+from lspr_app.domain.models import (
+    AcquisitionSettings,
+    AutoExposureSettings,
+    DEFAULT_INTEGRATION_TIME_MS,
+    ProcessingSettings,
+    Spectrum,
+)
 from lspr_app.domain.processing import set_processing_debug_mode_enabled
 from lspr_app.domain.session import MeasurementSession
 from lspr_app.storage.app_config import (
@@ -92,6 +98,7 @@ from lspr_app.gui.icon_helpers import (
     snowflake_icon,
     storage_compression_icon,
     storage_save_icon,
+    tracking_ready_icon,
     transport_icon,
     tint_tabler_icon,
 )
@@ -303,6 +310,8 @@ from lspr_app.gui.main_window_plotting import (
     reposition_trace_corner_overlay_for,
     toggle_spectrum_cursor_enabled_for,
     toggle_trace_cursor_enabled_for,
+    toggle_spectrum_stats_enabled_for,
+    toggle_trace_stats_enabled_for,
 )
 from lspr_app.gui.plot_view_cache import (
     PlotViewCache,
@@ -591,6 +600,11 @@ class MainWindow(QMainWindow):
         # active source, since the maintainer may be deliberately using
         # simulation by then.
         self._initial_hardware_scan_pending = True
+        # Spectrum plot stays blank (see refresh_spectrum_plot_for) until
+        # device discovery finishes - flipped True in
+        # handle_hardware_init_finished_for (main_window_lifecycle.py).
+        self._device_discovery_complete = False
+        self._measurement_ui_locked = False
         self._thread_pool = QThreadPool.globalInstance()
         self._simulation_refresh_timer = QTimer(self)
         self._simulation_refresh_timer.setSingleShot(True)
@@ -912,6 +926,12 @@ class MainWindow(QMainWindow):
         self.show_secondary_axis_button.setAutoRaise(True)
         self.show_secondary_axis_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.show_secondary_axis_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.show_secondary_axis_button.setToolTip(
+            "Cycles the sensorgram's secondary Y-axes. XY: primary axis only. "
+            "XYY: one extra right-hand axis for a chosen metric. XY2Y: two "
+            "independent extra axes, each with its own metric. Use the metric "
+            "picker(s) next to this button to choose what each axis shows."
+        )
         self.show_secondary_axis_button.clicked.connect(self._cycle_secondary_axis_mode)
 
         self.secondary_axis_metric_button = QToolButton(self)
@@ -1050,6 +1070,10 @@ class MainWindow(QMainWindow):
         self._session_stats_recording_blink_timer = QTimer(self)
         self._session_stats_recording_blink_timer.setInterval(650)
         self._session_stats_recording_blink_timer.timeout.connect(self._advance_session_stats_recording_blink_indicator)
+        self._tracking_ready_blink_visible = True
+        self._tracking_ready_blink_timer = QTimer(self)
+        self._tracking_ready_blink_timer.setInterval(650)
+        self._tracking_ready_blink_timer.timeout.connect(self._advance_tracking_ready_blink_indicator)
         self._session_stats_recording_timer = QTimer(self)
         self._session_stats_recording_timer.timeout.connect(self._capture_session_stats_recording_snapshot)
         self._session_stats_recording_requested_at: float | None = None
@@ -1159,8 +1183,8 @@ class MainWindow(QMainWindow):
 
         self.integration_spin = QDoubleSpinBox(self)
         make_compact_spinbox(self.integration_spin)
-        self.integration_spin.setRange(1.0, 10000.0)
-        self.integration_spin.setValue(50.0)
+        self.integration_spin.setRange(DEFAULT_INTEGRATION_TIME_MS, 10000.0)
+        self.integration_spin.setValue(DEFAULT_INTEGRATION_TIME_MS)
         self.integration_spin.setSuffix(" ms")
         self.integration_spin.setDecimals(3)
         self.integration_spin.setSingleStep(1.0)
@@ -1477,13 +1501,17 @@ class MainWindow(QMainWindow):
 
         self.sim_peak_center_slider = make_sim_slider(450, 850, 620)
         self.sim_peak_width_slider = make_sim_slider(10, 120, 35)
-        self.sim_peak_height_slider = make_sim_slider(-5000, 5000, 1800)
+        # peak_height/baseline/noise are in milli-AU (divide by 1000 for the
+        # absorbance-unit float - see sync_simulation_backend_from_controls_for),
+        # since simulation output is wired directly to Absorbance and needs to
+        # sit in a physically plausible ~0-2 AU range, not raw-counts scale.
+        self.sim_peak_height_slider = make_sim_slider(-2000, 2000, 300)
         self.sim_secondary_peak_offset_slider = make_sim_slider(-300, 300, 130)
         self.sim_secondary_peak_height_slider = make_sim_slider(0, 400, 18)
         self.sim_secondary_peak_width_slider = make_sim_slider(10, 400, 180)
-        self.sim_baseline_slider = make_sim_slider(0, 4000, 900)
+        self.sim_baseline_slider = make_sim_slider(0, 500, 100)
         self.sim_slope_slider = make_sim_slider(-100, 100, 12)
-        self.sim_noise_slider = make_sim_slider(0, 250, 40)
+        self.sim_noise_slider = make_sim_slider(0, 50, 5)
         self.sim_resolution_spin = QDoubleSpinBox()
         make_compact_spinbox(self.sim_resolution_spin)
         self.sim_resolution_spin.setRange(0.05, 10.0)
@@ -1508,6 +1536,9 @@ class MainWindow(QMainWindow):
         self.plot_selector = MenuDropdownButton(self.PLOT_MODE_SECTIONS, self)
         self.plot_selector.setObjectName("spectrumPlotModeButton")
         self.plot_selector.currentTextChanged.connect(self._refresh_plot)
+        # Only Absorbance is trackable - re-evaluate whenever the displayed
+        # mode changes (see _refresh_start_tracking_button_enabled).
+        self.plot_selector.currentTextChanged.connect(lambda _text: self._refresh_start_tracking_button_enabled())
 
         # "[Sci]"/"[SI]" - toggles the spectrum plot's Y-axis tick labels
         # between scientific notation (6.55e+04) and SI-prefix notation
@@ -1559,6 +1590,19 @@ class MainWindow(QMainWindow):
         for item in (self.spectrum_curve, self.fit_curve):
             item._diagnostics_owner = self
             item._diagnostics_prefix = "spectrum_plot"
+        # Shown while scanning for devices at startup - see
+        # refresh_spectrum_plot_for's _device_discovery_complete gate.
+        # pg.TextItem lives in data coordinates, not viewport-fraction ones,
+        # and the view range is still at pyqtgraph's uninitialized (0,1)x(0,1)
+        # default the first time this gets positioned (autorange hasn't
+        # settled yet) - reconnecting to sigRangeChanged, not just
+        # repositioning once per show(), is what lets it catch up once the
+        # real axis range (e.g. 400-900 nm) actually settles in.
+        self._discovery_placeholder_text = pg.TextItem(text="", anchor=(0.5, 0.5), color="#8a94a6")
+        self._discovery_placeholder_text.setZValue(50)
+        self.spectrum_plot.addItem(self._discovery_placeholder_text, ignoreBounds=True)
+        self._discovery_placeholder_text.hide()
+        self.spectrum_plot.getPlotItem().vb.sigRangeChanged.connect(self._reposition_discovery_placeholder)
         spectrum_plot_item = self.spectrum_plot.getPlotItem()
         spectrum_plot_item.showAxis("right")
         self.residual_axis = spectrum_plot_item.getAxis("right")
@@ -1644,10 +1688,12 @@ class MainWindow(QMainWindow):
         self.spectrum_plot.addItem(self.centroid_marker)
         # Warns when the raw signal is approaching detector saturation (its ADC
         # full-scale count) during auto-exposure or manual integration-time tuning.
-        # Hidden outside raw-counts plot modes - see _update_saturation_line_for.
+        # Hidden outside raw-counts plot modes - see _update_saturation_line_for,
+        # which repositions this using the live AutoExposureSettings.saturation_fraction
+        # on every frame; this initial pos is just a placeholder until then.
         self.saturation_line = pg.InfiniteLine(
             angle=0,
-            pos=0.95 * self._spectrometer.max_intensity(),
+            pos=self._auto_exposure_settings.saturation_fraction * self._spectrometer.max_intensity(),
             movable=False,
             pen=pg.mkPen("#d32f2f", width=1.2, style=Qt.PenStyle.DashLine),
         )
@@ -1762,6 +1808,12 @@ class MainWindow(QMainWindow):
 
     def _toggle_trace_cursor_enabled(self) -> None:
         toggle_trace_cursor_enabled_for(self)
+
+    def _toggle_spectrum_stats_enabled(self) -> None:
+        toggle_spectrum_stats_enabled_for(self)
+
+    def _toggle_trace_stats_enabled(self) -> None:
+        toggle_trace_stats_enabled_for(self)
 
     def _build_session_summary_panel(self) -> None:
         self.session_summary = QTextEdit()
@@ -2641,13 +2693,13 @@ class MainWindow(QMainWindow):
     def _update_simulation_labels(self) -> None:
         self.sim_peak_center_value.setText(f"{self.sim_peak_center_slider.value()} nm")
         self.sim_peak_width_value.setText(f"{self.sim_peak_width_slider.value()} nm")
-        self.sim_peak_height_value.setText(str(self.sim_peak_height_slider.value()))
+        self.sim_peak_height_value.setText(f"{self.sim_peak_height_slider.value() / 1000.0:.3f} AU")
         self.sim_secondary_peak_offset_value.setText(f"{self.sim_secondary_peak_offset_slider.value():+d} nm")
         self.sim_secondary_peak_height_value.setText(f"{self.sim_secondary_peak_height_slider.value()}%")
         self.sim_secondary_peak_width_value.setText(f"{self.sim_secondary_peak_width_slider.value()}%")
-        self.sim_baseline_value.setText(str(self.sim_baseline_slider.value()))
+        self.sim_baseline_value.setText(f"{self.sim_baseline_slider.value() / 1000.0:.3f} AU")
         self.sim_slope_value.setText(f"{self.sim_slope_slider.value() / 100.0:.0%}")
-        self.sim_noise_value.setText(str(self.sim_noise_slider.value()))
+        self.sim_noise_value.setText(f"{self.sim_noise_slider.value() / 1000.0:.3f} AU")
 
     def _handle_simulation_parameter_change(self) -> None:
         self._update_simulation_labels()
@@ -2658,7 +2710,9 @@ class MainWindow(QMainWindow):
         def _callback() -> None:
             self._sync_simulation_backend_from_controls()
             if self._source_mode == "simulation" and not self._live_active:
-                self._session.set_sample(self._build_simulation_spectrum("sample"))
+                # Simulation output is wired directly to Absorbance - see
+                # flush_live_processed_results (acquisition_controller.py).
+                self._session.set_absorbance_direct(self._build_simulation_spectrum("sample"))
                 self._refresh_plot()
 
         self._run_gui_callback_timed("simulation_parameter_flush", _callback)
@@ -2769,9 +2823,17 @@ class MainWindow(QMainWindow):
     def _load_processing_settings_dialog(self) -> None:
         load_processing_settings_dialog(self)
 
+    def _show_new_session_dialog(self) -> None:
+        from lspr_app.gui.main_window_new_session import show_new_session_dialog_for
+        show_new_session_dialog_for(self)
+
     def _show_import_from_measurement_dialog(self) -> None:
         from lspr_app.gui.main_window_import_dialog import show_import_from_measurement_for
         show_import_from_measurement_for(self)
+
+    def _show_import_latest_session_dialog(self) -> None:
+        from lspr_app.gui.main_window_import_dialog import show_latest_session_import_for
+        show_latest_session_import_for(self)
 
     def _save_session_copy_as(self) -> None:
         from lspr_app.gui.main_window_session_copy import save_session_copy_as_for
@@ -2859,6 +2921,29 @@ class MainWindow(QMainWindow):
             self.sim_output_rate_spin,
         ):
             widget.setEnabled(enabled)
+
+    def _update_absorbance_only_mode(self) -> None:
+        """Simulation mode only ever exposes Absorbance (see
+        spectral_processing_pipeline_architecture.md) - Dark/Reference
+        capture and the Raw/Dark/Reference plot_selector options are hidden
+        while simulating, since simulation output is wired straight to
+        Absorbance and there's nothing for those to do. Spectrometer mode
+        restores all of it.
+        """
+        simulation_active = self._source_mode == "simulation"
+        for widget in (self.acquire_dark_button, self.acquire_reference_button):
+            widget.setVisible(not simulation_active)
+        for name in ("Raw", "Reference", "Dark"):
+            self.plot_selector.set_option_enabled(name, not simulation_active)
+        if simulation_active and self.plot_selector.currentText() != "Absorbance":
+            self.plot_selector.blockSignals(True)
+            self.plot_selector.setCurrentText("Absorbance")
+            self.plot_selector.blockSignals(False)
+        # Also (re)starts/stops the ready-to-track blink timer, not just the
+        # enabled state - needed here since simulation's initial absorbance
+        # seed (just above, in apply_source_mode_for) makes tracking ready
+        # immediately, with no dark/reference capture event to trigger it.
+        self._refresh_tracking_ready_indicator()
 
     def _update_measurement_toggle_button(self) -> None:
         update_measurement_toggle_button(self)
@@ -3583,6 +3668,13 @@ class MainWindow(QMainWindow):
     def _cycle_trace_stats_metric(self) -> None:
         cycle_trace_stats_metric(self)
 
+    def _handle_trace_stats_delayed_single_click(self, token: int) -> None:
+        # See main_window_lifecycle.py's event_filter_for - a superseded
+        # click (the first press of what turned out to be a double-click)
+        # bumps _trace_stats_click_token before this fires, so it's a no-op.
+        if token == getattr(self, "_trace_stats_click_token", None):
+            self._cycle_trace_stats_metric()
+
     def _normalize_sensorgram_line_mode(self, value: object | None = None) -> str | None:
         return normalize_sensorgram_line_mode(self, value)
 
@@ -3816,11 +3908,107 @@ class MainWindow(QMainWindow):
             return
         self.sensorgram_freeze_button.setIcon(snowflake_icon(self._theme_mode, self._sensorgram_frozen))
 
+    def _reposition_discovery_placeholder(self) -> None:
+        placeholder = getattr(self, "_discovery_placeholder_text", None)
+        if placeholder is None or not placeholder.isVisible():
+            return
+        try:
+            x_range, y_range = self.spectrum_plot.getPlotItem().vb.viewRange()
+            placeholder.setPos((x_range[0] + x_range[1]) / 2.0, (y_range[0] + y_range[1]) / 2.0)
+        except Exception:
+            pass
+
     def _update_start_tracking_button_icon(self) -> None:
         if not hasattr(self, "start_tracking_button"):
             return
-        kind = "pause" if self._sensorgram_tracking_active else "play"
-        self.start_tracking_button.setIcon(transport_icon(self._theme_mode, kind))
+        if self._sensorgram_tracking_active:
+            self.start_tracking_button.setIcon(transport_icon(self._theme_mode, "pause"))
+            return
+        if self._absorbance_available():
+            self.start_tracking_button.setIcon(
+                tracking_ready_icon(bool(getattr(self, "_tracking_ready_blink_visible", True)))
+            )
+        else:
+            self.start_tracking_button.setIcon(transport_icon(self._theme_mode, "play"))
+
+    def _absorbance_available(self) -> bool:
+        # True once the Absorbance spectrum can be tracked/fitted - either
+        # dark+reference+sample have all been captured (Spectrometer mode,
+        # MeasurementSession.compute_absorbance), or simulation output has
+        # been wired directly in (Simulation mode, set_absorbance_direct).
+        # See spectral_processing_pipeline_architecture.md: only Absorbance
+        # is ever trackable.
+        return self._session.state.absorbance is not None
+
+    def _refresh_start_tracking_button_enabled(self) -> None:
+        """Only Absorbance is trackable - and only once it's available.
+
+        Disables start_tracking_button (rather than hiding it, so the
+        toolbar layout stays stable) whenever the UI is locked, the plot
+        isn't currently showing Absorbance, or Absorbance isn't available
+        yet, with a tooltip explaining which condition is unmet. Called from
+        set_measurement_ui_locked, _refresh_tracking_ready_indicator, and
+        plot_selector.currentTextChanged.
+        """
+        button = getattr(self, "start_tracking_button", None)
+        if button is None:
+            return
+        locked = bool(getattr(self, "_measurement_ui_locked", False))
+        showing_absorbance = self.PLOT_MODES.get(self.plot_selector.currentText()) == "absorbance"
+        available = self._absorbance_available()
+        button.setEnabled(not locked and showing_absorbance and available)
+        if locked:
+            tooltip = "Tracking is unavailable while a measurement is running."
+        elif not showing_absorbance:
+            tooltip = "Switch to Absorbance to enable tracking."
+        elif not available:
+            tooltip = (
+                "Capture Dark and Reference first to enable tracking."
+                if self._source_mode == "spectrometer"
+                else "Waiting for simulated Absorbance output..."
+            )
+        else:
+            tooltip = (
+                "Start tracking the sensorgram from whatever spectrum/mode is currently shown. "
+                "Off by default: no metric points or archive rows are recorded until this is on. "
+                "Toggle off to pause tracking without losing what's already recorded."
+            )
+        button.setToolTip(tooltip)
+
+    def _refresh_tracking_ready_indicator(self) -> None:
+        """Start/stop the start_tracking_button's ready-to-track blink.
+
+        Blinks (filled, alpha-pulsed green triangle - see
+        icon_helpers.tracking_ready_icon) exactly while Absorbance is
+        available and tracking hasn't been started yet, so it's obvious the
+        moment tracking becomes possible. Called after every dark/reference
+        capture (_update_dark_reference_button_icons), every simulation
+        Absorbance update, and every tracking start/stop
+        (set_sensorgram_tracking_active_for).
+        """
+        timer = getattr(self, "_tracking_ready_blink_timer", None)
+        if timer is None:
+            return
+        should_blink = self._absorbance_available() and not self._sensorgram_tracking_active
+        if should_blink:
+            if not timer.isActive():
+                self._tracking_ready_blink_visible = True
+                timer.start()
+        else:
+            timer.stop()
+            self._tracking_ready_blink_visible = True
+        self._update_start_tracking_button_icon()
+        self._refresh_start_tracking_button_enabled()
+
+    def _advance_tracking_ready_blink_indicator(self) -> None:
+        def _callback() -> None:
+            timer = getattr(self, "_tracking_ready_blink_timer", None)
+            if timer is None or not timer.isActive():
+                return
+            self._tracking_ready_blink_visible = not bool(getattr(self, "_tracking_ready_blink_visible", True))
+            self._update_start_tracking_button_icon()
+
+        self._run_gui_callback_timed("tracking_ready_blink", _callback)
 
     def _update_residual_button_icon(self) -> None:
         # No-op now that show_residual_button is a "[y-y]" text button: its
@@ -3898,6 +4086,7 @@ class MainWindow(QMainWindow):
             self.acquire_dark_button.setIcon(dark_icon(self._session.state.dark is not None))
         if hasattr(self, "acquire_reference_button"):
             self.acquire_reference_button.setIcon(reference_icon(self._session.state.reference is not None))
+        self._refresh_tracking_ready_indicator()
 
     def _export_current_plot(self) -> None:
         export_current_plot_for(self)

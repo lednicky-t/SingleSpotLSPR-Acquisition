@@ -11,18 +11,26 @@ from lspr_app.domain.models import AcquisitionSettings, Spectrum
 
 @dataclass(slots=True)
 class SimulationParameters:
+    # peak_height/baseline/noise are in absorbance units (AU) - simulation
+    # output is wired directly to Absorbance (MeasurementSession.
+    # set_absorbance_direct), not raw counts, so these need to sit in a
+    # physically plausible range (typical LSPR peaks ~0.05-1.0 AU) rather
+    # than the raw-counts-scale values used before this. slope and the
+    # secondary_peak_* fields are already relative/percentage-based (see
+    # _build_linear_baseline/_build_secondary_peak below) and don't need
+    # rescaling - they scale automatically with peak_height/baseline.
     wavelength_min_nm: float = 400.0
     wavelength_max_nm: float = 900.0
     wavelength_resolution_nm: float = 0.5
     peak_center_nm: float = 620.0
     peak_width_nm: float = 35.0
-    peak_height: float = 1800.0
+    peak_height: float = 0.3
     secondary_peak_offset_nm: float = 130.0
     secondary_peak_height_percent: float = 18.0
     secondary_peak_width_percent: float = 180.0
-    baseline: float = 900.0
+    baseline: float = 0.1
     slope: float = 0.12
-    noise: float = 40.0
+    noise: float = 0.005
 
 
 class SimulatedSpectrometer(Spectrometer):

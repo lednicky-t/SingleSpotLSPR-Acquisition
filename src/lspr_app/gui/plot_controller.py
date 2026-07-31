@@ -1433,6 +1433,26 @@ def _show_trace_plot_unavailable(window, *, axis_mode: str) -> None:
 _SPECTRUM_STATS_PLACEHOLDER = "peak: -<br>centroid: -<br>FWHM: -<br>MSE: -<br>R: -<br>S/N: -"
 
 
+def _sync_spectrum_stats_label(window, html: str) -> None:
+    """Remember the latest computed stats HTML (so toggling the stats box
+    back on can restore it immediately) and only actually write it to the
+    label while stats are shown - see toggle_spectrum_stats_enabled_for /
+    _show_off_state in main_window_plotting.py, which shows a small icon
+    instead while hidden. Without this guard, this refresh (called on every
+    processed frame) would immediately overwrite that icon with text again.
+    """
+    window._spectrum_stats_html = html
+    if getattr(window, "_spectrum_stats_enabled", True):
+        window.spectrum_stats_label.setText(html)
+
+
+def _sync_trace_stats_label(window, html: str) -> None:
+    """See _sync_spectrum_stats_label - same contract for trace_stats_label."""
+    window._trace_stats_html = html
+    if getattr(window, "_trace_stats_enabled", True):
+        window.trace_stats_label.setText(html)
+
+
 def _spectrum_cursor_display_text(window) -> str | None:
     """Text for spectrum_cursor_label while its cursor readout is enabled, or
     None while disabled - callers must treat None as "leave the label alone"
@@ -1476,7 +1496,7 @@ def _resize_corner_overlay_for_new_text(window, reposition_method_name: str) -> 
 def update_spectrum_stats(window, processed: Spectrum | None, fit: Spectrum | None) -> None:
     try:
         if processed is None:
-            window.spectrum_stats_label.setText(_SPECTRUM_STATS_PLACEHOLDER)
+            _sync_spectrum_stats_label(window, _SPECTRUM_STATS_PLACEHOLDER)
             _sync_spectrum_cursor_label(window)
             return
 
@@ -1534,7 +1554,7 @@ def update_spectrum_stats(window, processed: Spectrum | None, fit: Spectrum | No
             f"R: {escape(str(fit_r if fit_r is not None else '-'))}",
             f"S/N: {escape(str(snr if snr is not None else '-'))}",
         ]
-        window.spectrum_stats_label.setText("<br>".join(lines))
+        _sync_spectrum_stats_label(window, "<br>".join(lines))
         _sync_spectrum_cursor_label(window)
     finally:
         _resize_corner_overlay_for_new_text(window, "_reposition_spectrum_corner_overlay")
@@ -1582,14 +1602,14 @@ def _update_metric_stats_body(window) -> None:
 
     if not visible_series:
         if not series:
-            window.trace_stats_label.setText(f"{_metric_label_span(metric_label, metric_color)}: - | min/max: - | span: - | dt -")
+            _sync_trace_stats_label(window, f"{_metric_label_span(metric_label, metric_color)}: - | min/max: - | span: - | dt -")
             window.trace_noise_summary_label.setText("noise: -")
             _sync_trace_cursor_label(window)
             return
         visible_series = [tuple(np.asarray(item, dtype=np.float64) for item in series_values) for series_values in series.values()]
 
     if not visible_series:
-        window.trace_stats_label.setText(f"{_metric_label_span(metric_label, metric_color)}: - | min/max: - | span: - | dt -")
+        _sync_trace_stats_label(window, f"{_metric_label_span(metric_label, metric_color)}: - | min/max: - | span: - | dt -")
         window.trace_noise_summary_label.setText("noise: -")
         _sync_trace_cursor_label(window)
         return
@@ -1609,7 +1629,7 @@ def _update_metric_stats_body(window) -> None:
         metric_label = getattr(window, "TRACE_METRIC_SHORT_LABELS", {}).get(metric_name, metric_name)
         metric_color = window.TRACE_METRIC_COLORS.get(metric_name, "#444444")
     if len(x_values) == 0 or len(y_values) == 0:
-        window.trace_stats_label.setText(f"{_metric_label_span(metric_label, metric_color)}: - | min/max: - | span: - | dt -")
+        _sync_trace_stats_label(window, f"{_metric_label_span(metric_label, metric_color)}: - | min/max: - | span: - | dt -")
         window.trace_noise_summary_label.setText("noise: -")
         _sync_trace_cursor_label(window)
         return
@@ -1647,13 +1667,14 @@ def _update_metric_stats_body(window) -> None:
         color = window.TRACE_METRIC_COLORS.get(metric_name, "#444444")
         noise_chunks.append(f"{_metric_label_span(label, color)} {escape(metric_noise)}")
 
-    window.trace_stats_label.setText(
+    _sync_trace_stats_label(
+        window,
         f"{_metric_label_span(metric_label, metric_color, bold=metric_is_primary)}: {escape(latest_time_text)} (+{_format_hhmmss(elapsed_from_start_s)}), "
         f"<span style='color: {escape(metric_value_color)}; font-weight: 700;'>{latest_y:.3f} nm</span>"
         f" | min/max: {y_min:.3f} / {y_max:.3f} nm"
         f" | span: {y_max - y_min:.3f} nm"
         f" | dt {dt_text}"
-        f" | compr.: {escape(compression_level_text)}"
+        f" | compr.: {escape(compression_level_text)}",
     )
     window.trace_noise_summary_label.setText(" | ".join(noise_chunks))
     _sync_trace_cursor_label(window)

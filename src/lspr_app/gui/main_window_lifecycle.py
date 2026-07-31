@@ -7,6 +7,7 @@ from functools import partial
 from time import perf_counter
 
 from PyQt6.QtCore import QEvent, Qt, QTimer
+from PyQt6.QtWidgets import QApplication
 
 from lspr_app.device.device_lifecycle import (
     DEVICE_ORDER,
@@ -383,21 +384,26 @@ def handle_hardware_init_step_for(window, event: object) -> None:
         # (gray) until something else happened to trigger a repaint, even
         # though _hardware_available had already flipped to True here.
         update_source_link_buttons(window)
-        # Auto-connect to real hardware, but only as part of the initial
-        # startup scan (see MainWindow._init_runtime_state's
+        # Auto-connect to real hardware. The maintainer's policy: no
+        # spectrometer at launch -> stay on simulation (already the case -
+        # see main_window.py's construction-time fallback); spectrometer
+        # found during the initial startup scan (see MainWindow._init_runtime_state's
         # _initial_hardware_scan_pending and handle_hardware_init_finished_for
-        # below, which clears it once that first scan completes). The
-        # maintainer's explicit policy: no spectrometer at launch -> stay on
-        # simulation (already the case - see main_window.py's construction-time
-        # fallback); spectrometer found during that same initial scan ->
+        # below, which clears it once that first scan completes) -> always
         # switch to it automatically; spectrometer connected later (e.g. via
-        # "Reinitialize hardware" after already running a while) -> do not
-        # switch automatically, since the user may be deliberately using
-        # simulation.
+        # "Reinitialize hardware" after already running a while) -> only
+        # switch automatically if the tool panel (source tabs) is currently
+        # visible - a reasonable proxy for "the user is actively looking at
+        # source selection right now", vs. a silent background surprise
+        # while they're deliberately using simulation with the panel tucked
+        # away.
+        initial_scan = getattr(window, "_initial_hardware_scan_pending", False)
+        left_controls = getattr(window, "_left_controls_scroll", None)
+        tool_panel_visible = bool(left_controls is not None and left_controls.isVisible())
         if (
             found_real_device
-            and getattr(window, "_initial_hardware_scan_pending", False)
             and window._source_mode != "spectrometer"
+            and (initial_scan or tool_panel_visible)
         ):
             apply_source_mode_for(window, "spectrometer", restart_live=True)
     elif key == PUMP:
@@ -417,6 +423,19 @@ def handle_hardware_init_finished_for(window, report: object) -> None:
     window._hardware_init_task = None
     if getattr(window, "_closing", False):
         return
+
+    # Discovery is now fully finished - the spectrum plot showed nothing
+    # while scanning (see refresh_spectrum_plot_for's _device_discovery_complete
+    # gate); render the real verdict now. Only the *initial* startup scan
+    # forces the plot mode - a later "Reinitialize hardware" rescan doesn't
+    # (see handle_hardware_init_step_for's own initial_scan-only auto-switch
+    # for the matching source-mode rule).
+    was_initial_scan = bool(getattr(window, "_initial_hardware_scan_pending", False))
+    window._device_discovery_complete = True
+    if was_initial_scan and window._hardware_available and hasattr(window, "plot_selector"):
+        window.plot_selector.setCurrentText("Raw")
+    window._refresh_plot()
+
     if not isinstance(report, DeviceLifecycleReport):
         window._log_warning("Hardware initialization finished with an unexpected result payload.")
         finish_hardware_initialization_for(window, "Hardware initialization finished.")
@@ -618,10 +637,34 @@ def event_filter_for(window, obj, event) -> bool | None:
         if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             window._choose_recording_project_destination()
             return True
+    if obj is getattr(window, "spectrum_stats_label", None):
+        event_type = event.type()
+        if event_type == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+            window._toggle_spectrum_stats_enabled()
+            return True
     if obj is getattr(window, "trace_stats_label", None):
         event_type = event.type()
+        # trace_stats_label has two independent click behaviors: a single
+        # left-click cycles the displayed metric, a double-click hides/shows
+        # the whole stats box. Qt delivers a double-click as Press, Release,
+        # DblClick, Release - so the first Press always arrives first and
+        # would fire the single-click cycle as an unwanted side effect right
+        # before the box gets hidden. Debounce it: delay the cycle action by
+        # doubleClickInterval() and bump _trace_stats_click_token on every
+        # click (single or double) so a stale delayed callback can tell it's
+        # been superseded and skip itself - see
+        # _handle_trace_stats_delayed_single_click.
+        if event_type == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+            window._trace_stats_click_token = getattr(window, "_trace_stats_click_token", 0) + 1
+            window._toggle_trace_stats_enabled()
+            return True
         if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-            window._cycle_trace_stats_metric()
+            window._trace_stats_click_token = getattr(window, "_trace_stats_click_token", 0) + 1
+            token = window._trace_stats_click_token
+            QTimer.singleShot(
+                QApplication.doubleClickInterval(),
+                lambda: window._handle_trace_stats_delayed_single_click(token),
+            )
             return True
     if obj is getattr(window, "spectrum_cursor_label", None):
         event_type = event.type()

@@ -106,6 +106,12 @@ def ensure_session_writer(window: Any, spectrum: Any = None) -> Any:
     # Keep backwards-compat aliases so reload tasks and plot-settings code keep working
     setattr(window, _WRITER_ATTR, writer)
     window._metric_archive_path = path
+    try:
+        from lspr_app.storage.app_config import save_app_setting
+
+        save_app_setting("last_session_file_path", str(path))
+    except Exception:
+        pass
     # Stable anchor for this session file's t_ms column for the rest of its
     # lifetime (see append_processed_trace_history) - set once, here, not
     # touched again until close_session_writer clears it for the next file.

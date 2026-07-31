@@ -12,7 +12,7 @@ import h5py
 import numpy as np
 from platformdirs import user_config_dir
 
-from lspr_app.domain.models import ProcessingSettings
+from lspr_app.domain.models import ProcessingSettings, Spectrum
 from lspr_app import __version__ as APP_VERSION
 from lspr_app.storage.user_profile import GLOBAL_CONFIG_PATH, active_user, current_config_path
 from lspr_io import (
@@ -370,3 +370,63 @@ def load_acquisition_state(
 ) -> dict[str, object]:
     state = load_app_setting("acquisition_state", {}, path)
     return state if isinstance(state, dict) else {}
+
+
+def _spectrum_to_payload(spectrum: Spectrum) -> dict[str, object]:
+    return {
+        "wavelengths_nm": [float(v) for v in spectrum.wavelengths_nm],
+        "values": [float(v) for v in spectrum.values],
+        "y_label": spectrum.y_label,
+        "acquired_at": spectrum.acquired_at.isoformat(),
+        "metadata": dict(spectrum.metadata),
+    }
+
+
+def _spectrum_from_payload(payload: object) -> Spectrum | None:
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return Spectrum(
+            wavelengths_nm=np.asarray(payload["wavelengths_nm"], dtype=np.float64),
+            values=np.asarray(payload["values"], dtype=np.float64),
+            y_label=str(payload.get("y_label", "")),
+            acquired_at=datetime.fromisoformat(str(payload["acquired_at"])),
+            metadata=dict(payload["metadata"]) if isinstance(payload.get("metadata"), dict) else {},
+        )
+    except (KeyError, ValueError, TypeError) as exc:
+        _logger.warning("Could not restore a cached dark/reference spectrum: %s", exc)
+        return None
+
+
+def save_dark_reference_cache(
+    dark: Spectrum | None,
+    reference: Spectrum | None,
+    path: Path | None = None,
+) -> None:
+    """Cache the acquired Dark/Reference spectra in the active user's own
+    settings file, so they survive an app restart ("session reset") instead
+    of being lost every time - without this, a fresh MeasurementSession()
+    always starts with no dark/reference (see app.py's main()), forcing a
+    redundant re-acquisition every launch even when the optical setup hasn't
+    changed. Called eagerly whenever either one changes (see
+    acquisition_controller.py's request_manual_acquisition/
+    handle_acquisition_success) rather than folded into the debounced
+    acquisition-state autosave, since these arrays are much larger than the
+    rest of that payload and change far less often than e.g. a slider being
+    dragged.
+    """
+    save_app_setting(
+        "dark_reference_cache",
+        {
+            "dark": _spectrum_to_payload(dark) if dark is not None else None,
+            "reference": _spectrum_to_payload(reference) if reference is not None else None,
+        },
+        path,
+    )
+
+
+def load_dark_reference_cache(path: Path | None = None) -> tuple[Spectrum | None, Spectrum | None]:
+    cached = load_app_setting("dark_reference_cache", {}, path)
+    if not isinstance(cached, dict):
+        return None, None
+    return _spectrum_from_payload(cached.get("dark")), _spectrum_from_payload(cached.get("reference"))
