@@ -25,6 +25,7 @@ from lspr_app.gui.experiment_control_runtime import (
     experiment_runtime_state_name,
 )
 from lspr_app.gui.main_window_headers import update_source_link_buttons
+from lspr_app.gui.main_window_plotting import record_plot_refresh_rate_sample
 from lspr_app.gui.main_window_state import apply_source_mode_for
 from lspr_app.gui.runtime_diagnostics import format_rate_for_window
 from lspr_app.gui.sensorgram_secondary_axis import (
@@ -896,25 +897,7 @@ def flush_live_processed_results(window) -> None:
                 None if previous_finish is None else (spectrum_render_finished - float(previous_finish)) * 1000.0
             )
             window._last_plot_refresh_finished_at = spectrum_render_finished
-            refresh_timestamps = getattr(window, "_plot_refresh_timestamps", None)
-            if refresh_timestamps is None:
-                refresh_timestamps = []
-                window._plot_refresh_timestamps = refresh_timestamps
-            refresh_timestamps.append(spectrum_render_finished)
-            window_frames = max(2, int(getattr(window, "_plot_refresh_rate_window_frames", 5)))
-            if len(refresh_timestamps) > window_frames:
-                refresh_timestamps = refresh_timestamps[-window_frames:]
-            window._plot_refresh_timestamps = refresh_timestamps
-            if len(window._plot_refresh_timestamps) >= 2:
-                first_timestamp = float(window._plot_refresh_timestamps[0])
-                last_timestamp = float(window._plot_refresh_timestamps[-1])
-                span_s = last_timestamp - first_timestamp
-                if span_s > 0:
-                    window._actual_plot_refresh_rate_hz = (len(window._plot_refresh_timestamps) - 1) / span_s
-                else:
-                    window._actual_plot_refresh_rate_hz = None
-            else:
-                window._actual_plot_refresh_rate_hz = None
+            record_plot_refresh_rate_sample(window, spectrum_render_finished)
         except Exception as exc:
             window._log_error(f"Spectrum refresh failed: {exc}")
         # Only the "sample" (raw) branch has processed/fit that actually

@@ -112,7 +112,7 @@ class PreferencesDialog(QDialog):
         )
         self.freeze_on_startup_check = QCheckBox("Start with plots frozen")
         self.freeze_on_startup_check.setToolTip(
-            "When enabled, the processed spectra plot starts frozen each time the application opens.\n"
+            "When enabled, the spectra plot starts frozen each time the application opens.\n"
             "Freeze can always be toggled manually using the snowflake button in the toolbar."
         )
         self.confirm_exit_check = QCheckBox("Confirm exit when recording is active")

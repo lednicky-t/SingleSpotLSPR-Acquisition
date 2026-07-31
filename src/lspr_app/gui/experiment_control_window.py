@@ -659,7 +659,7 @@ class ExperimentControlWindow(QWidget):
             "}"
         )
         editor_header.setCursor(Qt.CursorShape.PointingHandCursor)
-        editor_header.setToolTip("Double-click to switch to processed spectra.")
+        editor_header.setToolTip("Double-click to switch to spectra.")
         self._experiment_control_header_label = editor_header
         editor_hide_button = _make_frameless_icon_button(
             tint_tabler_icon(flow_tabler_icon("eye_off", "eye-off"), QColor("#8a98a8")),

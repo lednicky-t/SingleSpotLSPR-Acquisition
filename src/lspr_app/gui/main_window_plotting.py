@@ -222,6 +222,33 @@ def start_plot_processing_task_for(window, request: ProcessingRequest) -> None:
     window._thread_pool.start(task)
 
 
+def record_plot_refresh_rate_sample(window, finished_at: float) -> None:
+    """Track a live-plot render completion for window._actual_plot_refresh_rate_hz
+    (the "recent avg" figure in the footer's live_estimate label).
+
+    Both live-frame render paths call this once per frame that actually reaches
+    the screen: the Sample/Raw path (acquisition_controller.py's
+    handle_live_processing_result) and the Absorbance path
+    (handle_plot_processing_result_for, below). Previously only the Sample path
+    updated this, so "recent avg" froze at its last Sample-mode value the moment
+    the plot dropdown was switched to Absorbance, even though frames kept
+    arriving and rendering - see the maintainer's report.
+    """
+    refresh_timestamps = getattr(window, "_plot_refresh_timestamps", None)
+    if refresh_timestamps is None:
+        refresh_timestamps = []
+    refresh_timestamps.append(finished_at)
+    window_frames = max(2, int(getattr(window, "_plot_refresh_rate_window_frames", 5)))
+    if len(refresh_timestamps) > window_frames:
+        refresh_timestamps = refresh_timestamps[-window_frames:]
+    window._plot_refresh_timestamps = refresh_timestamps
+    if len(refresh_timestamps) >= 2:
+        span_s = float(refresh_timestamps[-1]) - float(refresh_timestamps[0])
+        window._actual_plot_refresh_rate_hz = (len(refresh_timestamps) - 1) / span_s if span_s > 0 else None
+    else:
+        window._actual_plot_refresh_rate_hz = None
+
+
 def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
     if window._closing:
         window._plot_processing_running = False
@@ -282,6 +309,12 @@ def handle_plot_processing_result_for(window, result: ProcessingResult) -> None:
         # Dark/Reference are static snapshots - excluded from the trace/
         # tracking on purpose, same as the raw live path already does.
         window._append_processed_trace_history(processed, fit)
+        # Only feed the refresh-rate tracker while a live frame is actually
+        # what triggered this - a manual dropdown switch or preferences
+        # change also lands here and would otherwise inject a bogus,
+        # irregularly-spaced sample into the "recent avg" window.
+        if getattr(window, "_live_active", False):
+            record_plot_refresh_rate_sample(window, perf_counter())
     window._request_deferred_ui_refresh(trace_plot=True, live_estimate=True, telemetry=True, trace_label="Metric position (nm)")
     if window._pending_plot_request is not None:
         pending = window._pending_plot_request

@@ -110,9 +110,9 @@ def build_main_layout_for(window) -> None:
     window.source_tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     # plot_selector/spectrum_y_axis_format_button/show_residual_button moved
-    # into spectrum_header_layout (next to the "Processed Spectra" title,
-    # same spot as the Sensorgram title row's [Auto]/[2Y] buttons) - this row
-    # now only holds dark/reference acquisition and the freeze toggle.
+    # into spectrum_header_layout (next to the "Spectra" title, same spot as
+    # the Sensorgram title row's [Auto]/[2Y] buttons) - this row now only
+    # holds dark/reference acquisition and the freeze toggle.
     plot_bar = QHBoxLayout()
     plot_bar.setSpacing(6)
     plot_bar.addWidget(window.acquire_reference_button)
@@ -326,7 +326,7 @@ def build_main_layout_for(window) -> None:
     spectrum_header_layout = QHBoxLayout()
     spectrum_header_layout.setContentsMargins(0, 0, 0, 0)
     spectrum_header_layout.setSpacing(6)
-    spectrum_header = QLabel("Processed Spectra")
+    spectrum_header = QLabel("Spectra")
     spectrum_header.setObjectName("topContentHeaderLabel")
     spectrum_header.setStyleSheet("font-size: 13px; font-weight: 800; letter-spacing: 0.8px; color: #5b6775;")
     spectrum_header.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -338,7 +338,7 @@ def build_main_layout_for(window) -> None:
     spectrum_header_layout.addWidget(window.spectrum_y_axis_format_button)
     spectrum_header_layout.addWidget(window.show_residual_button)
     spectrum_header_layout.addStretch(1)
-    spectrum_header_hide_button = _make_hide_panel_button(window, "Hide processed spectra.")
+    spectrum_header_hide_button = _make_hide_panel_button(window, "Hide spectra.")
     spectrum_header_hide_button.clicked.connect(lambda _checked=False: window._activate_experiment_control_view())
     spectrum_header_layout.addWidget(spectrum_header_hide_button)
     spectrum_header_row.setLayout(spectrum_header_layout)
