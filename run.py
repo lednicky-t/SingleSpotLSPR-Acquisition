@@ -5,7 +5,7 @@ import sys
 
 
 THIS_DIR = Path(__file__).resolve().parent
-APPS_DIR = THIS_DIR.parent
+APPS_DIR = THIS_DIR.parent.parent
 
 if str(APPS_DIR) not in sys.path:
     sys.path.insert(0, str(APPS_DIR))
