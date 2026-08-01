@@ -1445,17 +1445,48 @@ def set_measurement_hdf5_flush_interval_s(window, interval_s: float) -> None:
 def set_environment_poll_interval_s(window, interval_s: float) -> None:
     """Set how often the Switch device's ambient temperature/humidity
     sensors are polled (default 5 s / 0.2 Hz). Set from Device Manager's
-    Switch row settings popup."""
-    from lspr_app.storage.app_config import save_app_setting
+    Switch settings section."""
+    from lspr_app.storage.device_manager_settings import save_device_manager_settings
 
     interval_s = min(max(float(interval_s), 1.0), 300.0)
     window._environment_poll_interval_s = interval_s
-    save_app_setting("environment_poll_interval_s", interval_s)
+    window._device_manager_settings.switch.environment_poll_interval_s = interval_s
+    save_device_manager_settings(window._device_manager_settings)
     timer = getattr(window, "_environment_poll_timer", None)
     if timer is not None:
         timer.setInterval(int(interval_s * 1000))
     window.status_label.setText(f"Temp/humidity poll interval set to {interval_s:g} s.")
     window._log_info(f"Temp/humidity poll interval set to {interval_s:g} s.")
+
+
+def set_auto_exposure_integration_limits_us(window, min_us: int, max_us: int) -> None:
+    """Set the live auto-exposure procedure's own search bounds (further
+    intersected at run time with whatever the connected spectrometer's
+    hardware will actually accept - see Spectrometer.integration_time_limits_us
+    and gui/acquisition_controller.py). Set from Device Manager's Spectrometer
+    "Defaults & limits" section."""
+    from lspr_app.storage.device_manager_settings import save_device_manager_settings
+
+    min_us = max(int(min_us), 1)
+    max_us = max(int(max_us), min_us)
+    settings = window._device_manager_settings.spectrometer
+    settings.min_integration_time_us = min_us
+    settings.max_integration_time_us = max_us
+    save_device_manager_settings(window._device_manager_settings)
+    window.status_label.setText(f"Auto-exposure integration time limits set to {min_us}-{max_us} µs.")
+    window._log_info(f"Auto-exposure integration time limits set to {min_us}-{max_us} µs.")
+
+
+def set_pump_default_tube_mm(window, tube_mm: float) -> None:
+    """Set the default tube inside diameter (mm) offered for the pump. Set
+    from Device Manager's Pump "Defaults & limits" section."""
+    from lspr_app.storage.device_manager_settings import save_device_manager_settings
+
+    tube_mm = max(float(tube_mm), 0.01)
+    window._device_manager_settings.pump.tube_mm = tube_mm
+    save_device_manager_settings(window._device_manager_settings)
+    window.status_label.setText(f"Default pump tube diameter set to {tube_mm:g} mm.")
+    window._log_info(f"Default pump tube diameter set to {tube_mm:g} mm.")
 
 
 def switch_active_user(window, name: str) -> bool:

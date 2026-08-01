@@ -32,6 +32,19 @@ class ControllerProbe:
     protocol_version: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ControllerCapabilities:
+    """What a given switch/valve controller firmware can actually do.
+
+    Declared once by each ``SerialController`` subclass (see ``capabilities``
+    below) instead of being inferred by string-matching ``controller_type`` at
+    call sites - mirrors ``SpectrometerCapabilities`` in ``device/base.py``.
+    """
+
+    has_temperature_sensor: bool = False
+    has_humidity_sensor: bool = False
+
+
 class ControllerError(DeviceError):
     pass
 
@@ -49,6 +62,18 @@ def registered_controllers() -> tuple[type["SerialController"], ...]:
     return tuple(_REGISTERED_CONTROLLERS)
 
 
+def capabilities_for_controller_type(controller_type: str) -> ControllerCapabilities:
+    """Look up a registered controller class's declared capabilities by
+    ``controller_type`` string, without instantiating (or connecting to) it.
+
+    Returns the all-False default if the type isn't recognized.
+    """
+    for controller_cls in registered_controllers():
+        if controller_cls.controller_type == controller_type:
+            return controller_cls.capabilities
+    return ControllerCapabilities()
+
+
 def controller_port_priority(port: ControllerPort) -> int:
     priorities = [
         controller_cls.priority
@@ -61,6 +86,7 @@ def controller_port_priority(port: ControllerPort) -> int:
 class SerialController(DeviceDriver):
     controller_type: ClassVar[str] = "controller"
     priority: ClassVar[int] = 0
+    capabilities: ClassVar[ControllerCapabilities] = ControllerCapabilities()
 
     # Subclasses set these to configure the shared connect() implementation.
     _BAUD_RATE: ClassVar[int] = 115200

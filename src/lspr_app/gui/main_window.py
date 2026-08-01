@@ -57,13 +57,13 @@ from lspr_app.device.reglo_icc import PumpProbe
 from lspr_app.device.simulated import SimulatedSpectrometer
 from lspr_app.domain.models import (
     AcquisitionSettings,
-    AutoExposureSettings,
     DEFAULT_INTEGRATION_TIME_MS,
     ProcessingSettings,
     Spectrum,
 )
 from lspr_app.domain.processing import set_processing_debug_mode_enabled
 from lspr_app.domain.session import MeasurementSession
+from lspr_app.storage.device_manager_settings import load_device_manager_settings
 from lspr_app.storage.app_config import (
     load_processing_settings,
     load_acquisition_state,
@@ -224,7 +224,9 @@ from lspr_app.gui.main_window_state import (
     apply_layout_preset,
     reset_layout_presets_to_defaults,
     save_current_layout_to_preset,
+    set_auto_exposure_integration_limits_us,
     set_environment_poll_interval_s,
+    set_pump_default_tube_mm,
     set_gui_housekeeping_enabled,
     set_diagnostics_panel_visible,
     set_measurement_hdf5_flush_interval_s,
@@ -657,11 +659,18 @@ class MainWindow(QMainWindow):
         self._live_recording_timer.setSingleShot(False)
         self._live_recording_timer.setInterval(25)
         self._live_recording_timer.timeout.connect(self._flush_live_recording_results)
+        # Device Manager's per-app-user defaults & limits (spectrometer
+        # integration-time limits, pump tube diameter, switch poll interval) -
+        # loaded once here and mutated/persisted in place by the setters below
+        # and by the Device Manager dialog, so there is exactly one in-memory
+        # copy per running app instead of each setting re-reading its own
+        # separate config key. See storage/device_manager_settings.py.
+        self._device_manager_settings = load_device_manager_settings()
         # Ambient temperature/humidity poll of the Switch device - see
         # docs/hardware/arduino_valve_controller_protocol.md. Default 5 s
-        # (0.2 Hz); user-configurable from Device Manager's Switch row
-        # settings popup (see set_environment_poll_interval_s).
-        self._environment_poll_interval_s = float(load_app_setting("environment_poll_interval_s", 5.0))
+        # (0.2 Hz); user-configurable from Device Manager's Switch settings
+        # (see set_environment_poll_interval_s).
+        self._environment_poll_interval_s = self._device_manager_settings.switch.environment_poll_interval_s
         self._environment_poll_timer = QTimer(self)
         self._environment_poll_timer.setSingleShot(False)
         self._environment_poll_timer.setInterval(int(self._environment_poll_interval_s * 1000))
@@ -702,7 +711,11 @@ class MainWindow(QMainWindow):
         self._pending_source_mode: str | None = None
         self._resume_live_after_source_switch = False
         self._resume_live_after_manual = False
-        self._auto_exposure_settings = AutoExposureSettings()
+        # Same object as self._device_manager_settings.spectrometer, not a
+        # copy - edits made through Device Manager (or the setter below)
+        # mutate it in place, so this attribute always reflects the current
+        # saved defaults without needing to be re-loaded.
+        self._auto_exposure_settings = self._device_manager_settings.spectrometer
         self._auto_exposure_state = None
         self._pending_auto_exposure_start = False
         self._display_window_ms = 0.0
@@ -3280,6 +3293,12 @@ class MainWindow(QMainWindow):
 
     def _set_environment_poll_interval_s(self, interval_s: float) -> None:
         set_environment_poll_interval_s(self, interval_s)
+
+    def _set_auto_exposure_integration_limits_us(self, min_us: int, max_us: int) -> None:
+        set_auto_exposure_integration_limits_us(self, min_us, max_us)
+
+    def _set_pump_default_tube_mm(self, tube_mm: float) -> None:
+        set_pump_default_tube_mm(self, tube_mm)
 
     def _set_processing_debug_mode_enabled(self, enabled: bool) -> None:
         self._processing_debug_mode_enabled = bool(enabled)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from lspr_app.device.serial_controllers import (
+    ControllerCapabilities,
     ControllerError,
     ControllerPort,
     ControllerProbe,
@@ -14,6 +15,7 @@ from lspr_app.device.serial_controllers import (
 class ArduinoValveController(SerialController):
     controller_type = "arduino-valve"
     priority = 20
+    capabilities = ControllerCapabilities(has_temperature_sensor=True, has_humidity_sensor=True)
     _BAUD_RATE = 115200
     _TIMEOUT = 0.35
     _BOOTLOADER_WAIT_S = 2.0  # Arduino resets via DTR on open; bootloader runs ~2 s
@@ -93,6 +95,10 @@ class ArduinoValveController(SerialController):
 class ItsyBitsy32U4ValveController(ArduinoValveController):
     controller_type = "itsybitsy-32u4-valve"
     priority = 30
+    # Overrides the Arduino parent's capabilities (not just its read methods
+    # below) - this firmware build has no sensor hardware at all, unlike the
+    # standard Arduino valve controller it otherwise shares a protocol with.
+    capabilities = ControllerCapabilities()
     _TIMEOUT = 1.0
     _BOOTLOADER_WAIT_S = 3.0  # 32u4 bootloader is slower than standard Arduino; needs ~3 s
 
