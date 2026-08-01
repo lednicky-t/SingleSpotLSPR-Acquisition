@@ -217,7 +217,6 @@ from lspr_app.gui.main_window_sensorgram_overlay import (
 from lspr_app.gui.main_window_state import (
     apply_source_mode_for,
     fit_window_to_available_screen_for,
-    activate_experimental_control_view,
     activate_experiment_control_view,
     activate_spectra_view,
     apply_acquisition_state_to_widgets,
@@ -565,6 +564,13 @@ class MainWindow(QMainWindow):
         self.log_copy_button.clicked.connect(self._copy_log_terminal)
         self.log_follow_button.toggled.connect(self._set_log_following)
         self._apply_launch_profile_layout()
+        # Must be set before _restore_ui_state() runs, not after - that call
+        # (via _restore_top_view_and_panel_visibility) is what applies the
+        # *real* restored value here. This used to be a single flat default
+        # assignment further down in __init__, positioned after
+        # _restore_ui_state() by accident, which silently clobbered whatever
+        # restore had just set back to "spectra" every single startup.
+        self._top_view_mode = "spectra"
         self._restore_ui_state()
         _startup_mark("UI state restored")
         if not self._ui_state:
@@ -1059,7 +1065,6 @@ class MainWindow(QMainWindow):
         self._start_maximized = bool(load_app_setting("start_maximized", False))
         self._experiment_control_window: ExperimentControlWindow | None = None
         self._main_content_widget: QWidget | None = None
-        self._top_view_mode = "spectra"
         self._trace_stats_metric_name: str | None = None
         self._discovered_pump_probe = discovered_pump_probe
         self._mswitch_probe = None
@@ -1953,8 +1958,12 @@ class MainWindow(QMainWindow):
                 lambda preset_key=pending_layout_preset: apply_layout_preset(self, preset_key, save=False),
             )
         if getattr(self, "_pending_top_view_mode", None) in {"flow", "experimental_control"}:
-            self._pending_top_view_mode = None
-            QTimer.singleShot(0, self._activate_experimental_control_view)
+            # _pending_top_view_mode is deliberately NOT cleared here -
+            # set_top_content_mode() (main_window_state.py) owns its whole
+            # lifecycle now: it clears it on a successful switch, or leaves
+            # it set (for _requeue_pending_top_view_switch to pick up later)
+            # if the panel still isn't ready to show.
+            QTimer.singleShot(0, self._activate_experiment_control_view)
 
     # ------------------------------------------------------------------
     # Sensorgram display state - thin property shims over self._sensorgram_display
@@ -2563,14 +2572,11 @@ class MainWindow(QMainWindow):
         activate_spectra_view(self)
 
     def _activate_flow_view(self) -> None:
-        self._activate_experimental_control_view()
+        self._activate_experiment_control_view()
 
     def _activate_experiment_control_view(self) -> None:
         self._ensure_experimental_control_panel()
         activate_experiment_control_view(self)
-
-    def _activate_experimental_control_view(self) -> None:
-        activate_experimental_control_view(self)
 
     def _toggle_left_controls(self, checked: bool | None = None) -> None:
         toggle_left_controls(self, checked)

@@ -485,7 +485,18 @@ def _apply_measurement_layout_preset(window, snapshot: dict[str, object]) -> Non
             window._experiment_control_window._apply_experiment_control_view_mode(save=False)
         except Exception:
             pass
-    window._top_view_mode = "experimental_control"
+    # Respect a saved top_view_mode (a user can hide the experiment control
+    # pane while in this layout - see set_top_content_mode's "measurement"
+    # branch - and that choice is saved per the normal
+    # save_current_layout_to_preset flow) rather than always forcing the top
+    # pane visible. Defaults to "experimental_control" (the top pane visible)
+    # for the built-in "measurement" preset and for any snapshot saved before
+    # this was toggleable.
+    top_mode = normalize_top_content_mode(snapshot.get("top_view_mode", "experimental_control"))
+    window._top_view_mode = top_mode
+    window._pending_top_view_mode = None
+    if measurement_top_host is not None:
+        measurement_top_host.setVisible(top_mode == "experimental_control")
     left_controls_visible = snapshot.get("left_controls_visible")
     if isinstance(left_controls_visible, bool) and hasattr(window, "_left_controls_scroll"):
         window._left_controls_scroll.setVisible(left_controls_visible)
@@ -642,7 +653,18 @@ def ensure_visible_top_content_splitter(window, mode: str | None = None) -> None
     splitter.setSizes([int(top_target), int(bottom_target)])
 
 
-def ensure_experimental_control_stack_page(window):
+def ensure_experiment_control_stack_page(window):
+    """Guarantee the experiment control panel (creating it via
+    ensure_experiment_control_panel_for() if it doesn't exist yet) is present
+    in window._top_content_stack, swapped in for the placeholder if needed.
+
+    Distinct from ensure_experiment_control_panel_for(): that one does the
+    one-time construction and initial stack insertion; this one is the
+    idempotent "make sure the widget is actually in the stack" check called
+    every time set_top_content_mode() wants to switch to this mode, in case
+    something removed it or the panel was created through another path.
+    Returns the panel widget, or None if _top_content_stack doesn't exist.
+    """
     stack = getattr(window, "_top_content_stack", None)
     if stack is None:
         return None
@@ -676,21 +698,66 @@ def ensure_experimental_control_stack_page(window):
 
 
 def set_top_content_mode(window, mode: str, *, save: bool = True) -> None:
+    """Switch the top content stack to *mode* ("spectra" or
+    "experimental_control") - the single place allowed to change
+    window._top_view_mode (what the View menu ticks) or call
+    stack.setCurrentWidget() for these two pages, so the two can never drift
+    apart. _top_view_mode is only updated once the widget switch has actually
+    happened (see the `switched` flag below) - it used to be set
+    unconditionally, which ticked the View menu for a panel that might still
+    be bootstrapping (or never finish bootstrapping) in the background,
+    leaving "ticked but not actually shown" as a real, reachable state.
+
+    When the experiment control panel isn't ready yet (still restoring saved
+    plan steps), the switch is deferred: window._pending_top_view_mode
+    records the intent, and _finalize_experiment_control_bootstrap_population
+    / _abort_experiment_control_bootstrap_population (experiment_control_window.py)
+    re-call this function once the panel is ready, so the deferred switch
+    still goes through this same single code path rather than poking the
+    stack directly.
+    """
     normalized = normalize_top_content_mode(mode)
+    if str(getattr(window, "_layout_preset_active_variant", "standard")) == "measurement":
+        # The "measurement" layout preset (_apply_measurement_layout_preset,
+        # below) permanently reparents the experiment control panel into its
+        # own fixed 3-pane arrangement (experiment control on top, spectra +
+        # sensorgram below), outside _top_content_stack entirely - there is no
+        # spectra-vs-experiment-control *page* to switch between while this
+        # variant is active. Toggling here instead shows/hides the top pane
+        # (_measurement_top_host) within that arrangement, which is a real,
+        # meaningful, savable choice - not touching _top_content_stack itself,
+        # since ensure_experiment_control_stack_page() unconditionally
+        # re-parents into _top_content_stack whenever the widget isn't already
+        # indexed there, which would rip the panel back out of its
+        # measurement-layout home (see the maintainer's original report: a
+        # stray deferred call used to do exactly this, leaving the panel
+        # invisible with no way to bring it back).
+        top_host = getattr(window, "_measurement_top_host", None)
+        if top_host is not None:
+            top_host.setVisible(normalized == "experimental_control")
+        window._pending_top_view_mode = None
+        window._top_view_mode = normalized
+        window._sync_view_actions()
+        if save:
+            window._schedule_ui_state_persist()
+        return
     stack = getattr(window, "_top_content_stack", None)
     if stack is None:
         window._top_view_mode = normalized
         return
+    switched = False
     if normalized == "spectra":
         if hasattr(window, "_spectra_block"):
             stack.setCurrentWidget(window._spectra_block)
+            switched = True
     else:
-        widget = ensure_experimental_control_stack_page(window)
+        widget = ensure_experiment_control_stack_page(window)
         if widget is not None:
             startup_ready = bool(getattr(widget, "_ui_startup_ready", False))
             bootstrap_running = bool(getattr(widget, "_experiment_control_bootstrap_in_progress", False))
             if startup_ready and not bootstrap_running:
                 stack.setCurrentWidget(widget)
+                switched = True
             else:
                 window._pending_top_view_mode = normalized
             ensure_visible_top_content_splitter(window, mode=normalized)
@@ -701,6 +768,9 @@ def set_top_content_mode(window, mode: str, *, save: bool = True) -> None:
                 except Exception:
                     pass
     ensure_visible_top_content_splitter(window, mode=normalized)
+    if not switched:
+        return
+    window._pending_top_view_mode = None
     window._top_view_mode = normalized
     window._sync_view_actions()
     if save:
@@ -804,10 +874,19 @@ def _restore_top_view_and_panel_visibility(window, ui_state: dict[str, object]) 
     if isinstance(top_view_mode, str):
         mode = normalize_top_content_mode(top_view_mode)
         if mode == "experimental_control" and not bool(getattr(window, "_ui_startup_ready", False)):
-            window._top_view_mode = "experimental_control"
+            # Too early to actually switch (the panel doesn't exist yet, and
+            # a lot of other __init__ state isn't ready) - record intent only.
+            # window._top_view_mode is deliberately NOT set here: it stays at
+            # its "spectra" default until set_top_content_mode() actually
+            # performs the switch later (see the deferred
+            # _activate_experiment_control_view call once _ui_startup_ready
+            # flips true). Setting it here used to tick the View menu's
+            # "Experiment control" checkbox immediately, long before the
+            # panel was created or shown - a real desync between what the
+            # menu claimed and what was on screen.
             window._pending_top_view_mode = "experimental_control"
         elif mode == "experimental_control":
-            window._activate_experimental_control_view()
+            window._activate_experiment_control_view()
         else:
             window._activate_spectra_view()
         ensure_visible_top_content_splitter(window, mode=mode)
@@ -1532,9 +1611,9 @@ def switch_active_user(window, name: str) -> bool:
 
 def toggle_experimental_control_panel_visibility(window, checked: bool | None = None) -> None:
     if checked is None:
-        window._activate_experimental_control_view() if normalize_top_content_mode(getattr(window, "_top_view_mode", "spectra")) != "experimental_control" else window._activate_spectra_view()
+        window._activate_experiment_control_view() if normalize_top_content_mode(getattr(window, "_top_view_mode", "spectra")) != "experimental_control" else window._activate_spectra_view()
     elif checked:
-        window._activate_experimental_control_view()
+        window._activate_experiment_control_view()
     else:
         window._activate_spectra_view()
 
@@ -1553,7 +1632,7 @@ def sync_main_view_visibility(window) -> None:
 
 
 def show_experimental_control_only(window) -> None:
-    window._activate_experimental_control_view()
+    window._activate_experiment_control_view()
 
 
 def show_flow_only(window) -> None:
@@ -1577,10 +1656,6 @@ def activate_spectra_view(window) -> None:
 
 
 def activate_experiment_control_view(window) -> None:
-    set_top_content_mode(window, "experimental_control")
-
-
-def activate_experimental_control_view(window) -> None:
     set_top_content_mode(window, "experimental_control")
 
 

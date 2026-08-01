@@ -679,7 +679,7 @@ def event_filter_for(window, obj, event) -> bool | None:
     if obj is getattr(window, "_processed_spectra_header_label", None):
         event_type = event.type()
         if event_type == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
-            window._activate_experimental_control_view()
+            window._activate_experiment_control_view()
             return True
     experiment_header = getattr(getattr(window, "_experiment_control_window", None), "_experiment_control_header_label", None)
     if obj is experiment_header:

@@ -116,7 +116,7 @@ def build_menu_bar(window) -> QMenuBar:
     experimental_control_action = view_menu.addAction("Experimental control")
     experimental_control_action.setCheckable(True)
     experimental_control_action.setActionGroup(top_view_group)
-    experimental_control_action.triggered.connect(lambda _checked=False: window._activate_experimental_control_view())
+    experimental_control_action.triggered.connect(lambda _checked=False: window._activate_experiment_control_view())
     view_menu_actions["top_view"]["experimental_control"] = experimental_control_action
 
     left_controls_action = view_menu.addAction("Tool panel")
