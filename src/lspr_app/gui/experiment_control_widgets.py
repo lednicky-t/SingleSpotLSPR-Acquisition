@@ -229,9 +229,18 @@ class TubeDiameterComboBox(QComboBox):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedHeight(28)
-        self.setMaxVisibleItems(10)  # forces a scrollable popup rather than dumping all 26 rows open
+        self.setMaxVisibleItems(5)  # forces a scrollable popup rather than dumping all 26 rows open
+        # Popup items are short ("0.25") but were rendering as a bare "..."
+        # for every row - Qt's default item delegate can miscompute the
+        # available text width against the ::item { text-align: center; }
+        # rule applied later by _style_combo_popup_view() and elide even
+        # though the popup itself is plenty wide (maintainer-reported, not
+        # reproducible offscreen at 100/125/150% simulated scale, so likely
+        # font/Windows-DPI dependent). ElideNone forces the real text to
+        # always draw regardless of that width miscalculation.
+        self.view().setTextElideMode(Qt.TextElideMode.ElideNone)
         for option in TUBE_DIAMETER_OPTIONS:
-            self.addItem(f"{option.mm:.2f} mm", option.mm)
+            self.addItem(f"{option.mm:.2f}", option.mm)
             index = self.count() - 1
             self.setItemData(
                 index,
@@ -241,6 +250,17 @@ class TubeDiameterComboBox(QComboBox):
             )
         self.setCurrentIndex(self._index_for_mm(DEFAULT_TUBE_MM))
         self.currentIndexChanged.connect(self._emit_value_changed)
+
+    def showPopup(self) -> None:  # pragma: no cover - GUI runtime path
+        super().showPopup()
+        # Belt-and-suspenders alongside ElideNone above: guarantee the popup
+        # itself is never narrower than the closed box, in case the "..."
+        # rendering was actually the popup window being sized too small
+        # rather than (or in addition to) the delegate's elide calculation.
+        popup = self.view().window()
+        if popup.width() < self.width():
+            popup.setMinimumWidth(self.width())
+            popup.resize(self.width(), popup.height())
 
     def value(self) -> float:
         data = self.currentData()

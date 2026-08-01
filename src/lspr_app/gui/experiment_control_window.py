@@ -700,10 +700,13 @@ class ExperimentControlWindow(QWidget):
         time_label = QLabel("Duration")
         time_label.setToolTip("Step duration. Displayed in seconds or minutes according to the unit switch, but stored internally in seconds.")
         equal_label = QLabel("CHs")
+        equal_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         equal_label.setToolTip("Shared channel mode. 'CHs' keeps direction and tube identical for all channels. 'not equal' expands per-channel editing.")
         dir_label = QLabel("Dir")
+        dir_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         dir_label.setToolTip("Pump rotation direction. '\u21bb' means clock-wise (CW), '\u21ba' means counter clock-wise (CCW).")
         tube_label = QLabel("Tube")
+        tube_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         tube_label.setToolTip("Tubing inner diameter in mm.")
         flow_header_label = QLabel("Flow")
         flow_header_label.setToolTip("Channel flow rate in uL/min.")
@@ -738,14 +741,16 @@ class ExperimentControlWindow(QWidget):
 
             tube_spin = TubeDiameterComboBox()
             self._style_combo_popup_view(tube_spin, center_items=True, rounded=False, selection_frame=True)
-            tube_spin.setMaximumWidth(88)
+            tube_spin.setMaximumWidth(108)
             tube_spin.setToolTip(f"Tubing inner diameter for CH{channel} in mm. Only the pump's supported sizes are selectable.")
 
             self.manual_flow_spins.append(flow_spin)
             self.manual_direction_buttons.append(direction_button)
             self.manual_tube_spins.append(tube_spin)
             tube_spin.valueChanged.connect(lambda _value, self=self: self._sync_experiment_control_tube_columns())
-            matrix.addWidget(QLabel(f"CH{channel}"), 0, channel + 4)
+            channel_header_label = QLabel(f"CH{channel}")
+            channel_header_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            matrix.addWidget(channel_header_label, 0, channel + 4)
             matrix.addWidget(flow_spin, 1, channel + 4)
             matrix.addWidget(direction_button, 2, channel + 4)
             matrix.addWidget(tube_spin, 3, channel + 4)
@@ -836,7 +841,7 @@ class ExperimentControlWindow(QWidget):
         self.step_comment_edit.setMinimumWidth(300)
 
         self.shared_direction_button.setMaximumWidth(40)
-        self.shared_tube_spin.setMaximumWidth(88)
+        self.shared_tube_spin.setMaximumWidth(108)
         self.shared_direction_row = QWidget(self)
         shared_direction_layout = QHBoxLayout()
         shared_direction_layout.setContentsMargins(0, 0, 0, 0)
@@ -5718,6 +5723,26 @@ class ExperimentControlWindow(QWidget):
             )
         self._schedule_experiment_control_bootstrap()
 
+    def _requeue_pending_top_view_switch(self) -> None:
+        """Resolve a top-view switch that set_top_content_mode() had to defer
+        because this panel wasn't ready yet (still bootstrapping) - called
+        once bootstrap finishes, successfully or not.
+
+        window._pending_top_view_mode is the single signal for "a switch to
+        experiment control is still owed" (see set_top_content_mode,
+        main_window_state.py) - re-invoking the same canonical activation
+        method here, deferred by one tick so this method's own caller can
+        finish clearing _experiment_control_bootstrap_in_progress first,
+        keeps the window's checked-menu-state and stack.currentWidget() from
+        ever drifting apart, instead of poking the stack directly here with
+        a second, parallel way of applying the switch.
+        """
+        main_window = self.window()
+        pending_mode = str(getattr(main_window, "_pending_top_view_mode", "") or "").strip().lower()
+        activate = getattr(main_window, "_activate_experiment_control_view", None)
+        if pending_mode == "experimental_control" and callable(activate):
+            QTimer.singleShot(0, activate)
+
     def _schedule_experiment_control_bootstrap(self) -> None:
         if self._experiment_control_bootstrap_started:
             return
@@ -5804,12 +5829,7 @@ class ExperimentControlWindow(QWidget):
             if isinstance(saved_splitter_sizes, list) and not self._experiment_control_view_mode_sizes:
                 self._apply_experiment_control_editor_splitter_sizes(saved_splitter_sizes)
             QTimer.singleShot(0, self._apply_pending_experiment_control_view_mode)
-            top_stack = getattr(self.window(), "_top_content_stack", None)
-            if top_stack is not None and top_stack.currentWidget() is not self:
-                current_mode = str(getattr(self.window(), "_top_view_mode", "spectra") or "spectra").strip().lower()
-                pending_mode = str(getattr(self.window(), "_pending_top_view_mode", current_mode) or current_mode).strip().lower()
-                if pending_mode == "experimental_control" or current_mode == "experimental_control":
-                    QTimer.singleShot(0, lambda stack=top_stack, widget=self: stack.setCurrentWidget(widget))
+            self._requeue_pending_top_view_switch()
             self._set_status_message("Experiment control panel ready.")
         finally:
             self._experiment_control_bootstrap_pending_state = None
@@ -5833,6 +5853,11 @@ class ExperimentControlWindow(QWidget):
         self._experiment_control_bootstrap_in_progress = False
         self._experiment_control_bootstrap_started = False
         self._set_experiment_control_bootstrap_busy(False)
+        # Even on failure, resolve a deferred View-menu switch instead of
+        # leaving it stranded (menu ticked "Experiment control", nothing
+        # shown, no way back except manually toggling the menu) - see
+        # _requeue_pending_top_view_switch.
+        self._requeue_pending_top_view_switch()
         self._show_error(f"Could not load experiment control panel:\n{message}")
 
     def _prioritized_experiment_control_row_order(self, row_count: int, selected_row: int | None = None) -> list[int]:
