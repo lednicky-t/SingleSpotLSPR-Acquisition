@@ -207,7 +207,25 @@ def request_deferred_ui_refresh(
     stats_dirty = bool(stats)
     live_visual_dirty = bool(window._live_active and (metric_dirty or telemetry or live_estimate) and not stats_dirty and not summary)
     if live_visual_dirty:
-        if not getattr(window, "_live_visual_refresh_in_progress", False):
+        # Only kick off an immediate (0ms) tick if nothing is currently
+        # scheduled/running - checking _live_visual_refresh_in_progress alone
+        # is not enough: the live_visual_refresh scheduler task uses
+        # coalesce="earliest" (GuiTaskScheduler.request), which unconditionally
+        # pulls an already-pending task's due time *earlier*, never later. A
+        # caller reached asynchronously - e.g. handle_plot_processing_result_for
+        # (main_window_plotting.py), invoked off a QThreadPool completion
+        # signal for the Absorbance live path, well after this tick's
+        # synchronous window has closed - would otherwise collapse a correctly
+        # ~200ms-out re-arm (see flush_live_processed_results's trailing
+        # _request_live_acquisition_poll_for call) down to "now" on every
+        # single live frame, defeating the display-rate throttle entirely and
+        # producing "recent avg" readings faster than the configured refresh
+        # rate. Only force it when truly nothing is scheduled (e.g. the very
+        # first frame after live acquisition starts).
+        already_scheduled = bool(getattr(window, "_live_visual_refresh_in_progress", False)) or (
+            window._ui_task_scheduler.is_pending("live_visual_refresh")
+        )
+        if not already_scheduled:
             request_live_visual_refresh(window, 0.0)
         return
     if session_stats or stats or summary or telemetry or live_estimate or trace_label is not None:
