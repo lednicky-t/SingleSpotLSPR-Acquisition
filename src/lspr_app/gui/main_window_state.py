@@ -1966,6 +1966,15 @@ def apply_source_mode_for(window, new_mode: str, restart_live: bool) -> None:
         # Simulation output is wired directly to Absorbance - see
         # flush_live_processed_results (acquisition_controller.py).
         window._session.set_absorbance_direct(window._build_simulation_spectrum("sample"))
+    # Simulation has no dark/reference ceremony and no real prep-procedure
+    # "trash" to gate out (see _update_absorbance_only_mode, which hides
+    # start_tracking_button here for the same reason), so tracking starts
+    # automatically instead of waiting for a manual click. Leaving simulation
+    # restores the manual-gated off-by-default behaviour so real acquisition
+    # still keeps prep-time data out of the sensorgram by default - see
+    # set_sensorgram_tracking_active_for.
+    if hasattr(window, "_set_sensorgram_tracking_active"):
+        window._set_sensorgram_tracking_active(new_mode == "simulation")
     window._log_success(
         f"Active source set to {'spectrometer' if new_mode == 'spectrometer' else 'simulation'}."
     )

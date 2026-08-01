@@ -2939,7 +2939,11 @@ class MainWindow(QMainWindow):
         restores all of it.
         """
         simulation_active = self._source_mode == "simulation"
-        for widget in (self.acquire_dark_button, self.acquire_reference_button):
+        # start_tracking_button is hidden here too: simulation now starts
+        # tracking automatically (apply_source_mode_for) since there's no
+        # dark/reference ceremony and no real prep procedure to gate out, so
+        # the manual toggle has nothing to do while simulating.
+        for widget in (self.acquire_dark_button, self.acquire_reference_button, self.start_tracking_button):
             widget.setVisible(not simulation_active)
         for name in ("Raw", "Reference", "Dark"):
             self.plot_selector.set_option_enabled(name, not simulation_active)
