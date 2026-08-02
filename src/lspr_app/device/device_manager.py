@@ -284,13 +284,6 @@ class DeviceCommunicationService:
             self.save_profiles()
             return updated
 
-    # Backward-compatible names used by the older codebase.
-    def register_profile(self, profile: DeviceProfile) -> None:
-        self.save_profile(profile)
-
-    def profile(self, label: str) -> DeviceProfile | None:
-        return self.get_profile(label)
-
     def scan_passive(self) -> list[PortDescriptor]:
         ownership = snapshot_port_ownership()
         ports = SerialController.list_ports()
@@ -717,25 +710,6 @@ class DeviceCommunicationService:
                 self._profiles[label] = new_profile
             self.save_profiles()
             return new_profile
-
-    def connect_enabled_profiles(self) -> list[DeviceStatus]:
-        statuses: list[DeviceStatus] = []
-        for profile in self._profiles.values():
-            if not profile.enabled or profile.endpoint is None:
-                continue
-            try:
-                statuses.append(self.connect(profile.label))
-            except Exception as exc:
-                self._last_errors[profile.label] = str(exc)
-                statuses.append(self.status(profile.label))
-        return statuses
-
-    def safe_stop_all(self) -> list[DeviceCommandResult]:
-        results: list[DeviceCommandResult] = []
-        for profile in self._profiles.values():
-            if profile.type == "pump" and profile.label in self._connections:
-                results.append(self.send_command(profile.label, DeviceCommand("pump.stop_all", {"channel_count": 4})))
-        return results
 
     def list_events(self) -> list[DeviceEvent]:
         with self._state("list_events"):

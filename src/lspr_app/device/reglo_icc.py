@@ -203,14 +203,6 @@ class RegloICCClient(SerialController):
         for channel in range(1, channel_count + 1):
             self.stop_channel(channel)
 
-    def start_channels(self, channels: list[int]) -> None:
-        for channel in channels:
-            self.start_channel(channel)
-
-    def stop_channels(self, channels: list[int]) -> None:
-        for channel in channels:
-            self.stop_channel(channel)
-
     def set_display_text(self, text: str) -> None:
         """Write *text* to the pump's display while it's under remote control.
 

@@ -410,6 +410,26 @@ def _apply_experiment_control_snapshot(window, snapshot: dict[str, object]) -> N
             pass
 
 
+def _valid_two_int_sizes(raw: object, *, allow_zero: bool = True) -> list[int] | None:
+    """Coerce *raw* to a validated [int, int] QSplitter.setSizes() pair, or
+    None if it isn't a 2-element list of non-negative (or, with
+    allow_zero=False, strictly positive) ints.
+
+    Every "restore a saved splitter size" call site used to hand-roll this
+    same isinstance/len/all check inline (8 near-identical copies across
+    _restore_splitter_sizes and the layout-preset appliers below) - this is
+    just the validation step; callers still decide what widget to apply it
+    to and what to do when it's None (skip, or fall back to a computed
+    split).
+    """
+    if not isinstance(raw, list) or len(raw) != 2:
+        return None
+    minimum = 0 if allow_zero else 1
+    if not all(isinstance(item, int) and item >= minimum for item in raw):
+        return None
+    return [int(raw[0]), int(raw[1])]
+
+
 def _apply_standard_layout_preset(window, preset_key: str, snapshot: dict[str, object]) -> None:
     _ensure_standard_layout_page(window)
     _restore_standard_widgets(window)
@@ -428,22 +448,12 @@ def _apply_standard_layout_preset(window, preset_key: str, snapshot: dict[str, o
     else:
         set_top_content_mode(window, "spectra", save=False)
     _apply_experiment_control_snapshot(window, snapshot)
-    left_sizes = snapshot.get("left_right_splitter_sizes")
-    if (
-        isinstance(left_sizes, list)
-        and len(left_sizes) == 2
-        and all(isinstance(item, int) and item >= 0 for item in left_sizes)
-        and hasattr(window, "left_right_splitter")
-    ):
-        window.left_right_splitter.setSizes([int(left_sizes[0]), int(left_sizes[1])])
-    plot_sizes = snapshot.get("plot_splitter_sizes")
-    if (
-        isinstance(plot_sizes, list)
-        and len(plot_sizes) == 2
-        and all(isinstance(item, int) and item >= 0 for item in plot_sizes)
-        and hasattr(window, "plot_splitter")
-    ):
-        window.plot_splitter.setSizes([int(plot_sizes[0]), int(plot_sizes[1])])
+    left_sizes = _valid_two_int_sizes(snapshot.get("left_right_splitter_sizes"))
+    if left_sizes is not None and hasattr(window, "left_right_splitter"):
+        window.left_right_splitter.setSizes(left_sizes)
+    plot_sizes = _valid_two_int_sizes(snapshot.get("plot_splitter_sizes"))
+    if plot_sizes is not None and hasattr(window, "plot_splitter"):
+        window.plot_splitter.setSizes(plot_sizes)
     elif preset_key == "spectra" and hasattr(window, "plot_splitter"):
         try:
             total = sum(int(size) for size in window.plot_splitter.sizes())
@@ -503,14 +513,9 @@ def _apply_measurement_layout_preset(window, snapshot: dict[str, object]) -> Non
     sensorgram_visible = snapshot.get("sensorgram_visible")
     if isinstance(sensorgram_visible, bool) and hasattr(window, "_sensorgram_block"):
         window._sensorgram_block.setVisible(sensorgram_visible)
-    vertical_sizes = snapshot.get("measurement_vertical_splitter_sizes")
-    if (
-        isinstance(vertical_sizes, list)
-        and len(vertical_sizes) == 2
-        and all(isinstance(item, int) and item >= 0 for item in vertical_sizes)
-        and hasattr(window, "_measurement_vertical_splitter")
-    ):
-        window._measurement_vertical_splitter.setSizes([int(vertical_sizes[0]), int(vertical_sizes[1])])
+    vertical_sizes = _valid_two_int_sizes(snapshot.get("measurement_vertical_splitter_sizes"))
+    if vertical_sizes is not None and hasattr(window, "_measurement_vertical_splitter"):
+        window._measurement_vertical_splitter.setSizes(vertical_sizes)
     else:
         try:
             splitter = getattr(window, "_measurement_vertical_splitter", None)
@@ -522,14 +527,9 @@ def _apply_measurement_layout_preset(window, snapshot: dict[str, object]) -> Non
                     splitter.setSizes([top, bottom])
         except Exception:
             pass
-    bottom_sizes = snapshot.get("measurement_bottom_splitter_sizes")
-    if (
-        isinstance(bottom_sizes, list)
-        and len(bottom_sizes) == 2
-        and all(isinstance(item, int) and item >= 0 for item in bottom_sizes)
-        and hasattr(window, "_measurement_bottom_splitter")
-    ):
-        window._measurement_bottom_splitter.setSizes([int(bottom_sizes[0]), int(bottom_sizes[1])])
+    bottom_sizes = _valid_two_int_sizes(snapshot.get("measurement_bottom_splitter_sizes"))
+    if bottom_sizes is not None and hasattr(window, "_measurement_bottom_splitter"):
+        window._measurement_bottom_splitter.setSizes(bottom_sizes)
     else:
         try:
             splitter = getattr(window, "_measurement_bottom_splitter", None)
@@ -837,30 +837,17 @@ def _restore_splitter_sizes(window, ui_state: dict[str, object]) -> None:
     sensorgram_header_splitter_sizes = ui_state.get("sensorgram_header_splitter_sizes")
     session_stats_splitter_sizes = ui_state.get("session_stats_splitter_sizes")
 
-    if (
-        isinstance(splitter_sizes, list)
-        and len(splitter_sizes) == 2
-        and all(isinstance(item, int) and item > 0 for item in splitter_sizes)
-    ):
+    splitter_sizes = _valid_two_int_sizes(splitter_sizes, allow_zero=False)
+    if splitter_sizes is not None:
         window.left_right_splitter.setSizes(splitter_sizes)
-    if (
-        isinstance(plot_splitter_sizes, list)
-        and len(plot_splitter_sizes) == 2
-        and all(isinstance(item, int) and item > 0 for item in plot_splitter_sizes)
-    ):
+    plot_splitter_sizes = _valid_two_int_sizes(plot_splitter_sizes, allow_zero=False)
+    if plot_splitter_sizes is not None:
         window.plot_splitter.setSizes(plot_splitter_sizes)
-    if (
-        isinstance(sensorgram_header_splitter_sizes, list)
-        and len(sensorgram_header_splitter_sizes) == 2
-        and all(isinstance(item, int) and item > 0 for item in sensorgram_header_splitter_sizes)
-    ):
+    sensorgram_header_splitter_sizes = _valid_two_int_sizes(sensorgram_header_splitter_sizes, allow_zero=False)
+    if sensorgram_header_splitter_sizes is not None:
         window.sensorgram_header_splitter.setSizes(sensorgram_header_splitter_sizes)
-    if (
-        isinstance(session_stats_splitter_sizes, list)
-        and len(session_stats_splitter_sizes) == 2
-        and all(isinstance(item, int) and item > 0 for item in session_stats_splitter_sizes)
-        and getattr(window, "session_stats_splitter", None) is not None
-    ):
+    session_stats_splitter_sizes = _valid_two_int_sizes(session_stats_splitter_sizes, allow_zero=False)
+    if session_stats_splitter_sizes is not None and getattr(window, "session_stats_splitter", None) is not None:
         window.session_stats_splitter.setSizes(session_stats_splitter_sizes)
 
 
@@ -1735,13 +1722,6 @@ def sync_view_actions(window) -> None:
             action.blockSignals(False)
 
 
-def sync_diagnostics_panel_action(window) -> None:
-    action = getattr(window, "_diagnostics_panel_action", None)
-    if action is None:
-        return
-    action.blockSignals(True)
-    action.setChecked(bool(getattr(window, "_diagnostics_panel_enabled", False)))
-    action.blockSignals(False)
 
 
 def launch_profile_settings(window):

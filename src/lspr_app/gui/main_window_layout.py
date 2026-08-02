@@ -80,6 +80,19 @@ def _make_hide_panel_button(window, tooltip: str):
     )
 
 
+def _add_hide_panel_button(layout, window, tooltip: str, on_click) -> None:
+    """Append `addStretch(1)` + a hide-panel icon button to *layout*, wired
+    to *on_click* - the one truly identical tail shared by every panel
+    header row below (sensorgram/tool-panel/spectrum), even though the rest
+    of each row - title stylesheet, extra buttons, tooltips - differs enough
+    per panel that unifying the whole row isn't worth the parameter list it
+    would take."""
+    layout.addStretch(1)
+    hide_button = _make_hide_panel_button(window, tooltip)
+    hide_button.clicked.connect(lambda _checked=False: on_click())
+    layout.addWidget(hide_button)
+
+
 def build_main_layout_for(window) -> None:
     measurement_bar = QHBoxLayout()
     measurement_bar.setSpacing(4)
@@ -140,10 +153,7 @@ def build_main_layout_for(window) -> None:
     trace_title_row.addWidget(window.show_secondary_axis_button)
     trace_title_row.addWidget(window.secondary_axis_metric_button)
     trace_title_row.addWidget(window.secondary_axis_metric_button_b)
-    trace_title_row.addStretch(1)
-    trace_title_hide_button = _make_hide_panel_button(window, "Hide sensorgram.")
-    trace_title_hide_button.clicked.connect(lambda _checked=False: window._toggle_sensorgram(False))
-    trace_title_row.addWidget(trace_title_hide_button)
+    _add_hide_panel_button(trace_title_row, window, "Hide sensorgram.", lambda: window._toggle_sensorgram(False))
     trace_title_row_widget = QWidget(window)
     trace_title_row_widget.setLayout(trace_title_row)
     trace_title_row_widget.setContentsMargins(0, 0, 0, 0)
@@ -291,11 +301,10 @@ def build_main_layout_for(window) -> None:
     tool_panel_title = QLabel("Tool panel")
     tool_panel_title.setObjectName("toolPanelTitleLabel")
     tool_panel_title.setStyleSheet("font-size: 13px; font-weight: 800; letter-spacing: 0.8px; color: #e0a84a;")
-    tool_panel_hide_button = _make_hide_panel_button(window, "Hide left controls.")
-    tool_panel_hide_button.clicked.connect(lambda _checked=False: window._toggle_left_controls(False))
     tool_panel_title_layout.addWidget(tool_panel_title)
-    tool_panel_title_layout.addStretch(1)
-    tool_panel_title_layout.addWidget(tool_panel_hide_button)
+    _add_hide_panel_button(
+        tool_panel_title_layout, window, "Hide left controls.", lambda: window._toggle_left_controls(False)
+    )
     tool_panel_title_row.setLayout(tool_panel_title_layout)
     left_panel.addWidget(tool_panel_title_row)
     left_panel.addLayout(measurement_bar)
@@ -337,10 +346,9 @@ def build_main_layout_for(window) -> None:
     spectrum_header_layout.addWidget(window.plot_selector)
     spectrum_header_layout.addWidget(window.spectrum_y_axis_format_button)
     spectrum_header_layout.addWidget(window.show_residual_button)
-    spectrum_header_layout.addStretch(1)
-    spectrum_header_hide_button = _make_hide_panel_button(window, "Hide spectra.")
-    spectrum_header_hide_button.clicked.connect(lambda _checked=False: window._activate_experiment_control_view())
-    spectrum_header_layout.addWidget(spectrum_header_hide_button)
+    _add_hide_panel_button(
+        spectrum_header_layout, window, "Hide spectra.", lambda: window._activate_experiment_control_view()
+    )
     spectrum_header_row.setLayout(spectrum_header_layout)
     spectrum_layout.addWidget(spectrum_header_row)
     spectrum_layout.addLayout(plot_bar)

@@ -144,6 +144,12 @@ _PROCESSING_SETTINGS_FIELD_RENAMES: dict[str, str] = {
 }
 
 
+def _clamp(value: object, minimum: float, maximum: float) -> float:
+    """min(max(value, minimum), maximum) as a named helper, for the several
+    settings below that clamp a saved value into a valid range."""
+    return float(min(max(value, minimum), maximum))
+
+
 def _coerce_processing_settings(raw: object) -> ProcessingSettings:
     defaults = asdict(ProcessingSettings())
     if isinstance(raw, dict):
@@ -160,15 +166,13 @@ def _coerce_processing_settings(raw: object) -> ProcessingSettings:
         defaults["baseline_method"] = "linear"
     if defaults.get("crop_method") not in {"fixed_width", "threshold"}:
         defaults["crop_method"] = "fixed_width"
-    defaults["crop_fraction"] = float(min(max(defaults.get("crop_fraction", 0.7), 0.05), 0.95))
+    defaults["crop_fraction"] = _clamp(defaults.get("crop_fraction", 0.7), 0.05, 0.95)
     if defaults.get("fit_method") not in {"none", "poly", "gaussian"}:
         defaults["fit_method"] = "none"
     if defaults.get("analysis_resolution_nm") is None:
         defaults["analysis_resolution_nm"] = 0.001
-    defaults["analysis_resolution_nm"] = float(
-        min(max(defaults.get("analysis_resolution_nm", 0.001), 0.000001), 0.1)
-    )
-    defaults["trace_noise_window_s"] = float(min(max(defaults.get("trace_noise_window_s", 10.0), 0.5), 600.0))
+    defaults["analysis_resolution_nm"] = _clamp(defaults.get("analysis_resolution_nm", 0.001), 0.000001, 0.1)
+    defaults["trace_noise_window_s"] = _clamp(defaults.get("trace_noise_window_s", 10.0), 0.5, 600.0)
     trace_metrics = defaults.get("trace_metrics")
     if not isinstance(trace_metrics, list):
         defaults["trace_metrics"] = ["smoothed_max", "centroid"]

@@ -112,6 +112,15 @@ class MeasurementSession:
 
     @staticmethod
     def _coerce_to_dark_axis(spectrum: Spectrum) -> Spectrum:
+        """Deliberately a no-op today - set_reference()/set_sample() store
+        *spectrum* on whatever axis it was acquired on, unchanged. The real
+        axis resampling onto the dark spectrum's wavelength grid happens
+        later, in compute_absorbance() via _coerce_to_axis() below (a
+        different, non-trivial method despite the similar name) - this
+        method exists as the intake-time hook for that, kept separate so a
+        future per-intake correction wouldn't need to touch
+        compute_absorbance's call sites. Do not assume this resamples
+        anything; it does not."""
         return spectrum
 
     @staticmethod

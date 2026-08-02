@@ -234,7 +234,6 @@ from lspr_app.gui.main_window_state import (
     show_experimental_control_only,
     show_plots_only,
     show_split_view,
-    sync_diagnostics_panel_action,
     sync_main_view_visibility,
     sync_view_actions,
     toggle_diagnostics_panel,
@@ -2592,9 +2591,6 @@ class MainWindow(QMainWindow):
 
     def _sync_view_actions(self) -> None:
         sync_view_actions(self)
-
-    def _sync_diagnostics_panel_action(self) -> None:
-        sync_diagnostics_panel_action(self)
 
     def _apply_launch_profile_layout(self) -> None:
         apply_launch_profile_layout(self)

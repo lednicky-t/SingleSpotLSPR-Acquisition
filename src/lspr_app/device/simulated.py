@@ -214,16 +214,3 @@ class SimulatedSpectrometer(Spectrometer):
             ** 2
         )
 
-    def _build_sample_signal(self, wavelengths: np.ndarray) -> np.ndarray:
-        return (
-            self._build_baseline_signal(wavelengths)
-            + self._build_sample_peak(wavelengths)
-            + self._build_secondary_peak(wavelengths)
-        )
-
-    def _build_baseline_signal(self, wavelengths: np.ndarray) -> np.ndarray:
-        wavelengths = np.asarray(wavelengths, dtype=np.float64)
-        if len(wavelengths) == 0:
-            return np.empty(0, dtype=np.float64)
-        x_relative = wavelengths - float(wavelengths[0])
-        return self._build_linear_baseline(x_relative)
