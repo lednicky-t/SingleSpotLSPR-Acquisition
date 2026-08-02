@@ -464,7 +464,20 @@ class PumpPlanTimelineWidget(QWidget):
             if not self._steps:
                 painter.setPen(QPen(muted))
                 painter.setFont(self._scaled_font(self.font(), minimum=9.0))
-                painter.drawText(left_pad, 56, "No pump-plan steps.")
+                # Vertically centered within bar_rect (the same band the step
+                # bar itself occupies), not a hardcoded baseline y=56 - this
+                # widget's height is pinned to as little as 48px
+                # (experiment_control_window.py's
+                # timeline_widget.setMinimumHeight(48)), so a fixed y=56
+                # baseline drew this text almost entirely below the widget's
+                # visible bottom edge - only the tops of a few ascenders
+                # peeked through, rendering as a handful of stray dots
+                # instead of readable text (reported by the maintainer).
+                painter.drawText(
+                    QRectF(left_pad, bar_rect.top(), max(self.width() - left_pad * 2, 20), bar_rect.height()),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    "No pump-plan steps.",
+                )
                 return
 
             total = max(self._steps[-1].end_s, 1.0)

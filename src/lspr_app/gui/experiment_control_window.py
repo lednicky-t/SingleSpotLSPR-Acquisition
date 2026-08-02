@@ -4190,8 +4190,12 @@ class ExperimentControlWindow(QWidget):
             return "table_timeline"
         return "full"
 
-    def _load_experiment_control_view_mode_sizes(self, state: dict[str, object]) -> dict[str, list[int]]:
-        payload = state.get("experiment_control_view_mode_sizes")
+    @staticmethod
+    def _parse_view_mode_sizes(payload: object) -> dict[str, list[int]]:
+        """Shared by _load_experiment_control_view_mode_sizes and
+        _load_experiment_control_view_mode_panel_sizes below - both read a
+        {"full"/"table_timeline"/"timeline": [int, int]} mapping out of a
+        saved ui_state payload, just under different top-level keys."""
         sizes: dict[str, list[int]] = {}
         if not isinstance(payload, dict):
             return sizes
@@ -4204,19 +4208,11 @@ class ExperimentControlWindow(QWidget):
                 sizes[raw_mode] = parsed
         return sizes
 
+    def _load_experiment_control_view_mode_sizes(self, state: dict[str, object]) -> dict[str, list[int]]:
+        return self._parse_view_mode_sizes(state.get("experiment_control_view_mode_sizes"))
+
     def _load_experiment_control_view_mode_panel_sizes(self, state: dict[str, object]) -> dict[str, list[int]]:
-        payload = state.get("experiment_control_view_mode_panel_sizes")
-        sizes: dict[str, list[int]] = {}
-        if not isinstance(payload, dict):
-            return sizes
-        for raw_mode in ("full", "table_timeline", "timeline"):
-            raw_sizes = payload.get(raw_mode)
-            if not isinstance(raw_sizes, list):
-                continue
-            parsed = [int(value) for value in raw_sizes if isinstance(value, int) and int(value) >= 0]
-            if len(parsed) == 2:
-                sizes[raw_mode] = parsed
-        return sizes
+        return self._parse_view_mode_sizes(state.get("experiment_control_view_mode_panel_sizes"))
 
     def _experiment_control_current_splitter_sizes(self) -> list[int]:
         splitter = getattr(self, "_flow_editor_splitter", None)
@@ -4408,6 +4404,15 @@ class ExperimentControlWindow(QWidget):
         from lspr_app.gui.main_window_state import ensure_visible_top_content_splitter
 
         mode = self._normalize_experiment_control_view_mode(self._experiment_control_view_mode)
+        if mode != "full" and self.plan_table.rowCount() == 0:
+            # Timeline and Table+Timeline have nothing meaningful to show
+            # with an empty plan (see PumpPlanTimelineWidget.paintEvent's
+            # "No pump-plan steps." fallback) - jump to Full, where the
+            # editor that can actually add a step is visible, instead of a
+            # near-empty Timeline view. Restored automatically once a step
+            # exists again, since this only overrides the *effective* mode
+            # here, not the underlying step-count check itself.
+            mode = "full"
         self._experiment_control_view_mode = mode
         show_matrix = mode == "full"
         show_table = mode != "timeline"
@@ -4517,6 +4522,12 @@ class ExperimentControlWindow(QWidget):
             self._select_experiment_control_plan_row(row_to_select)
         else:
             self.plan_table.clearSelection()
+            # Plan just became empty (e.g. the last step was deleted) - re-apply
+            # the view mode so the empty-plan jump-to-Full check in
+            # _apply_experiment_control_view_mode fires for this "live" case,
+            # not just on startup/restore.
+            if self._normalize_experiment_control_view_mode(self._experiment_control_view_mode) != "full":
+                self._apply_experiment_control_view_mode(save=False)
         self._fit_plan_table_columns_to_viewport()
         self._update_plan_table_height()
 
