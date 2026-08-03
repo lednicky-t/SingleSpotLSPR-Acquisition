@@ -123,6 +123,7 @@ from lspr_app.gui.panel_help_text import EXPERIMENT_CONTROL_BODY, EXPERIMENT_CON
 from lspr_app.gui.ui_helpers import make_compact_spinbox
 from lspr_app.gui.undo_support import push_snapshot
 from lspr_app.storage.app_config import load_app_setting, save_app_setting, save_window_ui_state
+from lspr_app.storage.device_manager_settings import DeviceManagerSettings, load_device_manager_settings
 from lspr_io import (
     build_legacy_experiment_plan_row_table,
 )
@@ -191,6 +192,7 @@ class ExperimentControlWindow(QWidget):
         backend: ExperimentControlBackend | None = None,
         parent: QWidget | None = None,
         undo_stack: QUndoStack | None = None,
+        device_manager_settings: DeviceManagerSettings | None = None,
     ) -> None:
         super().__init__(parent)
         # Shared with MainWindow when embedded in the real app (see
@@ -198,6 +200,12 @@ class ExperimentControlWindow(QWidget):
         # the whole app. Falls back to a private stack so this widget still
         # works when constructed standalone (tests, tools).
         self.undo_stack = undo_stack if undo_stack is not None else QUndoStack(self)
+        # Same sharing rationale as undo_stack above: when embedded in
+        # MainWindow this is the exact same object as window._device_manager_settings
+        # (see main_window_lifecycle.py), so pump defaults/limits edited in
+        # Device Manager take effect immediately. Falls back to loading the
+        # active user's own copy so this widget still works standalone.
+        self._device_manager_settings = device_manager_settings or load_device_manager_settings()
         self._bootstrap_t0 = perf_counter()
         self._bootstrap_batches_logged = 0
         self._ui_state = ui_state
@@ -727,7 +735,7 @@ class ExperimentControlWindow(QWidget):
         for channel in range(1, ACTIVE_PUMP_CHANNELS + 1):
             flow_spin = QDoubleSpinBox()
             make_compact_spinbox(flow_spin)
-            flow_spin.setRange(0.0, 100.0)
+            flow_spin.setRange(0.0, self._device_manager_settings.pump.max_flow_ul_min)
             flow_spin.setDecimals(0)
             flow_spin.setSingleStep(1.0)
             flow_spin.setMaximumWidth(82)
@@ -4944,10 +4952,15 @@ class ExperimentControlWindow(QWidget):
             return [_PlannedCommand(pump_label, "pump.stop", {"channel": i}, f"pump.stop ch={i}") for i in indices]
 
         def _pump_configure_cmds() -> list[_PlannedCommand]:
+            backsteps = self._device_manager_settings.pump.backsteps
+            roller_count = self._device_manager_settings.pump.roller_count
             return [
                 _PlannedCommand(
                     pump_label, "pump.set_flow",
-                    {"channel": i, "flow_ul_min": fl, "direction": d, "tube_mm": t, "start": False},
+                    {
+                        "channel": i, "flow_ul_min": fl, "direction": d, "tube_mm": t,
+                        "backsteps": backsteps, "roller_count": roller_count, "start": False,
+                    },
                     f"pump.set_flow ch={i} flow={fl:.2f} dir={d}",
                 )
                 for i, fl, d, t in channels_to_configure

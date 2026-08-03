@@ -11,6 +11,13 @@ ACTIVE_PUMP_CHANNELS = 4
 HDF5_PUMP_CHANNELS = 6
 DEFAULT_TUBE_MM = 0.25
 
+# Reglo ICC cassette heads are interchangeable and come in 6/8/12-roller
+# variants (manual sec. 6.2's "xt" command lists these as the only valid
+# roller counts). 8 is the standard head, and the one the manual's own
+# Tubing Size and Flow Rate Chart (sec. 13) is computed for.
+VALID_ROLLER_COUNTS = (6, 8, 12)
+DEFAULT_ROLLER_COUNT = 8
+
 
 @dataclass(slots=True, frozen=True)
 class TubeDiameterOption:

@@ -226,6 +226,9 @@ from lspr_app.gui.main_window_state import (
     set_auto_exposure_integration_limits_us,
     set_environment_poll_interval_s,
     set_pump_default_tube_mm,
+    set_pump_default_backsteps,
+    set_pump_default_max_flow_ul_min,
+    set_pump_default_roller_count,
     set_gui_housekeeping_enabled,
     set_diagnostics_panel_visible,
     set_measurement_hdf5_flush_interval_s,
@@ -3301,6 +3304,15 @@ class MainWindow(QMainWindow):
 
     def _set_pump_default_tube_mm(self, tube_mm: float) -> None:
         set_pump_default_tube_mm(self, tube_mm)
+
+    def _set_pump_default_backsteps(self, backsteps: int) -> None:
+        set_pump_default_backsteps(self, backsteps)
+
+    def _set_pump_default_max_flow_ul_min(self, max_flow_ul_min: float) -> None:
+        set_pump_default_max_flow_ul_min(self, max_flow_ul_min)
+
+    def _set_pump_default_roller_count(self, roller_count: int) -> None:
+        set_pump_default_roller_count(self, roller_count)
 
     def _set_processing_debug_mode_enabled(self, enabled: bool) -> None:
         self._processing_debug_mode_enabled = bool(enabled)

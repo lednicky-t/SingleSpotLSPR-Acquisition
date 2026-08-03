@@ -1555,6 +1555,54 @@ def set_pump_default_tube_mm(window, tube_mm: float) -> None:
     window._log_info(f"Default pump tube diameter set to {tube_mm:g} mm.")
 
 
+def set_pump_default_backsteps(window, backsteps: int) -> None:
+    """Set the default roller backstep count (drip-free dispensing) sent to
+    the pump on every channel configure. Set from Device Manager's Pump
+    "Defaults & limits" section - see RegloICCClient.set_backsteps."""
+    from lspr_app.storage.device_manager_settings import save_device_manager_settings
+
+    backsteps = max(0, min(int(backsteps), 100))
+    window._device_manager_settings.pump.backsteps = backsteps
+    save_device_manager_settings(window._device_manager_settings)
+    window.status_label.setText(f"Default pump backsteps set to {backsteps}.")
+    window._log_info(f"Default pump backsteps set to {backsteps}.")
+
+
+def set_pump_default_max_flow_ul_min(window, max_flow_ul_min: float) -> None:
+    """Set the soft cap on the per-channel flow rate spinbox in the
+    Experiment Control panel (not a pump hardware limit - see
+    storage/device_manager_settings.py's PumpDefaults.max_flow_ul_min). Set
+    from Device Manager's Pump "Defaults & limits" section."""
+    from lspr_app.storage.device_manager_settings import save_device_manager_settings
+
+    max_flow_ul_min = max(float(max_flow_ul_min), 0.01)
+    window._device_manager_settings.pump.max_flow_ul_min = max_flow_ul_min
+    save_device_manager_settings(window._device_manager_settings)
+    control_window = getattr(window, "_experiment_control_window", None)
+    if control_window is not None:
+        for spin in getattr(control_window, "manual_flow_spins", []):
+            spin.setMaximum(max_flow_ul_min)
+    window.status_label.setText(f"Max pump flow rate set to {max_flow_ul_min:g} uL/min.")
+    window._log_info(f"Max pump flow rate set to {max_flow_ul_min:g} uL/min.")
+
+
+def set_pump_default_roller_count(window, roller_count: int) -> None:
+    """Set the roller count of the installed cassette head, sent to the
+    pump on every channel configure (must match the physical head - see
+    RegloICCClient.set_roller_count). Set from Device Manager's Pump
+    "Defaults & limits" section."""
+    from lspr_app.domain.pump_plan import DEFAULT_ROLLER_COUNT, VALID_ROLLER_COUNTS
+    from lspr_app.storage.device_manager_settings import save_device_manager_settings
+
+    roller_count = int(roller_count)
+    if roller_count not in VALID_ROLLER_COUNTS:
+        roller_count = DEFAULT_ROLLER_COUNT
+    window._device_manager_settings.pump.roller_count = roller_count
+    save_device_manager_settings(window._device_manager_settings)
+    window.status_label.setText(f"Pump cassette roller count set to {roller_count}.")
+    window._log_info(f"Pump cassette roller count set to {roller_count}.")
+
+
 def switch_active_user(window, name: str) -> bool:
     """Switch which user is active - see storage/user_profile.py and the
     user look-up field next to the destination-folder/experiment-name row

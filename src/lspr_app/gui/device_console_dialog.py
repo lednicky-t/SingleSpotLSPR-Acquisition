@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import datetime
 
 from PyQt6.QtCore import Qt, QTimer, QRunnable, QObject, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon
@@ -36,8 +37,11 @@ from lspr_app.device.port_assignments import device_assignment_label, set_port_a
 from lspr_app.device.probe_diagnostics import snapshot_port_probe_events
 from lspr_app.device.reglo_icc import RegloICCClient, is_probable_reglo_port
 from lspr_app.device.serial_controllers import SerialController, capabilities_for_controller_type, controller_port_priority
+from lspr_app.device.simulated import SimulatedSpectrometer
+from lspr_app.domain.pump_plan import ACTIVE_PUMP_CHANNELS, VALID_ROLLER_COUNTS
 from lspr_app.gui.device_lifecycle_task import DeviceConnectTask, DeviceDisconnectTask, device_io_pool
 from lspr_app.gui.panel_help import make_help_button
+from lspr_app.gui.pump_calibration_panel import PumpCalibrationDialog
 from lspr_app.gui.ui_helpers import create_status_dot_icon, make_compact_spinbox
 from lspr_app.storage.app_config import load_app_setting, save_app_setting
 from lspr_app.storage.device_manager_settings import DeviceManagerSettings
@@ -48,8 +52,23 @@ _DEVICE_PAGE_ORDER = (_SPECTROMETER, PUMP, SWITCH, SELECTOR)
 _STATUS_COLOR_CONNECTED = QColor("#22c55e")
 _STATUS_COLOR_DISCONNECTED = QColor("#94a3b8")
 _STATUS_COLOR_ERROR = QColor("#ef4444")
+# Distinct from _STATUS_COLOR_CONNECTED so the spectrometer row can't be
+# mistaken for a real hardware connection while running on the simulated
+# backend (no spectrometer actually plugged in) - see _refresh_spectrometer_page.
+_STATUS_COLOR_SIMULATED = QColor("#f59e0b")
 
 _DEEP_DEBUG_SETTING_KEY = "device_manager_deep_debug"
+
+# Placeholder soft-warning threshold for the "time since last calibration"
+# indicator below - the manual gives NO recommended recalibration interval
+# anywhere, so this is our own guess, not an Ismatec spec. It is also in
+# operating/run hours, not calendar time: the pump has no real-time clock
+# (no command anywhere in the protocol sets a date), so the "xX" command it's
+# based on is an elapsed-time counter, not a wall-clock date - see
+# RegloICCClient.get_time_since_last_calibration_s and
+# _decode_time_type_seconds for a further unit-ambiguity note. Revisit once
+# we have our own calibration-history log to base this on.
+PUMP_CALIBRATION_WARNING_HOURS = 100.0
 
 _ENABLE_HELP_TOOLTIP = "Enable or disable this device type."
 _ENABLE_HELP_TITLE = "Hardware devices"
@@ -277,6 +296,7 @@ class DeviceManagerDialog(QDialog):
         self._log_output.setReadOnly(True)
         self._log_output.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
 
+        self._pump_calibration_window: PumpCalibrationDialog | None = None
         self._build_devices_tab()
         self._build_log_tab()
 
@@ -291,6 +311,7 @@ class DeviceManagerDialog(QDialog):
             self._build_profiles_tab(),
             self._build_probe_assign_tab(),
             self._build_command_tab(),
+            self._build_pump_calibration_tab(),
             self._build_port_list_tab(),
         ]
         self._debug_tabs_visible = False
@@ -349,6 +370,8 @@ class DeviceManagerDialog(QDialog):
         super().showEvent(event)
         if self._tabs.currentIndex() == self._connected_tab_index:
             self._refresh_timer.start()
+        if self._selected_device_key() == PUMP:
+            self._refresh_pump_calibration_status()
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
@@ -428,6 +451,19 @@ class DeviceManagerDialog(QDialog):
         if row < 0:
             return
         self._device_stack.setCurrentIndex(row)
+        if self._selected_device_key() == PUMP:
+            self._refresh_pump_calibration_status()
+
+    def _selected_device_key(self) -> str | None:
+        item = self._device_list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+    def _open_pump_calibration_window(self) -> None:
+        if self._pump_calibration_window is None:
+            self._pump_calibration_window = PumpCalibrationDialog(self._device_manager_settings, self._service, self)
+        self._pump_calibration_window.show()
+        self._pump_calibration_window.raise_()
+        self._pump_calibration_window.activateWindow()
 
     def _build_spectrometer_detail_page(self) -> QWidget:
         title_label = QLabel(f"<b>{self._device_display_name(_SPECTROMETER)}</b>")
@@ -528,6 +564,46 @@ class DeviceManagerDialog(QDialog):
             tube_spin.valueChanged.connect(self._on_pump_tube_mm_changed)
             defaults_form.addRow("Default tube diameter", tube_spin)
             widgets["tube_mm_spin"] = tube_spin
+
+            backsteps_spin = make_compact_spinbox(QSpinBox())
+            backsteps_spin.setRange(0, 100)
+            backsteps_spin.setToolTip(
+                "Roller backsteps for drip-free dispensing (pump manual sec. 6.4.3).\n"
+                "0 = pump's own factory default (no backstep correction)."
+            )
+            backsteps_spin.setValue(self._device_manager_settings.pump.backsteps)
+            backsteps_spin.valueChanged.connect(self._on_pump_backsteps_changed)
+            defaults_form.addRow("Backsteps", backsteps_spin)
+            widgets["backsteps_spin"] = backsteps_spin
+
+            max_flow_spin = make_compact_spinbox(QDoubleSpinBox())
+            max_flow_spin.setRange(0.01, 35_000.0)
+            max_flow_spin.setDecimals(1)
+            max_flow_spin.setSuffix(" uL/min")
+            max_flow_spin.setToolTip(
+                "Soft cap on the flow rate spinboxes in the Experiment Control panel.\n"
+                "Not a pump hardware limit - the Reglo ICC itself supports up to\n"
+                "35 mL/min on the largest tubing (manual sec. 13)."
+            )
+            max_flow_spin.setValue(self._device_manager_settings.pump.max_flow_ul_min)
+            max_flow_spin.valueChanged.connect(self._on_pump_max_flow_changed)
+            defaults_form.addRow("Max flow rate", max_flow_spin)
+            widgets["max_flow_spin"] = max_flow_spin
+
+            roller_count_combo = QComboBox()
+            roller_count_combo.setToolTip(
+                "Rollers on the installed cassette head (pump manual sec. 6.2/6.12-6.13).\n"
+                "Must match the physical head, or the pump's mL/min flow-rate\n"
+                "conversion for every channel will be skewed."
+            )
+            for option in VALID_ROLLER_COUNTS:
+                roller_count_combo.addItem(f"{option}", option)
+            current_roller_count = self._device_manager_settings.pump.roller_count
+            index = roller_count_combo.findData(current_roller_count)
+            roller_count_combo.setCurrentIndex(index if index >= 0 else 0)
+            roller_count_combo.currentIndexChanged.connect(self._on_pump_roller_count_changed)
+            defaults_form.addRow("Rollers (cassette head)", roller_count_combo)
+            widgets["roller_count_combo"] = roller_count_combo
         elif device_key == SWITCH:
             poll_row_widget = QWidget()
             poll_row_layout = QHBoxLayout(poll_row_widget)
@@ -549,6 +625,22 @@ class DeviceManagerDialog(QDialog):
             placeholder.setEnabled(False)
             defaults_form.addRow(placeholder)
 
+        calibration_form: QFormLayout | None = None
+        calibration_channel_labels: list[QLabel] = []
+        open_calibration_button: QPushButton | None = None
+        if device_key == PUMP:
+            calibration_form = QFormLayout()
+            for channel in range(1, ACTIVE_PUMP_CHANNELS + 1):
+                channel_label = QLabel("-")
+                calibration_form.addRow(f"CH{channel}", channel_label)
+                calibration_channel_labels.append(channel_label)
+            open_calibration_button = QPushButton("Open Pump Calibration...")
+            open_calibration_button.setToolTip(
+                "Opens the pump calibration window (run all channels together,\n"
+                "measure, and write corrected roller-step-volume constants)."
+            )
+            open_calibration_button.clicked.connect(self._open_pump_calibration_window)
+
         layout = QVBoxLayout()
         layout.addWidget(header_widget)
         layout.addWidget(enable_widget)
@@ -560,6 +652,10 @@ class DeviceManagerDialog(QDialog):
             layout.addWidget(capabilities_label)
         layout.addWidget(_section_label("Defaults & limits"))
         layout.addLayout(defaults_form)
+        if device_key == PUMP and calibration_form is not None and open_calibration_button is not None:
+            layout.addWidget(_section_label("Calibration"))
+            layout.addLayout(calibration_form)
+            layout.addWidget(open_calibration_button)
         layout.addStretch(1)
 
         page = QWidget()
@@ -576,6 +672,9 @@ class DeviceManagerDialog(QDialog):
             "identity_label": identity_label,
             "capabilities_label": capabilities_label,
         })
+        if device_key == PUMP:
+            widgets["calibration_channel_labels"] = calibration_channel_labels
+            widgets["open_calibration_button"] = open_calibration_button
         self._device_pages[device_key] = widgets
         return page
 
@@ -593,6 +692,72 @@ class DeviceManagerDialog(QDialog):
         window = self.parent()
         if window is not None and hasattr(window, "_set_pump_default_tube_mm"):
             window._set_pump_default_tube_mm(value)
+
+    def _on_pump_backsteps_changed(self, value: int) -> None:
+        window = self.parent()
+        if window is not None and hasattr(window, "_set_pump_default_backsteps"):
+            window._set_pump_default_backsteps(value)
+
+    def _refresh_pump_calibration_status(self) -> None:
+        """Query each pump channel's elapsed time since it was last
+        calibrated ("xX", manual sec. 5.8) and show it next to the pump's
+        Defaults & limits. Triggered whenever the Pump page becomes the
+        visible one (see _on_device_list_row_changed/showEvent) rather than
+        a manual button or the automatic 2 s status timer - avoids
+        contending with an in-progress experiment for the single-lane
+        serial connection on every tick, while still staying current
+        whenever someone actually looks at the Pump page.
+
+        PUMP_CALIBRATION_WARNING_HOURS is our own placeholder threshold, not
+        an Ismatec recommendation - the manual has none. And this is
+        operating/run hours, not calendar time - the pump has no real-time
+        clock. See that constant's comment and get_time_since_last_calibration_s's
+        docstring for the unit-ambiguity caveat in the manual's own worked
+        example for this exact command.
+        """
+        labels = self._device_pages.get(PUMP, {}).get("calibration_channel_labels", [])
+        if not labels:
+            return
+        label = device_label_for(PUMP)
+        try:
+            connected = bool(self._service.status(label).connected)
+        except Exception:
+            connected = False
+        if not connected:
+            for channel_label in labels:
+                channel_label.setText("Pump not connected.")
+                channel_label.setStyleSheet("")
+            return
+        for index, channel_label in enumerate(labels, start=1):
+            result = self._service.send_command(
+                label, DeviceCommand("pump.calibration.time_since_last_s", {"channel": index}),
+            )
+            if not result.success:
+                channel_label.setText(f"Error: {result.error or 'unknown'}")
+                channel_label.setStyleSheet(f"color: {_STATUS_COLOR_ERROR.name()};")
+                continue
+            seconds = float(result.response or 0.0)
+            hours = seconds / 3600.0
+            if hours >= PUMP_CALIBRATION_WARNING_HOURS:
+                channel_label.setText(f"{hours:.1f} h since last calibration - consider recalibrating")
+                channel_label.setStyleSheet(f"color: {_STATUS_COLOR_SIMULATED.name()};")
+            else:
+                channel_label.setText(f"{hours:.1f} h since last calibration")
+                channel_label.setStyleSheet("")
+
+    def _on_pump_max_flow_changed(self, value: float) -> None:
+        window = self.parent()
+        if window is not None and hasattr(window, "_set_pump_default_max_flow_ul_min"):
+            window._set_pump_default_max_flow_ul_min(value)
+
+    def _on_pump_roller_count_changed(self, _index: int) -> None:
+        page = self._device_pages.get(PUMP, {})
+        combo = page.get("roller_count_combo")
+        if combo is None:
+            return
+        window = self.parent()
+        if window is not None and hasattr(window, "_set_pump_default_roller_count"):
+            window._set_pump_default_roller_count(int(combo.currentData()))
 
     def _on_environment_poll_interval_changed(self, value: float) -> None:
         window = self.parent()
@@ -763,6 +928,239 @@ class DeviceManagerDialog(QDialog):
         layout.addWidget(self._command_result, 1)
         page = self._wrap_layout(layout)
         return page, "Commands"
+
+    def _build_pump_calibration_tab(self) -> tuple[QWidget, str]:
+        """Raw, one-channel-at-a-time test bench for the pump's calibration
+        commands (manual sec. 6.4.4 / 16.2 ref 5.0, 18.5) plus direct
+        roller-step-volume access (ref 6.33/6.34) - see RegloICCClient's
+        calibration methods. Deep-debug-gated like the Commands tab, since
+        "Start calibration" physically dispenses fluid on the selected
+        channel.
+
+        Kept deliberately low-level (one channel at a time, raw command
+        access) for verifying real pump behavior against the manual - in
+        particular the Time Type unit ambiguity flagged in
+        RegloICCClient._decode_time_type_seconds/_encode_time_type. For the
+        real, everyday calibration workflow (all channels together), see
+        gui/pump_calibration_panel.PumpCalibrationDialog, opened via the
+        Pump page's "Open Pump Calibration..." button
+        (_open_pump_calibration_window).
+        """
+        self._cal_channel_spin = make_compact_spinbox(QSpinBox())
+        self._cal_channel_spin.setRange(1, ACTIVE_PUMP_CHANNELS)
+        self._cal_channel_spin.setValue(1)
+
+        self._cal_direction_combo = QComboBox(self)
+        self._cal_direction_combo.addItem("CW", "CW")
+        self._cal_direction_combo.addItem("CCW", "CCW")
+
+        self._cal_target_volume_spin = make_compact_spinbox(QDoubleSpinBox())
+        self._cal_target_volume_spin.setRange(0.001, 1000.0)
+        self._cal_target_volume_spin.setDecimals(3)
+        self._cal_target_volume_spin.setSuffix(" mL")
+        self._cal_target_volume_spin.setValue(10.0)
+
+        self._cal_time_spin = make_compact_spinbox(QDoubleSpinBox())
+        self._cal_time_spin.setRange(0.1, 3600.0)
+        self._cal_time_spin.setDecimals(1)
+        self._cal_time_spin.setSuffix(" s")
+        self._cal_time_spin.setValue(60.0)
+
+        apply_button = QPushButton("Apply direction/target/duration to channel")
+        apply_button.clicked.connect(self._apply_pump_calibration_settings)
+
+        self._cal_implied_flow_label = QLabel("-")
+        self._cal_implied_flow_label.setToolTip(
+            "Target volume / duration, as a flow rate - compare against your\n"
+            "tubing's achievable range (manual sec. 13's chart / this app's\n"
+            "TUBE_DIAMETER_OPTIONS). A target that implies a flow rate the\n"
+            "installed tube can't achieve is a likely cause of the pump\n"
+            "refusing to start (\"-\" response, cause \"R\" via \"Why?\" below)."
+        )
+        self._cal_target_volume_spin.valueChanged.connect(self._update_pump_calibration_implied_flow_rate)
+        self._cal_time_spin.valueChanged.connect(self._update_pump_calibration_implied_flow_rate)
+
+        form = QFormLayout()
+        form.addRow("Channel", self._cal_channel_spin)
+        form.addRow("Direction", self._cal_direction_combo)
+        form.addRow("Target volume", self._cal_target_volume_spin)
+        form.addRow("Duration", self._cal_time_spin)
+        form.addRow("Implied flow rate", self._cal_implied_flow_label)
+
+        start_button = QPushButton("Start calibration (dispenses fluid!)")
+        start_button.setToolTip('Sends "xY" - physically runs the pump on the selected channel.')
+        start_button.clicked.connect(self._start_pump_calibration)
+        cancel_button = QPushButton("Cancel calibration")
+        cancel_button.clicked.connect(self._cancel_pump_calibration)
+        why_button = QPushButton("Why can't it start? (xe)")
+        why_button.setToolTip(
+            'If Start returns a "-" response, this queries the pump\'s own\n'
+            "documented reason (manual sec. 2.7, \"xe\") for the selected channel."
+        )
+        why_button.clicked.connect(self._diagnose_pump_calibration_start_failure)
+        run_row = QHBoxLayout()
+        run_row.addWidget(start_button)
+        run_row.addWidget(cancel_button)
+        run_row.addWidget(why_button)
+        run_row.addStretch(1)
+
+        self._cal_measured_volume_spin = make_compact_spinbox(QDoubleSpinBox())
+        self._cal_measured_volume_spin.setRange(0.0, 1000.0)
+        self._cal_measured_volume_spin.setDecimals(3)
+        self._cal_measured_volume_spin.setSuffix(" mL")
+        submit_measured_button = QPushButton("Submit measured volume (applies correction)")
+        submit_measured_button.setToolTip(
+            "Deviation is computed against the Target volume field above -\n"
+            "make sure it still matches what you set before starting the run."
+        )
+        submit_measured_button.clicked.connect(self._submit_pump_calibration_measured_volume)
+        measured_row = QHBoxLayout()
+        measured_row.addWidget(self._cal_measured_volume_spin)
+        measured_row.addWidget(submit_measured_button)
+
+        self._cal_roller_step_volume_label = QLabel("-")
+        read_rsv_button = QPushButton("Read")
+        read_rsv_button.clicked.connect(self._read_pump_roller_step_volume)
+        rsv_read_row = QHBoxLayout()
+        rsv_read_row.addWidget(QLabel("Current:"))
+        rsv_read_row.addWidget(self._cal_roller_step_volume_label, 1)
+        rsv_read_row.addWidget(read_rsv_button)
+
+        self._cal_roller_step_volume_write_spin = make_compact_spinbox(QDoubleSpinBox())
+        self._cal_roller_step_volume_write_spin.setRange(0.0, 10.0)
+        self._cal_roller_step_volume_write_spin.setDecimals(6)
+        self._cal_roller_step_volume_write_spin.setSuffix(" mL/step")
+        write_rsv_button = QPushButton("Write (direct, no dispense)")
+        write_rsv_button.setToolTip(
+            "Directly overwrites this channel's calibrated roller-step volume -\n"
+            "the constant used to convert flow-rate/volume targets into an\n"
+            "actual roller speed - without running the interactive\n"
+            "dispense-then-measure procedure above."
+        )
+        write_rsv_button.clicked.connect(self._write_pump_roller_step_volume)
+        rsv_write_row = QHBoxLayout()
+        rsv_write_row.addWidget(self._cal_roller_step_volume_write_spin)
+        rsv_write_row.addWidget(write_rsv_button)
+
+        self._cal_time_since_last_label = QLabel("-")
+        time_since_button = QPushButton("Refresh")
+        time_since_button.clicked.connect(self._refresh_pump_calibration_time_since_last)
+        time_since_row = QHBoxLayout()
+        time_since_row.addWidget(self._cal_time_since_last_label, 1)
+        time_since_row.addWidget(time_since_button)
+
+        self._cal_result = QPlainTextEdit(self)
+        self._cal_result.setReadOnly(True)
+        self._cal_result.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._cal_result.setPlaceholderText("Raw pump responses appear here (one line per command).")
+
+        layout = QVBoxLayout()
+        layout.addWidget(_section_label("1. Configure channel"))
+        layout.addLayout(form)
+        layout.addWidget(apply_button)
+        layout.addWidget(_section_label("2. Run calibration (physically dispenses fluid)"))
+        layout.addLayout(run_row)
+        layout.addWidget(_section_label("3. Enter measured volume (applies the correction)"))
+        layout.addLayout(measured_row)
+        layout.addWidget(_section_label("Roller-step volume - direct read/write, no dispense"))
+        layout.addLayout(rsv_read_row)
+        layout.addLayout(rsv_write_row)
+        layout.addWidget(_section_label("Time since last calibration"))
+        layout.addLayout(time_since_row)
+        layout.addWidget(_section_label("Raw responses"))
+        layout.addWidget(self._cal_result, 1)
+        page = self._wrap_layout(layout)
+        self._update_pump_calibration_implied_flow_rate()
+        return page, "Pump Cal. (raw)"
+
+    def _update_pump_calibration_implied_flow_rate(self) -> None:
+        volume_ml = self._cal_target_volume_spin.value()
+        duration_s = self._cal_time_spin.value()
+        if duration_s <= 0.0:
+            self._cal_implied_flow_label.setText("-")
+            return
+        flow_ml_min = volume_ml / (duration_s / 60.0)
+        self._cal_implied_flow_label.setText(f"{flow_ml_min:.4g} mL/min")
+
+    def _diagnose_pump_calibration_start_failure(self) -> None:
+        channel = self._cal_channel_spin.value()
+        self._run_pump_calibration_command(
+            "pump.get_start_failure_reason", {"channel": channel}, f"CH{channel} why can't it start (xe)",
+        )
+
+    def _run_pump_calibration_command(self, command_type: str, payload: dict, description: str) -> object | None:
+        result = self._service.send_command(device_label_for(PUMP), DeviceCommand(command_type, payload))
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        if result.success:
+            self._cal_result.appendPlainText(f"[{timestamp}] {description}: OK -> {result.response!r}")
+            return result.response
+        self._cal_result.appendPlainText(f"[{timestamp}] {description}: FAILED -> {result.error}")
+        return None
+
+    def _apply_pump_calibration_settings(self) -> None:
+        channel = self._cal_channel_spin.value()
+        direction = str(self._cal_direction_combo.currentData())
+        target_ml = self._cal_target_volume_spin.value()
+        duration_s = self._cal_time_spin.value()
+        self._run_pump_calibration_command(
+            "pump.calibration.set_direction", {"channel": channel, "direction": direction},
+            f"CH{channel} set direction={direction}",
+        )
+        self._run_pump_calibration_command(
+            "pump.calibration.set_target_volume_ml", {"channel": channel, "volume_ml": target_ml},
+            f"CH{channel} set target volume={target_ml:g} mL",
+        )
+        self._run_pump_calibration_command(
+            "pump.calibration.set_time_s", {"channel": channel, "seconds": duration_s},
+            f"CH{channel} set duration={duration_s:g} s",
+        )
+
+    def _start_pump_calibration(self) -> None:
+        channel = self._cal_channel_spin.value()
+        self._run_pump_calibration_command("pump.calibration.start", {"channel": channel}, f"CH{channel} start calibration")
+
+    def _cancel_pump_calibration(self) -> None:
+        channel = self._cal_channel_spin.value()
+        self._run_pump_calibration_command("pump.calibration.cancel", {"channel": channel}, f"CH{channel} cancel calibration")
+
+    def _submit_pump_calibration_measured_volume(self) -> None:
+        channel = self._cal_channel_spin.value()
+        measured_ml = self._cal_measured_volume_spin.value()
+        target_ml = self._cal_target_volume_spin.value()
+        confirmed = self._run_pump_calibration_command(
+            "pump.calibration.set_measured_volume_ml", {"channel": channel, "volume_ml": measured_ml},
+            f"CH{channel} submit measured volume={measured_ml:g} mL",
+        )
+        if confirmed is not None and target_ml > 0.0:
+            deviation_pct = (float(confirmed) - target_ml) / target_ml * 100.0
+            self._cal_result.appendPlainText(
+                f"    -> deviation vs target ({target_ml:g} mL): {deviation_pct:+.2f}%"
+            )
+
+    def _read_pump_roller_step_volume(self) -> None:
+        channel = self._cal_channel_spin.value()
+        response = self._run_pump_calibration_command(
+            "pump.roller_step_volume.get", {"channel": channel}, f"CH{channel} read roller-step volume",
+        )
+        if response is not None:
+            self._cal_roller_step_volume_label.setText(f"{float(response):.6f} mL/step")
+
+    def _write_pump_roller_step_volume(self) -> None:
+        channel = self._cal_channel_spin.value()
+        volume_ml = self._cal_roller_step_volume_write_spin.value()
+        self._run_pump_calibration_command(
+            "pump.roller_step_volume.set", {"channel": channel, "volume_ml": volume_ml},
+            f"CH{channel} write roller-step volume={volume_ml:g} mL/step",
+        )
+
+    def _refresh_pump_calibration_time_since_last(self) -> None:
+        channel = self._cal_channel_spin.value()
+        response = self._run_pump_calibration_command(
+            "pump.calibration.time_since_last_s", {"channel": channel}, f"CH{channel} time since last calibration",
+        )
+        if response is not None:
+            hours = float(response) / 3600.0
+            self._cal_time_since_last_label.setText(f"{hours:.2f} h (raw: {float(response):.1f} s)")
 
     def _build_log_tab(self) -> None:
         self._log_refresh_button = QPushButton("Refresh")
@@ -1117,6 +1515,7 @@ class DeviceManagerDialog(QDialog):
             page["stats_label"].setText("No spectrometer connected.")
             if item is not None:
                 item.setIcon(create_status_dot_icon(_STATUS_COLOR_DISCONNECTED))
+                item.setToolTip(self._device_display_name(_SPECTROMETER))
             return
 
         try:
@@ -1125,7 +1524,15 @@ class DeviceManagerDialog(QDialog):
             device_name = "Spectrometer"
         page["status_label"].setText(device_name)
         if item is not None:
-            item.setIcon(create_status_dot_icon(_STATUS_COLOR_CONNECTED))
+            # A SimulatedSpectrometer is a stand-in used when no real hardware
+            # is connected (see device/simulated.py) - showing it with the
+            # same green dot as a real connection would read as "spectrometer
+            # is plugged in" when it isn't. Amber marks it as active-but-fake.
+            is_simulated = isinstance(spectrometer, SimulatedSpectrometer)
+            color = _STATUS_COLOR_SIMULATED if is_simulated else _STATUS_COLOR_CONNECTED
+            item.setIcon(create_status_dot_icon(color))
+            tooltip = f"{self._device_display_name(_SPECTROMETER)} (simulated, no hardware)" if is_simulated else self._device_display_name(_SPECTROMETER)
+            item.setToolTip(tooltip)
 
         # No shared public accessor for the wavelength axis exists on the
         # Spectrometer ABC (device/base.py) - OceanSpectrometer exposes it as
@@ -1302,6 +1709,8 @@ class DeviceManagerDialog(QDialog):
             payload.setdefault("flow_ul_min", 50.0)
             payload.setdefault("direction", "CW")
             payload.setdefault("tube_mm", self._device_manager_settings.pump.tube_mm)
+            payload.setdefault("backsteps", self._device_manager_settings.pump.backsteps)
+            payload.setdefault("roller_count", self._device_manager_settings.pump.roller_count)
         result = self._service.send_command(label, DeviceCommand(command_type, payload))
         self._command_result.setPlainText(
             "\n".join(

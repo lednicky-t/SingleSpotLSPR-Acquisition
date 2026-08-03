@@ -159,6 +159,7 @@ def ensure_experiment_control_panel_for(window) -> None:
                 show_runtime_controls=profile.show_runtime_controls,
                 parent=getattr(window, "_top_content_stack", window),
                 undo_stack=getattr(window, "undo_stack", None),
+                device_manager_settings=getattr(window, "_device_manager_settings", None),
             )
             window._experiment_control_window.setVisible(False)
             window._experiment_control_window.availability_changed.connect(window._handle_flow_availability_changed)

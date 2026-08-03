@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from lspr_app.domain.models import AutoExposureSettings
-from lspr_app.domain.pump_plan import DEFAULT_TUBE_MM
+from lspr_app.domain.pump_plan import DEFAULT_ROLLER_COUNT, DEFAULT_TUBE_MM, VALID_ROLLER_COUNTS
 from lspr_app.storage.app_config import load_app_setting, save_app_setting
 
 _SETTING_KEY = "device_manager_settings"
@@ -34,6 +34,21 @@ _DEFAULT_ENVIRONMENT_POLL_INTERVAL_S = 5.0
 @dataclass(slots=True)
 class PumpDefaults:
     tube_mm: float = DEFAULT_TUBE_MM
+    # Roller backsteps for drip-free dispensing, sent to the pump via the
+    # Reglo ICC's "%" command on every channel configure (manual sec. 6.4.3 /
+    # 16.2 ref 4.3-4.4). Range 0-100; 0 is the pump's own factory default.
+    backsteps: int = 0
+    # Soft cap on the per-channel flow rate spinbox in the Experiment Control
+    # panel (see experiment_control_window.py's manual_flow_spins) - not a
+    # pump hardware limit (the Reglo ICC itself supports up to 35 mL/min on
+    # the largest tubing, see domain/pump_plan.TUBE_DIAMETER_OPTIONS), just a
+    # sane default for this app's typical low-flow LSPR usage that used to be
+    # hardcoded to 100.0.
+    max_flow_ul_min: float = 100.0
+    # Rollers on the installed cassette head - must match the physical head
+    # (6/8/12, see RegloICCClient.set_roller_count) or the pump's mL/min
+    # flow-rate conversion will be skewed. Sent on every channel configure.
+    roller_count: int = DEFAULT_ROLLER_COUNT
 
 
 @dataclass(slots=True)
@@ -75,6 +90,8 @@ def _coerce_settings(raw: object, path: Path | None) -> DeviceManagerSettings:
     pump_raw = payload.get("pump")
     if isinstance(pump_raw, dict):
         pump_defaults.update({key: value for key, value in pump_raw.items() if key in pump_defaults})
+    if pump_defaults.get("roller_count") not in VALID_ROLLER_COUNTS:
+        pump_defaults["roller_count"] = DEFAULT_ROLLER_COUNT
     pump = PumpDefaults(**pump_defaults)
 
     switch_defaults = asdict(SwitchDefaults())
