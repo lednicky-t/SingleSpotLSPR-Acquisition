@@ -357,6 +357,16 @@ def handle_hardware_init_step_for(window, event: object) -> None:
             and window._source_mode != "spectrometer"
             and (initial_scan or tool_panel_visible)
         ):
+            # Stop any live acquisition (almost always simulation, which
+            # auto-starts on launch/mode-switch) before flipping source mode -
+            # start_live_acquisition() no-ops while _live_active is already
+            # True, so without this the "restart_live=True" below silently
+            # did nothing and left the old simulation worker running under a
+            # now-"spectrometer" facade until the user manually switched
+            # source tabs (which does stop-then-restart correctly - see
+            # request_source_mode_switch in main_window_headers.py).
+            if getattr(window, "_live_active", False):
+                window._stop_live_acquisition("Switching source...")
             apply_source_mode_for(window, "spectrometer", restart_live=True)
     elif key == PUMP:
         if event.probe is not None:
