@@ -17,17 +17,18 @@ from lspr_app.device.device_lifecycle import (
 )
 from lspr_app.device.device_types import PUMP, SELECTOR, SWITCH
 from lspr_app.device.simulated import SimulatedSpectrometer
+from lspr_app.gui.autosave_domains import persist_autosave, schedule_autosave, set_autosave_enabled
 from lspr_app.gui.device_lifecycle_task import DeviceDisconnectTask, DeviceLifecycleCycleTask, device_io_pool
 from lspr_app.gui.main_window_state import (
+    ACQUISITION_STATE_DOMAIN,
+    UI_STATE_DOMAIN,
     acquisition_state_payload,
     apply_source_mode_for,
     collapsible_section_state,
     launch_profile_settings,
-    persist_acquisition_state,
     ensure_visible_top_content_splitter,
     restore_collapsible_section_state,
     restore_ui_state,
-    save_ui_state,
     schedule_acquisition_state_persist,
 )
 from lspr_app.gui.main_window_headers import update_source_link_buttons
@@ -44,35 +45,13 @@ def restore_ui_state_for(window) -> None:
 
 
 def save_ui_state_for(window) -> None:
-    started = perf_counter()
-    requested_at = getattr(window, "_ui_state_requested_at", None)
-    if requested_at is not None:
-        try:
-            window._last_ui_state_delay_ms = max((started - float(requested_at)) * 1000.0, 0.0)
-        except (TypeError, ValueError):
-            window._last_ui_state_delay_ms = None
-
-    def _callback() -> None:
-        save_ui_state(window)
-
-    window._run_gui_callback_timed("ui_state_save", _callback)
-    window._last_ui_state_save_ms = (perf_counter() - started) * 1000.0
-    window._ui_state_requested_at = None
+    persist_autosave(window, UI_STATE_DOMAIN)
 
 
 def schedule_ui_state_persist_for(window) -> None:
     if getattr(window, "_restoring_ui_state", False):
         return
-    if not getattr(window, "_ui_state_persistence_enabled", True):
-        window._ui_state_requested_at = None
-        timer = getattr(window, "_ui_state_timer", None)
-        if timer is not None:
-            timer.stop()
-        return
-    window._ui_state_requested_at = perf_counter()
-    timer = getattr(window, "_ui_state_timer", None)
-    if timer is not None:
-        timer.start()
+    schedule_autosave(window, UI_STATE_DOMAIN)
 
 
 def collapsible_section_state_for(window) -> dict[str, bool]:
@@ -88,20 +67,7 @@ def acquisition_state_payload_for(window) -> dict[str, object]:
 
 
 def persist_acquisition_state_for(window) -> None:
-    started = perf_counter()
-    requested_at = getattr(window, "_acquisition_state_requested_at", None)
-    if requested_at is not None:
-        try:
-            window._last_acquisition_state_delay_ms = max((started - float(requested_at)) * 1000.0, 0.0)
-        except (TypeError, ValueError):
-            window._last_acquisition_state_delay_ms = None
-
-    def _callback() -> None:
-        persist_acquisition_state(window)
-
-    window._run_gui_callback_timed("acquisition_state_save", _callback)
-    window._last_acquisition_state_save_ms = (perf_counter() - started) * 1000.0
-    window._acquisition_state_requested_at = None
+    persist_autosave(window, ACQUISITION_STATE_DOMAIN)
 
 
 def schedule_acquisition_state_persist_for(window) -> None:
@@ -109,26 +75,11 @@ def schedule_acquisition_state_persist_for(window) -> None:
 
 
 def set_ui_state_autosave_enabled_for(window, enabled: bool) -> None:
-    window._ui_state_persistence_enabled = bool(enabled)
-    window._ui_state_autosave_enabled = bool(enabled)
-    save_app_setting("ui_state_autosave_enabled", window._ui_state_persistence_enabled)
-    timer = getattr(window, "_ui_state_timer", None)
-    if not window._ui_state_persistence_enabled and timer is not None:
-        timer.stop()
-        window._ui_state_requested_at = None
-    state_text = "enabled" if window._ui_state_persistence_enabled else "disabled"
-    window._log_info(f"UI layout persistence {state_text}.")
+    set_autosave_enabled(window, UI_STATE_DOMAIN, enabled)
 
 
 def set_acquisition_state_autosave_enabled_for(window, enabled: bool) -> None:
-    window._acquisition_state_autosave_enabled = bool(enabled)
-    save_app_setting("acquisition_state_autosave_enabled", window._acquisition_state_autosave_enabled)
-    timer = getattr(window, "_acquisition_state_timer", None)
-    if not window._acquisition_state_autosave_enabled and timer is not None:
-        timer.stop()
-        window._acquisition_state_requested_at = None
-    state_text = "enabled" if window._acquisition_state_autosave_enabled else "disabled"
-    window._log_info(f"Acquisition state autosave {state_text}.")
+    set_autosave_enabled(window, ACQUISITION_STATE_DOMAIN, enabled)
 
 
 def set_log_buffering_enabled_for(window, enabled: bool) -> None:

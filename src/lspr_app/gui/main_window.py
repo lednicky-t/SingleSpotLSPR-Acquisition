@@ -102,6 +102,7 @@ from lspr_app.gui.icon_helpers import (
     transport_icon,
     tint_tabler_icon,
 )
+from lspr_app.gui.autosave_domains import init_autosave_timer
 from lspr_app.gui.main_window_titlebar import build_title_bar, refresh_hw_device_status_strip
 from lspr_app.gui.main_window_panels import (
     build_simulation_page,
@@ -215,6 +216,8 @@ from lspr_app.gui.main_window_sensorgram_overlay import (
     sync_sensorgram_control_step_overlay as sync_sensorgram_control_step_overlay_for_sensorgram,
 )
 from lspr_app.gui.main_window_state import (
+    ACQUISITION_STATE_DOMAIN,
+    UI_STATE_DOMAIN,
     apply_source_mode_for,
     fit_window_to_available_screen_for,
     activate_experiment_control_view,
@@ -1015,14 +1018,7 @@ class MainWindow(QMainWindow):
         self._processing_refresh_delay_ms = 120
         self._stats_refresh_delay_ms = 180
         self._live_ui_refresh_delay_ms = 220
-        self._acquisition_state_timer = QTimer(self)
-        self._acquisition_state_timer.setSingleShot(True)
-        self._acquisition_state_timer.setInterval(250)
-        self._acquisition_state_timer.timeout.connect(self._persist_acquisition_state)
-        self._acquisition_state_requested_at: float | None = None
-        self._last_acquisition_state_delay_ms: float | None = None
-        self._last_acquisition_state_save_ms: float | None = None
-        self._last_acquisition_state_total_ms: float | None = None
+        init_autosave_timer(self, ACQUISITION_STATE_DOMAIN)
         self._last_gui_housekeeping_log_buffer_ms: float | None = None
         self._last_gui_housekeeping_ui_state_ms: float | None = None
         self._last_gui_housekeeping_acquisition_state_ms: float | None = None
@@ -1052,14 +1048,7 @@ class MainWindow(QMainWindow):
             debug=self._debug_timing_enabled,
             deep=self._deep_timing_enabled,
         )
-        self._ui_state_timer = QTimer(self)
-        self._ui_state_timer.setSingleShot(True)
-        self._ui_state_timer.setInterval(500)
-        self._ui_state_timer.timeout.connect(self._save_ui_state)
-        self._ui_state_requested_at: float | None = None
-        self._last_ui_state_delay_ms: float | None = None
-        self._last_ui_state_save_ms: float | None = None
-        self._last_ui_state_total_ms: float | None = None
+        init_autosave_timer(self, UI_STATE_DOMAIN)
         self._hardware_init_task: DeviceLifecycleCycleTask | None = None
         self._hardware_init_scheduled = False
         self._spectrum_cursor_text = "-"

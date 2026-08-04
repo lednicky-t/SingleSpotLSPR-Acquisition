@@ -4,7 +4,9 @@ import logging
 from collections.abc import Callable
 from time import perf_counter
 
+from lspr_app.gui.autosave_domains import due_autosave_domain
 from lspr_app.gui.main_window_logging import refresh_session_statistics_for, refresh_session_summary_for
+from lspr_app.gui.main_window_state import AUTOSAVE_DOMAINS
 from lspr_app.gui.main_window_plotting import (
     flush_deferred_display_refreshes_for,
     flush_deferred_metric_refreshes_for,
@@ -99,19 +101,14 @@ def drain_gui_housekeeping_tasks(window) -> None:
         window._last_gui_housekeeping_log_buffer_ms = getattr(window, "_last_log_buffer_total_ms", None)
         return
 
-    ui_state_timer = getattr(window, "_ui_state_timer", None)
-    if _due(getattr(window, "_ui_state_requested_at", None), float(ui_state_timer.interval()) if ui_state_timer is not None else 250.0):
-        window._run_gui_callback_timed("ui_state_save", lambda: window._save_ui_state())
-        window._last_gui_housekeeping_ui_state_ms = getattr(window, "_last_ui_state_total_ms", None)
-        return
-
-    acquisition_state_timer = getattr(window, "_acquisition_state_timer", None)
-    if _due(
-        getattr(window, "_acquisition_state_requested_at", None),
-        float(acquisition_state_timer.interval()) if acquisition_state_timer is not None else 250.0,
-    ):
-        window._run_gui_callback_timed("acquisition_state_save", lambda: window._persist_acquisition_state())
-        window._last_gui_housekeeping_acquisition_state_ms = getattr(window, "_last_acquisition_state_total_ms", None)
+    autosave_domain = due_autosave_domain(window, now, AUTOSAVE_DOMAINS)
+    if autosave_domain is not None:
+        window._run_gui_callback_timed(autosave_domain.timing_label, getattr(window, autosave_domain.persist_method_name))
+        setattr(
+            window,
+            f"_last_gui_housekeeping_{autosave_domain.name}_ms",
+            getattr(window, f"_last_{autosave_domain.name}_total_ms", None),
+        )
         return
 
     if bool(getattr(window, "_session_stats_recording_active", False)):

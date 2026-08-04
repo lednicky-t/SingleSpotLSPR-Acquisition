@@ -30,6 +30,7 @@ from PyQt6.QtCore import QPoint, QRect, QTimer
 from PyQt6.QtGui import QColor, QGuiApplication
 from PyQt6.QtWidgets import QApplication
 
+from lspr_app.gui.autosave_domains import AutosaveDomain, schedule_autosave
 from lspr_app.gui.main_window_logging_ui import apply_text_widget_font_size_for
 from lspr_app.gui.main_window_plotting import apply_metric_color_styles_for
 from lspr_app.gui.sensorgram_secondary_axis import (
@@ -45,7 +46,6 @@ from lspr_app.gui.sensorgram_secondary_axis import (
     secondary_axis_opacity_for,
     update_secondary_axis_visibility,
 )
-from time import perf_counter
 from copy import deepcopy
 
 from lspr_app.domain.pump_plan import to_core_experiment_plan
@@ -1903,23 +1903,52 @@ def persist_acquisition_state(window) -> None:
         window._measurement_writer.update_acquisition_state(writer_payload)
 
 
+UI_STATE_DOMAIN = AutosaveDomain(
+    name="ui_state",
+    timer_attr="_ui_state_timer",
+    requested_at_attr="_ui_state_requested_at",
+    enabled_attr="_ui_state_persistence_enabled",
+    mirror_enabled_attr="_ui_state_autosave_enabled",
+    interval_ms=500,
+    save_fn=save_ui_state,
+    timing_label="ui_state_save",
+    enabled_setting_key="ui_state_autosave_enabled",
+    log_label="UI layout persistence",
+    persist_method_name="_save_ui_state",
+    clear_requested_at_when_disabled=True,
+)
+
+ACQUISITION_STATE_DOMAIN = AutosaveDomain(
+    name="acquisition_state",
+    timer_attr="_acquisition_state_timer",
+    requested_at_attr="_acquisition_state_requested_at",
+    enabled_attr="_acquisition_state_autosave_enabled",
+    mirror_enabled_attr=None,
+    interval_ms=250,
+    save_fn=persist_acquisition_state,
+    timing_label="acquisition_state_save",
+    enabled_setting_key="acquisition_state_autosave_enabled",
+    log_label="Acquisition state autosave",
+    persist_method_name="_persist_acquisition_state",
+    clear_requested_at_when_disabled=False,
+)
+
+AUTOSAVE_DOMAINS: tuple[AutosaveDomain, ...] = (UI_STATE_DOMAIN, ACQUISITION_STATE_DOMAIN)
+
+
 def schedule_acquisition_state_persist(window) -> None:
-    if window._suspend_acquisition_autosave or not getattr(window, "_acquisition_state_autosave_enabled", True):
-        timer = getattr(window, "_acquisition_state_timer", None)
+    """Kept as a standalone function (not folded fully into schedule_autosave)
+    because it's imported and unit-tested directly - see
+    tests/integration/test_main_window_state.py. The suspend check is the one
+    piece of acquisition_state-specific behavior schedule_autosave doesn't know
+    about (mirrors schedule_ui_state_persist_for's own _restoring_ui_state
+    check in main_window_lifecycle.py)."""
+    if window._suspend_acquisition_autosave:
+        timer = getattr(window, ACQUISITION_STATE_DOMAIN.timer_attr, None)
         if timer is not None:
             timer.stop()
         return
-    window._acquisition_state_requested_at = perf_counter()
-    # Mirrors schedule_ui_state_persist_for's timer.start(): the 100 ms GUI
-    # housekeeping heartbeat (main_window_runtime.py) also drains this request
-    # once it goes "due", but that path silently depends on housekeeping
-    # staying enabled and the heartbeat actually ticking. Starting this timer
-    # too gives acquisition-state saves (live rate, simulation rate, plot
-    # mode, ...) the same independent persistence guarantee window geometry
-    # already has, instead of relying solely on the polling fallback.
-    timer = getattr(window, "_acquisition_state_timer", None)
-    if timer is not None:
-        timer.start()
+    schedule_autosave(window, ACQUISITION_STATE_DOMAIN)
 
 
 def _restore_cached_dark_reference(window) -> None:
