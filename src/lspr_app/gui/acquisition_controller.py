@@ -1406,19 +1406,15 @@ def start_measurement_run(window) -> None:
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    # Restart the session right as recording commits, so the sensorgram's
-    # t=0 becomes "the moment Trace was clicked" instead of whenever the
-    # session/prep-procedure time happened to start - see reset_session_for's
-    # docstring. Dark/reference are always carried over since they're
-    # calibration, not the prep-procedure "trash" this is meant to drop; the
-    # old session file (with any prep-time data) is left untouched on disk,
-    # not deleted. Silent (announce=False): naming the experiment above
-    # already served as the "starting for real now" confirmation, and the
-    # "Recording to ..." status message fires right below anyway.
-    from lspr_app.gui.main_window_new_session import reset_session_for
-
-    reset_session_for(window, keep_dark=True, keep_reference=True, announce=False)
-
+    # The session file is NOT reset here. It is deliberately always-on for
+    # the whole app run (or since the last explicit File > New Session) so
+    # that "Session" display mode accumulates every measurement plus the
+    # time between them - only File > New Session or an app restart clears
+    # it (main_window_new_session.py). Measurement mode's own t=0 ("5
+    # seconds into this recording") is independent of the session's t=0
+    # already - see display_time_anchor in sensorgram_time_anchor.py, which
+    # anchors to _measurement_started_at while a measurement is active - so
+    # nothing here needs to touch the session to get that right.
     started_at = datetime.now(timezone.utc)
     # Recording follows the execution state, but it is not stopped by flow HOLD.
     window._measurement_axis_lock = np.asarray(anchor.wavelengths_nm, dtype=np.float64).copy()

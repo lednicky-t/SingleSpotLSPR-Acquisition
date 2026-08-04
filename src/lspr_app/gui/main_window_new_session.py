@@ -102,24 +102,13 @@ def show_new_session_dialog_for(window) -> None:
 
 
 def _start_new_session_for(window, *, keep_dark: bool, keep_reference: bool) -> None:
-    reset_session_for(window, keep_dark=keep_dark, keep_reference=keep_reference, announce=True)
-
-
-def reset_session_for(window, *, keep_dark: bool, keep_reference: bool, announce: bool) -> None:
-    """Shared reset logic behind File > New Session... and Start Trace.
-
-    Start Trace (acquisition_controller.start_measurement_run) calls this
-    with announce=False right before it opens the new recording, so hitting
-    Trace both zeroes the sensorgram's t=0 to that moment and starts the
-    named measurement file in one gesture - no separate manual New Session
-    step, and no popup status message competing with "Recording to ...".
-    See the discussion in the Trace/session-restart thread for why: the
-    always-on session file was accumulating whatever prep-procedure time
-    happened before Trace was clicked, so stopping a recording and returning
-    to session view showed the trace starting partway through the session
-    instead of at 0. Nothing already written to disk is deleted - this only
-    closes the current session writer and starts a fresh one; the old file
-    (with any prep-time data) is left untouched on disk.
+    """Reset logic behind File > New Session... - the only thing that clears
+    the always-on session (besides an app restart). Start Trace deliberately
+    does NOT call this: the session must accumulate every measurement in the
+    app run, plus the time between them, so "Session" display mode stays
+    meaningfully different from "Measurement" mode. Nothing already written
+    to disk is deleted - this only closes the current session writer and
+    starts a fresh one; the old file is left untouched on disk.
     """
     from lspr_app.domain.models import SessionState
     from lspr_app.storage.app_config import save_dark_reference_cache
@@ -153,8 +142,7 @@ def reset_session_for(window, *, keep_dark: bool, keep_reference: bool, announce
     window._update_dark_reference_button_icons()
     window._refresh_plot()
 
-    if announce:
-        kept = [name for name, flag in (("dark", keep_dark), ("reference", keep_reference)) if flag]
-        kept_text = f" (kept {', '.join(kept)} spectrum)" if kept else ""
-        window._log_success(f"Started a new session{kept_text}.")
-        window.status_label.setText("New session started.")
+    kept = [name for name, flag in (("dark", keep_dark), ("reference", keep_reference)) if flag]
+    kept_text = f" (kept {', '.join(kept)} spectrum)" if kept else ""
+    window._log_success(f"Started a new session{kept_text}.")
+    window.status_label.setText("New session started.")
