@@ -107,6 +107,32 @@ class DeviceStatus:
     role: str | None = None
 
 
+def device_inventory_rows(statuses: list[DeviceStatus]) -> list[list[str]]:
+    """Flatten DeviceStatus objects into plain string rows for
+    HDF5MeasurementWriter.write_device_inventory() - column order must match
+    lspr_io.LSPR_DEVICE_INVENTORY_COLUMNS (label, type, role, driver, endpoint,
+    display_name, model, serial_number, connected). Keeping this here (not in
+    storage/hdf5_export.py) means the storage layer never needs to import a
+    device-layer dataclass - every other _upsert_table caller in that module
+    already only ever receives plain string rows, not domain objects."""
+    rows: list[list[str]] = []
+    for status in statuses:
+        rows.append(
+            [
+                status.label,
+                status.type,
+                status.role or "",
+                status.driver,
+                status.endpoint or "",
+                status.display_name or "",
+                status.identity.get("model", ""),
+                status.identity.get("serial_number", ""),
+                "true" if status.connected else "false",
+            ]
+        )
+    return rows
+
+
 @dataclass(frozen=True, slots=True)
 class ProbeResult:
     endpoint: str

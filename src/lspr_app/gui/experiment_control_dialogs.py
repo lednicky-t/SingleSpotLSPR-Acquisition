@@ -844,12 +844,22 @@ class ExperimentControlDialogs:
                 pass
         return result
 
-    def edit_switch_solution_labels(self, current_labels: list[str], anchor: QWidget | None = None) -> list[str] | None:
+    def edit_switch_solution_labels(
+        self,
+        current_labels: list[str],
+        current_details: list[dict[str, str]] | None = None,
+        anchor: QWidget | None = None,
+    ) -> tuple[list[str], list[dict[str, str]]] | None:
+        """Edit the per-port Solution label plus optional Concentration/Unit/
+        Notes fields. current_details is a list of up to 12 dicts (keys
+        "concentration"/"concentration_unit"/"notes"); missing/short entries
+        default to "". Returns (labels, details) or None if cancelled."""
+        current_details = current_details or []
         dialog = QDialog(self._parent)
         dialog.setObjectName("switchDialog")
         dialog.setWindowTitle("Switch solutions")
         dialog.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
-        dialog.resize(340, 440)
+        dialog.resize(620, 440)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(2)
@@ -921,13 +931,18 @@ class ExperimentControlDialogs:
         title.setToolTip("Edit the labels shown for each multiport switch position.")
         layout.addWidget(title)
 
-        table = SwitchSolutionTableWidget(12, 2, dialog)
+        table = SwitchSolutionTableWidget(12, 5, dialog)
         table.setObjectName("switchTable")
-        table.setHorizontalHeaderLabels(["Port", "Solution"])
+        table.setHorizontalHeaderLabels(["Port", "Solution", "Concentration", "Unit", "Notes"])
         table.verticalHeader().setVisible(False)
         table.horizontalHeader().setStretchLastSection(True)
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        table.setColumnWidth(2, 90)
+        table.setColumnWidth(3, 60)
         table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -980,6 +995,29 @@ class ExperimentControlDialogs:
                 " }"
             )
             table.setCellWidget(position - 1, 1, label_edit)
+
+            detail = current_details[position - 1] if position - 1 < len(current_details) else {}
+            if not isinstance(detail, dict):
+                detail = {}
+            for column, key, placeholder in (
+                (2, "concentration", "Conc."),
+                (3, "concentration_unit", "Unit"),
+                (4, "notes", "Notes"),
+            ):
+                detail_edit = QLineEdit(table)
+                detail_edit.setText(str(detail.get(key, "")))
+                detail_edit.setFrame(False)
+                detail_edit.setPlaceholderText(placeholder)
+                detail_edit.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                detail_edit.setStyleSheet(
+                    "QLineEdit {"
+                    " background: transparent;"
+                    " border: none;"
+                    " padding: 0px 2px;"
+                    " margin: 0px;"
+                    " }"
+                )
+                table.setCellWidget(position - 1, column, detail_edit)
         table.currentCellChanged.connect(_focus_solution_cell)
         table.setCurrentCell(0, 1)
         table.setFixedHeight(table.horizontalHeader().height() + table.verticalHeader().defaultSectionSize() * 12 + 4)
@@ -1060,13 +1098,19 @@ class ExperimentControlDialogs:
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         updated_labels: list[str] = []
+        updated_details: list[dict[str, str]] = []
         for position in range(1, 13):
             widget = table.cellWidget(position - 1, 1)
             if isinstance(widget, QLineEdit):
                 updated_labels.append((widget.text().strip() or "empty"))
             else:
                 updated_labels.append("empty")
-        return updated_labels
+            detail_row: dict[str, str] = {}
+            for column, key in ((2, "concentration"), (3, "concentration_unit"), (4, "notes")):
+                detail_widget = table.cellWidget(position - 1, column)
+                detail_row[key] = detail_widget.text().strip() if isinstance(detail_widget, QLineEdit) else ""
+            updated_details.append(detail_row)
+        return updated_labels, updated_details
 
     def edit_color_palette_entries(self, entries: list[tuple[str, str]], anchor: QWidget | None = None) -> list[tuple[str, str]] | None:
         dialog = QDialog(self._parent)

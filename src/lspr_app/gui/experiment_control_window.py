@@ -264,6 +264,9 @@ class ExperimentControlWindow(QWidget):
             "empty"
             for index in range(1, 13)
         ]
+        self._switch_solution_details: list[dict[str, str]] = [
+            {"concentration": "", "concentration_unit": "", "notes": ""} for _index in range(1, 13)
+        ]
         self._color_palette_entries = self._load_color_palette_entries(ui_state)
         self._sync_custom_plan_colors_from_palette()
         self._tint_icon = tint_tabler_icon
@@ -1107,6 +1110,14 @@ class ExperimentControlWindow(QWidget):
                 return label
         return "empty"
 
+    def _switch_solution_detail(self, position: int) -> dict[str, str]:
+        index = max(min(int(position), 12), 1) - 1
+        if 0 <= index < len(self._switch_solution_details):
+            detail = self._switch_solution_details[index]
+            if isinstance(detail, dict):
+                return detail
+        return {}
+
     def _switch_display_text(self, position: int) -> str:
         normalized = max(min(int(position), 12), 1)
         return f"{normalized}: {self._switch_solution_label(normalized)}"
@@ -1850,6 +1861,22 @@ class ExperimentControlWindow(QWidget):
                     labels[port - 1] = str(row[1] or "empty").strip() or "empty"
             self._switch_solution_labels = labels
             self._refresh_switch_solution_controls()
+        if payload.switch_solution_detail_rows:
+            details = [{"concentration": "", "concentration_unit": "", "notes": ""} for _ in range(12)]
+            for row in payload.switch_solution_detail_rows:
+                if not isinstance(row, list) or len(row) < 4:
+                    continue
+                try:
+                    port = int(float(str(row[0]).strip()))
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= port <= 12:
+                    details[port - 1] = {
+                        "concentration": str(row[1] or "").strip(),
+                        "concentration_unit": str(row[2] or "").strip(),
+                        "notes": str(row[3] or "").strip(),
+                    }
+            self._switch_solution_details = details
         if payload.switch_solution_mode is not None:
             self.step_switch_mode_button.blockSignals(True)
             try:
@@ -2029,10 +2056,12 @@ class ExperimentControlWindow(QWidget):
 
     def _edit_switch_solution_labels(self, anchor: QWidget | None = None) -> None:
         dialogs = ExperimentControlDialogs(self, self._theme_palette(), self._contrast_text_color, self._tint_icon)
-        updated_labels = dialogs.edit_switch_solution_labels(self._switch_solution_labels, anchor)
-        if updated_labels is None:
+        result = dialogs.edit_switch_solution_labels(self._switch_solution_labels, self._switch_solution_details, anchor)
+        if result is None:
             return
+        updated_labels, updated_details = result
         self._switch_solution_labels = updated_labels
+        self._switch_solution_details = updated_details
         self._refresh_switch_solution_controls()
         self._update_timeline_selection()
 
@@ -5548,11 +5577,24 @@ class ExperimentControlWindow(QWidget):
     def switch_solution_hdf5_rows(self) -> list[list[str]]:
         return [[str(port), self._switch_solution_label(port)] for port in range(1, 13)]
 
+    def switch_solution_detail_hdf5_rows(self) -> list[list[str]]:
+        return [
+            [
+                str(port),
+                str(self._switch_solution_detail(port).get("concentration", "")),
+                str(self._switch_solution_detail(port).get("concentration_unit", "")),
+                str(self._switch_solution_detail(port).get("notes", "")),
+            ]
+            for port in range(1, 13)
+        ]
+
     def switch_solution_hdf5_payload(self) -> dict[str, object]:
         return {
             "switch_solution_mode": bool(self._switch_solution_mode),
             "switch_solution_labels": list(self._switch_solution_labels),
             "switch_solution_rows": self.switch_solution_hdf5_rows(),
+            "switch_solution_details": [dict(detail) for detail in self._switch_solution_details],
+            "switch_solution_detail_rows": self.switch_solution_detail_hdf5_rows(),
             "valve_state_labels": dict(self._valve_state_labels),
             "valve_state_colors": dict(self._valve_state_colors),
             "color_palette_entries": [
@@ -5710,6 +5752,23 @@ class ExperimentControlWindow(QWidget):
             while len(labels) < 12:
                 labels.append(f"Solution {len(labels) + 1}")
             self._switch_solution_labels = labels
+        saved_switch_details = state.get("switch_solution_details")
+        if isinstance(saved_switch_details, list):
+            details: list[dict[str, str]] = []
+            for raw_detail in saved_switch_details[:12]:
+                if isinstance(raw_detail, dict):
+                    details.append(
+                        {
+                            "concentration": str(raw_detail.get("concentration", "")),
+                            "concentration_unit": str(raw_detail.get("concentration_unit", "")),
+                            "notes": str(raw_detail.get("notes", "")),
+                        }
+                    )
+                else:
+                    details.append({"concentration": "", "concentration_unit": "", "notes": ""})
+            while len(details) < 12:
+                details.append({"concentration": "", "concentration_unit": "", "notes": ""})
+            self._switch_solution_details = details
         self._update_experiment_control_toggle_button()
         self._refresh_switch_solution_controls()
         saved_pause_state = state.get("pause_state_step")
@@ -6015,6 +6074,7 @@ class ExperimentControlWindow(QWidget):
                     "switch_solution_mode": self._switch_solution_mode,
                     "wait_for_mswitch_first": self._wait_for_mswitch_first,
                     "switch_solution_labels": list(self._switch_solution_labels),
+                    "switch_solution_details": [dict(detail) for detail in self._switch_solution_details],
                     "pause_state_step": self._serialize_experiment_control_pause_template(),
                     "pause_state_dialog_state": dict(getattr(self, "_pause_state_dialog_state", {})),
                     "editor_channels": [

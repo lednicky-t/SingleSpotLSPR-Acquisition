@@ -15,6 +15,7 @@ from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
 from lspr_app.app import create_spectrometer
+from lspr_app.device.communication_models import device_inventory_rows
 from lspr_app.domain.models import Spectrum
 from lspr_core import DEFAULT_LAUNCH_PROFILE, launch_profile_spec
 from lspr_app.domain.session import MeasurementError
@@ -1439,6 +1440,7 @@ def start_measurement_run(window) -> None:
     )
     window._measurement_writer.update_acquisition_state(window._acquisition_state_payload())
     window._measurement_writer.update_baselines(window._session.state.dark, window._session.state.reference)
+    window._measurement_writer.write_device_inventory(device_inventory_rows(window._device_comm_service.list_statuses()))
     window._measurement_active = True
     window._measurement_paused = False
     window._measurement_signal_mode = signal_mode

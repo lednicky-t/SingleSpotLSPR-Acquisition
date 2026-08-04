@@ -1811,6 +1811,8 @@ def acquisition_state_payload(window) -> dict[str, object]:
             "switch_solution_mode": False,
             "switch_solution_labels": [f"Solution {index}" for index in range(1, 13)],
             "switch_solution_rows": [[str(index), f"Solution {index}"] for index in range(1, 13)],
+            "switch_solution_details": [{"concentration": "", "concentration_unit": "", "notes": ""} for _index in range(1, 13)],
+            "switch_solution_detail_rows": [[str(index), "", "", ""] for index in range(1, 13)],
             "valve_state_labels": {"Open": "Open", "Close": "Close"},
             "valve_state_colors": {"Open": "#4E79A7", "Close": "#B44A4A"},
         }

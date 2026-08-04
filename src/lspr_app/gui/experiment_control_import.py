@@ -108,6 +108,7 @@ class ExperimentPlanImportData:
     native_document: dict[str, object] | None = None
     steps: list[PumpPlanStep] | None = None
     switch_solution_rows: list[list[str]] | None = None
+    switch_solution_detail_rows: list[list[str]] | None = None
     switch_solution_mode: bool | None = None
     selected_row: int | None = None
     valve_state_labels: dict[str, str] | None = None
@@ -591,6 +592,7 @@ class ExperimentPlanImportTask(QRunnable):
                 raise ValueError("; ".join(validation.errors))
 
             switch_solution_rows: list[list[str]] | None = None
+            switch_solution_detail_rows: list[list[str]] | None = None
             switch_solution_mode: bool | None = None
             valve_state_labels: dict[str, str] | None = None
             valve_state_colors: dict[str, str] | None = None
@@ -602,6 +604,8 @@ class ExperimentPlanImportTask(QRunnable):
             if assignment_tables is not None:
                 if "switch_solution_map" in assignment_tables:
                     _, switch_solution_rows = _read_hdf5_string_table(assignment_tables["switch_solution_map"])
+                if "switch_solution_details" in assignment_tables:
+                    _, switch_solution_detail_rows = _read_hdf5_string_table(assignment_tables["switch_solution_details"])
                 if "switch_solution_mode" in metadata.attrs:
                     switch_solution_mode = bool(metadata.attrs["switch_solution_mode"])
                 if "valve_state_map" in assignment_tables:
@@ -716,6 +720,7 @@ class ExperimentPlanImportTask(QRunnable):
                 native_document=None,
                 steps=build_experiment_plan_steps_from_hdf5_rows(plan_columns, plan_rows),
                 switch_solution_rows=switch_solution_rows,
+                switch_solution_detail_rows=switch_solution_detail_rows,
                 switch_solution_mode=switch_solution_mode,
                 selected_row=selected_row,
                 valve_state_labels=valve_state_labels,

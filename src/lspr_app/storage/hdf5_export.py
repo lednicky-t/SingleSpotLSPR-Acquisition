@@ -21,6 +21,9 @@ from lspr_io import (
     LSPR_DEVICE_ENVIRONMENT_TIMESTAMP_UTC_MS_DATASET_NAME,
     LSPR_DEVICE_ENVIRONMENT_TEMPERATURE_C_DATASET_NAME,
     LSPR_DEVICE_ENVIRONMENT_HUMIDITY_PERCENT_DATASET_NAME,
+    LSPR_DEVICE_INVENTORY_COLUMNS,
+    LSPR_DEVICE_INVENTORY_GROUP_NAME,
+    LSPR_DEVICE_INVENTORY_TABLE_DATASET_NAME,
     LSPR_MEASUREMENT_ASSIGNMENT_TABLES_GROUP_NAME,
     LSPR_MEASUREMENT_COLOR_PALETTE_ENTRIES_DATASET_NAME,
     LSPR_EXPERIMENT_PLAN_DATASET_NAME,
@@ -30,12 +33,14 @@ from lspr_io import (
     LSPR_MEASUREMENT_TIME_COLUMNS,
     LSPR_MEASUREMENT_WAVELENGTHS_DATASET_NAME,
     LSPR_MEASUREMENT_SWITCH_SOLUTION_MAP_DATASET_NAME,
+    LSPR_MEASUREMENT_SWITCH_SOLUTION_DETAILS_DATASET_NAME,
     LSPR_MEASUREMENT_VALVE_STATE_MAP_DATASET_NAME,
     LSPR_PROCESSED_METRICS_ACQUIRED_AT_UNIX_MS_DATASET_NAME,
     LSPR_SESSION_SCHEMA_NAME,
     LSPR_SESSION_SCHEMA_VERSION,
     standard_measurement_metadata,
     standard_session_identity,
+    write_device_inventory_metadata,
     write_processing_settings_metadata,
     write_processed_metrics_metadata,
     write_measurement_manifest_metadata,
@@ -185,6 +190,7 @@ class HDF5MeasurementWriter:
         self._processed = self._handle.create_group("processed")
         self._devices = self._handle.create_group("devices")
         self._environment_group = self._create_environment_group()
+        self._device_inventory_group = self._create_device_inventory_group()
         self._data_spectra = self._data.create_group("spectra")
         self._session_identity = standard_session_identity(app_name="LSPR Acquisition", app_version=APP_VERSION)
         write_session_metadata(
@@ -248,6 +254,7 @@ class HDF5MeasurementWriter:
     def update_acquisition_state(self, state: dict[str, object]) -> None:
         self._write_acquisition_state_metadata(state)
         self._write_switch_solution_metadata(state)
+        self._write_switch_solution_details_metadata(state)
         self._write_assignment_tables_metadata(state)
         plan = state.get("experiment_plan")
         if plan is None:
@@ -472,6 +479,17 @@ class HDF5MeasurementWriter:
         group.attrs["source"] = "Switch device (ArduinoValveController.read_ambient_temperature()/.read_humidity())"
         return group
 
+    def _create_device_inventory_group(self):
+        group = self._devices.create_group(LSPR_DEVICE_INVENTORY_GROUP_NAME)
+        write_device_inventory_metadata(group)
+        return group
+
+    def write_device_inventory(self, rows: list[list[str]]) -> None:
+        """Snapshot known devices to /devices/inventory/devices. Called once when
+        measurement recording starts (see gui/acquisition_controller.py); safe to
+        call again since _upsert_table replaces the table's contents each time."""
+        self._upsert_table(self._device_inventory_group, LSPR_DEVICE_INVENTORY_TABLE_DATASET_NAME, rows, LSPR_DEVICE_INVENTORY_COLUMNS)
+
     def _create_runtime_dataset(self):
         columns = list(LSPR_MEASUREMENT_RUNTIME_COLUMNS)
         ds = self._data.create_dataset(
@@ -647,6 +665,29 @@ class HDF5MeasurementWriter:
                     ["switch_port", "solution_label"],
                 )
 
+    def _write_switch_solution_details_metadata(self, state: dict[str, object]) -> None:
+        """Optional concentration/concentration_unit/notes per M-switch port -
+        a separate table from switch_solution_map (port -> label), joined by
+        switch_port, so the pre-existing label table/column set is untouched."""
+        experiment_control = state.get("experiment_control")
+        if not isinstance(experiment_control, dict):
+            return
+        rows = experiment_control.get("switch_solution_detail_rows", [])
+        if not isinstance(rows, list):
+            return
+        cleaned_rows: list[list[str]] = []
+        for row in rows[:12]:
+            if not isinstance(row, list) or len(row) < 4:
+                continue
+            cleaned_rows.append([str(row[0]), str(row[1]), str(row[2]), str(row[3])])
+        if cleaned_rows:
+            self._upsert_table(
+                self._assignment_tables,
+                LSPR_MEASUREMENT_SWITCH_SOLUTION_DETAILS_DATASET_NAME,
+                cleaned_rows,
+                ["switch_port", "concentration", "concentration_unit", "notes"],
+            )
+
     def _write_assignment_tables_metadata(self, state: dict[str, object]) -> None:
         experiment_control = state.get("experiment_control")
         if not isinstance(experiment_control, dict):
@@ -770,6 +811,11 @@ class AsyncHDF5MeasurementWriter:
         if self._closed:
             return
         self._queue.put(("baselines", (dark, reference)))
+
+    def write_device_inventory(self, rows: list[list[str]]) -> None:
+        if self._closed:
+            return
+        self._queue.put(("device_inventory", list(rows)))
 
     def append_batch(
         self,
@@ -899,6 +945,8 @@ class AsyncHDF5MeasurementWriter:
                     self._dark = dark
                     self._reference = reference
                     writer.update_baselines(dark, reference)
+                elif kind == "device_inventory" and isinstance(payload, list):
+                    writer.write_device_inventory(payload)
                 elif kind == "append" and isinstance(payload, tuple):
                     spectra, time_series_s, peak_positions_nm = payload
                     pending_spectra.extend(spectra)

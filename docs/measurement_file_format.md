@@ -51,9 +51,9 @@ Recommended root attributes:
 
 ```text
 attrs["schema_name"] = "lspr_measurement"
-attrs["schema_version"] = "6.1"
+attrs["schema_version"] = "6.3"
 attrs["schema_major"] = 6
-attrs["schema_minor"] = 1
+attrs["schema_minor"] = 3
 attrs["format_name"] = "experiment_run"
 attrs["format_version"] = 6
 attrs["app_version"] = "<application version>"
@@ -339,7 +339,9 @@ This section may continue to hold the current step table concept:
 
 This section should hold mapping tables such as:
 
-- switch port to solution label
+- switch port to solution label (`switch_solution_map`), plus optional
+  concentration/concentration_unit/notes per port (`switch_solution_details`, schema 6.3+,
+  see "Solutions" under Metadata below)
 - unified valve state label/color map
 - custom color palette entries used by the experiment-plan editor
 - pump channel to chip inlet
@@ -455,13 +457,29 @@ distinct from `/metadata/environment` below, which is a separate, still-unimplem
 manually-entered concept (general lab conditions as experiment context, not live device
 telemetry).
 
-The rest of this section (`/devices/inventory`, `/devices/link_map`, per-device groups below)
-remains a draft - not yet implemented.
+**Implemented as of schema 6.3:** `/devices/inventory/devices` - a snapshot of every known
+device, written once when measurement recording starts (`HDF5MeasurementWriter.
+write_device_inventory()`, sourced from `DeviceCommunicationService.list_statuses()` via
+`device_inventory_rows()` in `device/communication_models.py`). A single string table, one row
+per device:
+
+```text
+/devices/inventory/devices  columns: label, type, role, driver, endpoint, display_name,
+                                      model, serial_number, connected
+```
+
+`model`/`serial_number` come from `DeviceStatus.identity`, populated at connect time; missing
+values are `""`, not omitted. This is deliberately narrower than the "recommended fixed
+groups" list below - just one flat table, not per-device subgroups or a link map. Calling
+`write_device_inventory()` again (e.g. a retry) replaces the table's contents rather than
+appending, since it's a snapshot, not a time series.
+
+The rest of this section (`/devices/link_map`, per-device groups below) remains a draft - not
+yet implemented.
 
 Recommended fixed groups:
 
 ```text
-/devices/inventory
 /devices/link_map
 /devices/pump_1
 /devices/pump_2
@@ -571,7 +589,17 @@ notes
 
 ### Solutions
 
-This section should be a structured solution registry plus usage history.
+This section should be a structured solution registry plus usage history. Not implemented -
+see below for the smaller, implemented alternative.
+
+**Implemented as of schema 6.3 (deliberately minimal, not this registry):**
+`/metadata/assignment_tables/switch_solution_details` - optional `concentration`,
+`concentration_unit`, and `notes` free-text fields per M-switch port, keyed by `switch_port` so
+it joins against the pre-existing `switch_solution_map` table (port -> label) by port number.
+Edited in the same "Switch solutions" dialog as the port labels
+(`gui/experiment_control_dialogs.py::edit_switch_solution_labels`). This intentionally does not
+have a `solution_id`, batch/date/supplier fields, or a usage-log stream - it's a per-port label
+annotation, not a solution registry. The full registry below is still open.
 
 Recommended registry fields:
 
