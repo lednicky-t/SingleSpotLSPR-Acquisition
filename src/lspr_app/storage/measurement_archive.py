@@ -21,8 +21,6 @@ def _session_file_path(window: Any) -> Path:
     if existing:
         return Path(existing)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-    session_name = getattr(getattr(window, "_session", None), "name", None) or "session"
-    safe_session = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(session_name))
     base_dir = recording_experiment_base_dir_for(window, fallback_base=Path.cwd() / "data")
     # Mirrors start_measurement_run()'s destination.parent.mkdir() in
     # acquisition_controller.py - without this, h5py.File(path, "w") inside
@@ -33,7 +31,7 @@ def _session_file_path(window: Any) -> Path:
     # already exist (e.g. a fresh install, or a project destination that
     # hasn't been created yet).
     base_dir.mkdir(parents=True, exist_ok=True)
-    path = base_dir / f"session_{safe_session}_{stamp}.h5"
+    path = base_dir / f"session_backup_{stamp}.h5"
     setattr(window, _SESSION_PATH_ATTR, path)
     # Keep _metric_archive_writer_path in sync for backwards compat with reload tasks
     setattr(window, _WRITER_PATH_ATTR, path)
