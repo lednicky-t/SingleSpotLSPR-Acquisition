@@ -142,10 +142,67 @@ Current app versions only apply `pump_1`, `valve_1`, and `switch_1`. Other devic
 
 ## CSV/TXT Compatibility
 
-CSV/TXT export keeps the legacy semicolon-separated table layout:
+Two semicolon-separated table layouts are supported, both on import and (as
+of the "External CSV" export option) on export. Which one a given import
+file uses is auto-detected from its header row - there's nothing to
+configure. On export, the app writes whichever layout you pick in the
+"Export experiment plan" file dialog.
+
+### Native/legacy layout ("Compatibility CSV/TXT")
+
+This is this app's own historical export layout, still the default:
 
 ```text
 Step;Ch-1 Flow [ml/min];Ch-1 Direction;Ch-1 Tubesize [mm];...;Time;Valve;Color;Descritption;;Solution;volume:?L
 ```
 
-This remains useful for older scripts and external pump-plan tables. For new workflows, prefer `.flow.yaml`.
+| Column | Meaning | Values |
+|---|---|---|
+| `Step` | 1-based step number | integer (regenerated on import) |
+| `Ch-<n> Flow [ml/min]` | Channel *n* flow rate | mL/min, one column per channel (1-6) |
+| `Ch-<n> Direction` | Channel *n* rotation | `CW` / `CCW` (or `OFF`) |
+| `Ch-<n> Tubesize [mm]` | Channel *n* tube inner diameter | mm; only row 1's value is read |
+| `Time` | Step duration | seconds, plain number |
+| `Valve` | Valve 1 state | `L`/`R` (physical wiring, see "which direction is L?" prompt) or `Open`/`Close` |
+| `Color` | Step color | any Qt-parsable color string, e.g. `#AEAAAA` |
+| `Descritption` | Step description | free text (the misspelling matches the original file header and is intentional for compatibility) |
+| `Solution` | Switch position | matches a configured switch-solution label, or a number `1`-`12` |
+
+Only 4 channels are ever driven by this app (`ACTIVE_PUMP_CHANNELS` in
+`domain/pump_plan.py`); columns for channels 5-6 are read/written for
+compatibility with 6-channel source files but are otherwise unused.
+
+### External layout ("FR/Direction" format)
+
+Used by at least one other pump-control tool this lab works with. Example:
+
+```text
+FR1 [ml/min];Direction1;FR2 [ml/min];Direction2;FR3 [ml/min];Direction3;FR4 [ml/min];Direction4;Time;Valves;Notes
+2.00E-02;aclckw;1.00E-02;aclckw;;;;;00:05:00;V1oV2cV3cV4c;Plastic buffer
+```
+
+| Column | Meaning | Values |
+|---|---|---|
+| `FR<n> [ml/min]` | Channel *n* flow rate | mL/min (accepts scientific notation, e.g. `2.00E-02`); blank means the channel is off |
+| `Direction<n>` | Channel *n* rotation | `clckw` (clockwise → `CW`) / `aclckw` (anti-clockwise → `CCW`) |
+| `Time` | Step duration | clock string `HH:MM:SS` (or `MM:SS`), e.g. `00:07:30` = 450 s |
+| `Valves` | All 4 valve states, packed | `V1<o/c>V2<o/c>V3<o/c>V4<o/c>`, e.g. `V1oV2cV3cV4c` |
+| `Notes` | Step description | free text |
+
+Import/export notes:
+
+- This app only drives valve **V1** (`o` = Open, `c` = Close). V2-V4 are
+  parsed but ignored on import, and always written as closed (`c`) on
+  export, since nothing else is wired to them.
+- `aclcwk` (a common transposition of `aclckw`) is also accepted on
+  import, but the app always **writes** `aclckw` - that's the spelling
+  confirmed against a real file from this lab's external tool.
+- There is no tube-diameter or color column in this format; export uses
+  this app's current tube-size settings internally but doesn't write them,
+  and imported steps get the default step color.
+- A channel with flow `0` is exported with both its `FR<n>` and
+  `Direction<n>` cells left blank, matching how source files from the
+  external tool represent an unused channel.
+
+For new workflows that don't need to interoperate with either external
+tool, prefer `.flow.yaml`.

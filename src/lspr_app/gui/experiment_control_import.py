@@ -32,6 +32,18 @@ Utility helpers (also re-exported for window use)
     Parse a string to float, returning *default* on error.
 ``_safe_int(value, default)``
     Parse a value to int, returning *default* on error.
+``_parse_time_to_seconds`` / ``_format_duration_as_clock``
+    Duration cell <-> seconds, for the external format's ``HH:MM:SS`` time column.
+``_normalize_pump_direction`` / ``_pump_direction_to_external_token``
+    Direction cell <-> ``"CW"``/``"CCW"``, for the external format's ``clckw``/``aclckw`` tokens.
+``_experiment_plan_normalize_valve`` / ``_pack_valve_state_token``
+    Valve cell <-> ``"Open"``/``"Close"``, including the external format's packed ``"V1oV2cV3cV4c"`` string.
+
+These paired helpers are shared with ``experiment_control_window.py``'s CSV
+export path (see ``_build_experiment_plan_export_rows_external``) so the two
+external-format columns are always parsed and written the same way. See
+``docs/experiment_plan_format.md`` for the full column reference of both
+supported CSV/TXT layouts.
 """
 
 from __future__ import annotations
@@ -86,6 +98,84 @@ def _safe_int(value: object, default: int = 0) -> int:
         return default
 
 
+def _parse_time_to_seconds(text: str, default: float = 0.0) -> float:
+    """Parse a duration cell to seconds.
+
+    Accepts a plain number of seconds (``"300"``) or a colon-separated
+    clock string (``"H:MM:SS"`` / ``"MM:SS"``), as produced by some external
+    pump-plan editors that record step time as a duration clock instead of
+    raw seconds.
+    """
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return default
+    if ":" not in cleaned:
+        return _safe_float(cleaned, default)
+    parts = cleaned.split(":")
+    try:
+        numeric_parts = [float(part) for part in parts]
+    except ValueError:
+        return default
+    seconds = 0.0
+    for part in numeric_parts:
+        seconds = seconds * 60.0 + part
+    return max(seconds, 0.0)
+
+
+def _normalize_pump_direction(text: str) -> str:
+    """Normalise a pump direction token to ``"CW"`` or ``"CCW"``.
+
+    Recognises this app's own ``"CW"``/``"CCW"`` labels as well as
+    ``"clckw"``/``"aclckw"`` (clockwise/anti-clockwise), the shorthand used
+    by the external FR/Direction pump-plan format (see
+    :func:`_pump_direction_to_external_token` for the inverse, used on
+    export). ``"aclcwk"`` is also accepted as a tolerated misspelling.
+    """
+    lowered = str(text or "").strip().casefold()
+    if lowered in {
+        "ccw",
+        "aclckw",
+        "aclcwk",
+        "acw",
+        "anticlockwise",
+        "anti-clockwise",
+        "counterclockwise",
+        "counter-clockwise",
+    }:
+        return "CCW"
+    return "CW"
+
+
+def _pump_direction_to_external_token(direction: str) -> str:
+    """Inverse of :func:`_normalize_pump_direction` for the external
+    FR/Direction CSV format: ``"CCW"`` -> ``"aclckw"``, anything else ->
+    ``"clckw"``.
+    """
+    return "aclckw" if str(direction or "").strip().casefold() == "ccw" else "clckw"
+
+
+def _format_duration_as_clock(seconds: float) -> str:
+    """Format a duration in seconds as ``"HH:MM:SS"`` — the inverse of the
+    colon-separated clock strings :func:`_parse_time_to_seconds` accepts.
+    """
+    total_seconds = max(int(round(float(seconds))), 0)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _pack_valve_state_token(valve: str) -> str:
+    """Build a packed 4-valve state string (``"V1oV2cV3cV4c"``) — the
+    inverse of the packed-string handling in
+    :func:`_experiment_plan_normalize_valve`.
+
+    This app only drives V1; V2-V4 are written as closed (``"c"``) since
+    they're not wired to anything.
+    """
+    v1_state = "o" if str(valve or "").strip().casefold() == "open" else "c"
+    return f"V1{v1_state}V2cV3cV4c"
+
+
 # ── Import payload dataclass ──────────────────────────────────────────────────
 
 @dataclass(slots=True)
@@ -137,13 +227,25 @@ def _experiment_plan_switch_position_from_text(text: str) -> int:
         return 1
 
 
+_PACKED_VALVES_RE = re.compile(r"^(v\d+[a-z])+$")
+_PACKED_VALVE_TOKEN_RE = re.compile(r"v(\d+)([a-z])")
+
+
 def _experiment_plan_normalize_valve(text: str, l_is_open: bool) -> str:
     """Normalise a valve text token (``"Open"``, ``"Close"``, ``"L"``, …).
 
     When the import file uses L/R notation, *l_is_open* controls which
     physical direction "L" maps to.
+
+    Also accepts a packed multi-valve string such as ``"V1oV2cV3cV4c"``
+    (some external pump-plan editors support up to four valves; this app
+    only drives V1, so only V1's o/c state is read).
     """
-    lowered = str(text or "").strip().casefold()
+    lowered = str(text or "").strip().casefold().replace(" ", "")
+    if _PACKED_VALVES_RE.match(lowered):
+        for valve_number, state in _PACKED_VALVE_TOKEN_RE.findall(lowered):
+            if valve_number == "1":
+                return "Open" if state == "o" else "Close"
     if lowered in {"close", "closed", "c", "off", "false", "0"}:
         return "Close"
     if lowered in {"open", "opened", "o", "on", "true", "1"}:
@@ -180,7 +282,7 @@ def build_experiment_plan_steps_from_import_data(data: ExperimentPlanImportData,
             flow_text = _experiment_plan_cell(row, data.column_map.get(("flow", channel_index)), "0")
             direction_text = _experiment_plan_cell(row, data.column_map.get(("direction", channel_index)), "CW")
             flow_ml_min = max(_safe_float(flow_text), 0.0)
-            direction = "CCW" if str(direction_text).casefold() == "ccw" else "CW"
+            direction = _normalize_pump_direction(direction_text)
             channels.append(
                 PumpChannelStep(
                     flow_ul_min=max(round(flow_ml_min * 1000.0), 0),
@@ -196,7 +298,7 @@ def build_experiment_plan_steps_from_import_data(data: ExperimentPlanImportData,
         description = _experiment_plan_cell(row, data.column_map.get("description"), "").strip()
         switch_text = _experiment_plan_cell(row, data.column_map.get("solution"), "")
         switch_position = _experiment_plan_switch_position_from_text(switch_text) if switch_text else 1
-        duration_s = max(_safe_float(_experiment_plan_cell(row, data.column_map.get("time"), "0")), 0.0)
+        duration_s = max(_parse_time_to_seconds(_experiment_plan_cell(row, data.column_map.get("time"), "0")), 0.0)
         steps.append(
             PumpPlanStep(
                 step=row_index,
@@ -525,19 +627,29 @@ class ExperimentPlanImportTask(QRunnable):
                 if "solution" in normalized:
                     column_map["solution"] = index
                     continue
-                if "comment" in normalized or "description" in normalized or "descrit" in normalized:
+                if "comment" in normalized or "description" in normalized or "descrit" in normalized or "note" in normalized:
                     column_map["description"] = index
                     continue
                 match = re.match(r"ch(\d+)", normalized)
-                if not match:
+                if match:
+                    channel = int(match.group(1))
+                    if "flow" in normalized:
+                        column_map[("flow", channel)] = index
+                    elif "direction" in normalized or normalized.endswith("dir"):
+                        column_map[("direction", channel)] = index
+                    elif "tube" in normalized:
+                        column_map[("tube", channel)] = index
                     continue
-                channel = int(match.group(1))
-                if "flow" in normalized:
-                    column_map[("flow", channel)] = index
-                elif "direction" in normalized or normalized.endswith("dir"):
-                    column_map[("direction", channel)] = index
-                elif "tube" in normalized:
-                    column_map[("tube", channel)] = index
+                # Some external pump-plan editors label channels "FR<n>" /
+                # "Direction<n>" instead of "Ch-<n> Flow" / "Ch-<n> Direction".
+                flow_match = re.match(r"fr(\d+)", normalized)
+                if flow_match:
+                    column_map[("flow", int(flow_match.group(1)))] = index
+                    continue
+                direction_match = re.match(r"direction(\d+)", normalized)
+                if direction_match:
+                    column_map[("direction", int(direction_match.group(1)))] = index
+                    continue
             tube_mm_by_channel = [DEFAULT_TUBE_MM] * ACTIVE_PUMP_CHANNELS
             imported_colors: list[str] = []
             for row_index, row in enumerate(data_rows, start=1):
@@ -575,6 +687,7 @@ class ExperimentPlanImportTask(QRunnable):
                 uses_lr_valves=uses_lr_valves,
             )
             payload.steps = build_experiment_plan_steps_from_import_data(payload, l_is_open=True)
+            self.signals.finished.emit(self._generation, payload)
         except Exception as exc:
             self.signals.failed.emit(self._generation, str(exc))
 

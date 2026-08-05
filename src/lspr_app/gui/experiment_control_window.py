@@ -100,6 +100,9 @@ from lspr_app.gui.experiment_control_import import (
     build_experiment_plan_steps_from_import_data,
     _safe_float,
     _safe_int,
+    _format_duration_as_clock,
+    _pump_direction_to_external_token,
+    _pack_valve_state_token,
 )
 from lspr_app.gui.experiment_control_export import (
     ExperimentPlanExportData,
@@ -1643,11 +1646,47 @@ class ExperimentControlWindow(QWidget):
             ],
         }
 
-    def _build_experiment_plan_export_payload(self, path: Path) -> ExperimentPlanExportData:
+    def _build_experiment_plan_export_rows_external(
+        self, steps: list[PumpPlanStep]
+    ) -> tuple[list[str], list[list[str]]]:
+        """Build the header/rows for the external FR/Direction CSV format
+        (see docs/experiment_plan_format.md).
+        """
+        header: list[str] = []
+        for channel_index in range(1, ACTIVE_PUMP_CHANNELS + 1):
+            header.extend([f"FR{channel_index} [ml/min]", f"Direction{channel_index}"])
+        header.extend(["Time", "Valves", "Notes"])
+        rows: list[list[str]] = []
+        for step in steps:
+            row: list[str] = []
+            for channel_index in range(ACTIVE_PUMP_CHANNELS):
+                channel = step.channels[channel_index]
+                flow_ul_min = max(float(channel.flow_ul_min), 0.0)
+                if flow_ul_min <= 0.0:
+                    row.extend(["", ""])
+                else:
+                    row.extend(
+                        [
+                            f"{flow_ul_min / 1000.0:g}",
+                            _pump_direction_to_external_token(channel.direction),
+                        ]
+                    )
+            row.append(_format_duration_as_clock(step.duration_s))
+            row.append(_pack_valve_state_token(step.valve))
+            row.append(str(step.description or ""))
+            rows.append(row)
+        return header, rows
+
+    def _build_experiment_plan_export_payload(
+        self, path: Path, *, export_external_csv: bool = False
+    ) -> ExperimentPlanExportData:
         if path.suffix.casefold() in {".yaml", ".yml"}:
             return ExperimentPlanExportData(path=path, document=self._build_native_experiment_plan_document())
 
         steps = recompute_plan_timing(self._read_experiment_control_steps())
+        if export_external_csv:
+            header, rows = self._build_experiment_plan_export_rows_external(steps)
+            return ExperimentPlanExportData(path=path, header=header, rows=rows)
         header = [
             "Step",
             "Ch-1 Flow [ml/min]",
@@ -1706,13 +1745,13 @@ class ExperimentControlWindow(QWidget):
             rows.append(row)
         return ExperimentPlanExportData(path=path, header=header, rows=rows)
 
-    def _start_experiment_plan_export(self, path: Path) -> None:
+    def _start_experiment_plan_export(self, path: Path, *, export_external_csv: bool = False) -> None:
         if self._experiment_plan_export_in_progress:
             return
         if self._experiment_plan_import_in_progress:
             return
         try:
-            payload = self._build_experiment_plan_export_payload(path)
+            payload = self._build_experiment_plan_export_payload(path, export_external_csv=export_external_csv)
             self._experiment_plan_export_generation += 1
             generation = self._experiment_plan_export_generation
             task = ExperimentPlanExportTask(generation, payload)
@@ -2036,11 +2075,13 @@ class ExperimentControlWindow(QWidget):
             self,
             "Export experiment plan",
             str(start_dir / "experiment_plan.flow.yaml"),
-            "Native YAML (*.flow.yaml *.yaml *.yml);;Compatibility CSV (*.csv);;Compatibility TXT (*.txt);;All files (*)",
+            "Native YAML (*.flow.yaml *.yaml *.yml);;Compatibility CSV (*.csv);;Compatibility TXT (*.txt);;"
+            "External CSV - FR/Direction format (*.csv);;All files (*)",
         )
         if not file_path:
             return
         path = Path(file_path)
+        export_external_csv = "External" in selected_filter
         if not path.suffix:
             if "TXT" in selected_filter:
                 path = path.with_suffix(".txt")
@@ -2048,7 +2089,7 @@ class ExperimentControlWindow(QWidget):
                 path = path.with_suffix(".csv")
             else:
                 path = path.with_suffix(".flow.yaml")
-        self._start_experiment_plan_export(path)
+        self._start_experiment_plan_export(path, export_external_csv=export_external_csv)
 
     # ═══════════════════════════════════════════════════════════════════
     # Editing dialogs: switch/pause/color/valve/pump-display settings
