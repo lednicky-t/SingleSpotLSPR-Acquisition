@@ -756,7 +756,10 @@ class SensorgramPlotSettingsDialog(QDialog):
         if button is None:
             return
         position = self._control_overlay_position()
-        icon_name = "arrow_bar_to_up" if position == "bottom" else "arrow_bar_to_down"
+        # Icon shows where the timeline currently sits (bar-to-bottom for
+        # "bottom", bar-to-top for "top") - the tooltip below carries the
+        # "click to move it to..." destination text instead.
+        icon_name = "arrow_bar_to_down" if position == "bottom" else "arrow_bar_to_up"
         button.setIcon(tint_tabler_icon(flow_tabler_icon(icon_name), QColor("#f0f3f7")))
         button.setToolTip(
             "Timeline at the bottom. Click to move it to the top."
@@ -815,7 +818,7 @@ class SensorgramPlotSettingsDialog(QDialog):
         )
 
         self.control_overlay_position_button = _make_frameless_icon_button(
-            tint_tabler_icon(flow_tabler_icon("arrow_bar_to_down"), QColor("#8fbaff")),
+            tint_tabler_icon(flow_tabler_icon("arrow_bar_to_up"), QColor("#8fbaff")),
             "Timeline at the top. Click to move it to the bottom.",
             size=24,
             parent=self,

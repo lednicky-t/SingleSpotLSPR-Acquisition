@@ -582,7 +582,14 @@ def sync_sensorgram_control_step_overlay(window) -> None:
         return
 
     if items:
-        current_style = getattr(items[0], "_sensorgram_control_step_overlay_style", None)
+        # items[0] is always the {"bar": ..., "label": ...} wrapper dict, not
+        # the graphics item itself - the style tag lives on the "bar" value
+        # (set at creation below). Reading it off the dict directly always
+        # returned None, so this comparison was always true and tore down +
+        # rebuilt every overlay item on every single sync call.
+        first_item = items[0]
+        bar_ref = first_item.get("bar") if isinstance(first_item, dict) else first_item
+        current_style = getattr(bar_ref, "_sensorgram_control_step_overlay_style", None)
         if current_style != style:
             sensorgram_control_step_overlay_remove_items(window, trace_plot, items)
 
@@ -651,7 +658,12 @@ def sync_sensorgram_control_step_overlay(window) -> None:
                     bar_item.setToolTip(tooltip)
                     bar_item.setVisible(True)
 
-            bar_item = item.get("bar") if isinstance(item, dict) else None
+            # "background" style already sized bar_item above via setRegion()
+            # (a pg.LinearRegionItem spanning the full plot height) - it has
+            # no setRect(), so leave bar_item unset here for that style.
+            # bar_rect is still computed below because the label placement
+            # (both styles) depends on it.
+            bar_item = item.get("bar") if isinstance(item, dict) and style != "background" else None
             label_item = item.get("label") if isinstance(item, dict) else None
             bar_rect = sensorgram_control_step_overlay_bar_rect(
                 window,
