@@ -42,9 +42,7 @@ from lspr_app.domain.pump_plan import ACTIVE_PUMP_CHANNELS
 
 _LOGGER = logging.getLogger("lspr_app.hardware_init")
 
-# ── Device order and stage constants ────────────────────────────────────────────
-
-DEVICE_ORDER: tuple[str, ...] = (PUMP, SWITCH, SELECTOR)
+# ── Stage constants ──────────────────────────────────────────────────────────────
 
 STAGE_DISCOVERING = "discovering"
 STAGE_CONNECTING = "connecting"
@@ -89,7 +87,7 @@ def load_enabled_devices() -> dict[str, bool]:
     raw = load_app_setting(_ENABLED_DEVICES_SETTING_KEY, {}, path=GLOBAL_CONFIG_PATH)
     if not isinstance(raw, dict):
         raw = {}
-    return {key: bool(raw.get(key, True)) for key in DEVICE_ORDER}
+    return {key: bool(raw.get(key, True)) for key in device_family_order()}
 
 
 def save_enabled_devices(enabled: dict[str, bool]) -> None:
@@ -98,13 +96,9 @@ def save_enabled_devices(enabled: dict[str, bool]) -> None:
 
     save_app_setting(
         _ENABLED_DEVICES_SETTING_KEY,
-        {key: bool(enabled.get(key, True)) for key in DEVICE_ORDER},
+        {key: bool(enabled.get(key, True)) for key in device_family_order()},
         path=GLOBAL_CONFIG_PATH,
     )
-
-_DEVICE_DRIVER = {PUMP: "reglo_icc", SWITCH: "auto", SELECTOR: "amf-mswitch"}
-_DEVICE_ROLE = {PUMP: "sample_pump", SWITCH: "inlet_switch", SELECTOR: "main_selector"}
-_DEVICE_LABEL = {PUMP: "pump_1", SWITCH: "switch_1", SELECTOR: "selector_1"}
 
 
 # ── Data types ───────────────────────────────────────────────────────────────────
@@ -147,11 +141,75 @@ def _noop_emit(_event: DeviceLifecycleEvent) -> None:
     return None
 
 
+# ── Device family registry ────────────────────────────────────────────────────────
+#
+# A "device family" is one connectable role this controller manages
+# (pump/switch/selector today, registered as built-ins at the bottom of this
+# module). Everything that used to be a hardcoded pump/switch/selector branch
+# or a 3-entry dict keyed by those three constants is now driven by whatever
+# is registered here instead - a new family (e.g. a camera or illumination
+# source in a different app built on this same controller) registers itself
+# with register_device_family() before constructing a
+# DeviceLifecycleController and needs no change to this module's source.
+#
+# discover_and_connect has the exact call shape every existing per-type
+# _discover_and_connect_* method already had before this registry existed:
+# (controller, candidate_ports_or_devices, emit) -> DeviceLifecycleEvent.
+
+DiscoverAndConnectFn = Callable[["DeviceLifecycleController", Sequence[object], EmitFn], DeviceLifecycleEvent]
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceFamily:
+    key: str
+    discover_and_connect: DiscoverAndConnectFn
+    driver: str = "auto"
+    role: str | None = None
+    label: str | None = None  # None -> f"{key}_main" fallback, see device_label_for()
+
+
+_DEVICE_FAMILIES: dict[str, DeviceFamily] = {}
+_DEVICE_FAMILY_ORDER: list[str] = []
+
+
+def register_device_family(
+    key: str,
+    discover_and_connect: DiscoverAndConnectFn,
+    *,
+    driver: str = "auto",
+    role: str | None = None,
+    label: str | None = None,
+) -> None:
+    """Register (or replace) one device family.
+
+    Order is registration order - built-in families (pump/switch/selector)
+    are registered at the bottom of this module; any app-specific extra
+    family must be registered before the first DeviceLifecycleController is
+    constructed (typically at app startup), so run_full_cycle() picks it up.
+    """
+    if key not in _DEVICE_FAMILIES:
+        _DEVICE_FAMILY_ORDER.append(key)
+    _DEVICE_FAMILIES[key] = DeviceFamily(key=key, discover_and_connect=discover_and_connect, driver=driver, role=role, label=label)
+
+
+def device_family_order() -> tuple[str, ...]:
+    """Every registered family, in registration order. Live: reflects any
+    registration made after this module was first imported."""
+    return tuple(_DEVICE_FAMILY_ORDER)
+
+
+def _device_family(device_key: str) -> DeviceFamily | None:
+    return _DEVICE_FAMILIES.get(device_key)
+
+
 # ── Moved helpers (logic relocated verbatim from experiment_control_window.py) ──
 
 def device_label_for(device_key: str) -> str:
     """Map a device-type key to its canonical DeviceCommunicationService label."""
-    return _DEVICE_LABEL.get(device_key, f"{device_key}_main")
+    family = _device_family(device_key)
+    if family is not None and family.label:
+        return family.label
+    return f"{device_key}_main"
 
 
 def ensure_device_profile(service: DeviceCommunicationService, device_key: str, port: str, *, driver: str) -> str:
@@ -165,12 +223,13 @@ def ensure_device_profile(service: DeviceCommunicationService, device_key: str, 
     in docs/device-layer/DEVICE_LAYER_AUDIT_2026.md.
     """
     label = device_label_for(device_key)
+    family = _device_family(device_key)
     service.register_endpoint_assignment(
         label,
         port,
         device_type=device_key,
         driver=driver,
-        role=_DEVICE_ROLE.get(device_key),
+        role=family.role if family is not None else None,
         mark_manual=False,
     )
     return label
@@ -363,7 +422,7 @@ class DeviceLifecycleController:
         return dict(self._enabled_devices)
 
     def set_enabled_devices(self, enabled: dict[str, bool]) -> None:
-        self._enabled_devices = {key: bool(enabled.get(key, True)) for key in DEVICE_ORDER}
+        self._enabled_devices = {key: bool(enabled.get(key, True)) for key in device_family_order()}
         save_enabled_devices(self._enabled_devices)
 
     # -- Spectrometer ---------------------------------------------------------
@@ -405,7 +464,7 @@ class DeviceLifecycleController:
     # -- Full startup cycle -----------------------------------------------------
 
     def run_full_cycle(self, emit: EmitFn = _noop_emit) -> DeviceLifecycleReport:
-        _LOGGER.info("Device lifecycle cycle started: spectrometer, %s.", ", ".join(DEVICE_ORDER))
+        _LOGGER.info("Device lifecycle cycle started: spectrometer, %s.", ", ".join(device_family_order()))
         events: list[DeviceLifecycleEvent] = []
         by_device: dict[str, DeviceLifecycleEvent] = {}
 
@@ -419,7 +478,7 @@ class DeviceLifecycleController:
 
         _, spectrometer_instance = self.run_spectrometer_stage(_emit)
         ports = self.refresh_ports()
-        for device_key in DEVICE_ORDER:
+        for device_key in device_family_order():
             if not self._enabled_devices.get(device_key, True):
                 _emit(DeviceLifecycleEvent(device_key, STAGE_DISABLED, "Disabled in Hardware devices settings."))
                 continue
@@ -429,11 +488,12 @@ class DeviceLifecycleController:
         return DeviceLifecycleReport(events=events, by_device=by_device, spectrometer=spectrometer_instance)
 
     def _discover_and_connect(self, device_key: str, ports: PortRefreshData, emit: EmitFn) -> DeviceLifecycleEvent:
-        if device_key == PUMP:
-            return self._discover_and_connect_pump(ports.pump_ports, emit)
-        if device_key == SWITCH:
-            return self._discover_and_connect_valve(ports.valve_ports, emit)
-        return self._discover_and_connect_selector(ports.selector_devices, emit)
+        family = _device_family(device_key)
+        if family is None:
+            event = DeviceLifecycleEvent(device_key, STAGE_FAILED, f"No device family registered for '{device_key}'.")
+            emit(event)
+            return event
+        return family.discover_and_connect(self, ports.ports_for(device_key), emit)
 
     def _discover_and_connect_pump(self, ports: Sequence[object], emit: EmitFn) -> DeviceLifecycleEvent:
         candidates = ranked_pump_ports(ports)
@@ -613,7 +673,9 @@ class DeviceLifecycleController:
             return False
         self._busy.add(device_key)
         try:
-            label = ensure_device_profile(self._service, device_key, port, driver=_DEVICE_DRIVER.get(device_key, "auto"))
+            family = _device_family(device_key)
+            driver = family.driver if family is not None else "auto"
+            label = ensure_device_profile(self._service, device_key, port, driver=driver)
             self._connect_and_setup(device_key, label, port, emit)
             return True
         finally:
@@ -672,3 +734,35 @@ class DeviceLifecycleController:
         for device_key in (SWITCH, SELECTOR, PUMP):
             if self.is_connected(device_key):
                 self.request_disconnect(device_key, emit)
+
+
+# ── Built-in device families ──────────────────────────────────────────────────────
+#
+# Registered here, not inline in DeviceFamily's definition above, because each
+# wrapper just forwards to the controller's own (already fully-tested,
+# untouched) _discover_and_connect_pump/_valve/_selector methods - keeping
+# this registration a thin adapter, not a place where new logic lives.
+
+def _pump_discover_and_connect(controller: "DeviceLifecycleController", ports: Sequence[object], emit: EmitFn) -> DeviceLifecycleEvent:
+    return controller._discover_and_connect_pump(ports, emit)
+
+
+def _valve_discover_and_connect(controller: "DeviceLifecycleController", ports: Sequence[object], emit: EmitFn) -> DeviceLifecycleEvent:
+    return controller._discover_and_connect_valve(ports, emit)
+
+
+def _selector_discover_and_connect(controller: "DeviceLifecycleController", devices: Sequence[object], emit: EmitFn) -> DeviceLifecycleEvent:
+    return controller._discover_and_connect_selector(devices, emit)
+
+
+register_device_family(PUMP, _pump_discover_and_connect, driver="reglo_icc", role="sample_pump", label="pump_1")
+register_device_family(SWITCH, _valve_discover_and_connect, driver="auto", role="inlet_switch", label="switch_1")
+register_device_family(SELECTOR, _selector_discover_and_connect, driver="amf-mswitch", role="main_selector", label="selector_1")
+
+# Backward-compatible constant for external call sites that import DEVICE_ORDER
+# directly (e.g. gui/main_window_lifecycle.py) - a plain snapshot of
+# device_family_order() at the point the three built-ins above finish
+# registering. Internal code in this module uses the live device_family_order()
+# instead, so any family registered later (by another app built on this
+# controller) is picked up without needing this constant redefined.
+DEVICE_ORDER: tuple[str, ...] = device_family_order()

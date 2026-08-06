@@ -23,6 +23,7 @@ from lspr_app.device.communication_models import (
     new_device_profile,
 )
 from lspr_app.device.connection_registry import release_port, snapshot_port_ownership
+from lspr_app.device.device_types import PUMP, SELECTOR, SWITCH
 from lspr_app.device.port_assignments import device_assignment_label, get_port_assignment, set_port_assignment
 from lspr_app.device.reglo_icc import PumpProbe, RegloICCClient
 from lspr_app.device.serial_controllers import ControllerError, SerialController
@@ -565,7 +566,8 @@ class DeviceCommunicationService:
     def ensure_default_profiles(self) -> None:
         with self._device_lock("ensure_default_profiles"):
             _default = {"source": "default"}
-            # Only the 3 canonical devices (see device_lifecycle._DEVICE_LABEL) are ever
+            # Only the 3 canonical devices (see device_lifecycle's device family
+            # registry - register_device_family()/device_label_for()) are ever
             # driven by the experiment-control pump plan / step runner. Extra profiles
             # (a second pump, a second switch, etc.) are a real but uncommon setup - the
             # user creates those explicitly via the Device Manager's deep-debug tools,
@@ -890,9 +892,11 @@ class DeviceCommunicationService:
             selector_devices = detect_amf_selector_devices() if amf_tools_available() else []
             return PortRefreshData(
                 generation=generation,
-                pump_ports=list(pump_ports),
-                valve_ports=list(valve_ports),
-                selector_devices=list(selector_devices),
+                ports_by_family={
+                    PUMP: list(pump_ports),
+                    SWITCH: list(valve_ports),
+                    SELECTOR: list(selector_devices),
+                },
                 amf_tools_available=amf_tools_available(),
             )
 

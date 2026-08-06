@@ -5,6 +5,8 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
+from lspr_app.device.device_types import PUMP, SELECTOR, SWITCH
+
 
 class DeviceLifecycleState(str, Enum):
     """All valid lifecycle states for a hardware device connection.
@@ -46,11 +48,35 @@ class PortDescriptor:
 
 @dataclass(frozen=True, slots=True)
 class PortRefreshData:
+    """One refresh_device_ports() result: candidate ports/devices for every
+    registered device family (see device_lifecycle.register_device_family),
+    keyed by family key (``PUMP``/``SWITCH``/``SELECTOR`` today - a future
+    family, e.g. a camera, is just another key in ``ports_by_family``, not a
+    new field here).
+
+    ``pump_ports``/``valve_ports``/``selector_devices`` remain as read-only
+    properties for existing call sites that read them directly - new code
+    should prefer ``ports_for(key)``.
+    """
+
     generation: int
-    pump_ports: list[object]
-    valve_ports: list[object]
-    selector_devices: list[object]
-    amf_tools_available: bool
+    ports_by_family: dict[str, list[object]] = field(default_factory=dict)
+    amf_tools_available: bool = False
+
+    def ports_for(self, family_key: str) -> list[object]:
+        return list(self.ports_by_family.get(family_key, []))
+
+    @property
+    def pump_ports(self) -> list[object]:
+        return self.ports_for(PUMP)
+
+    @property
+    def valve_ports(self) -> list[object]:
+        return self.ports_for(SWITCH)
+
+    @property
+    def selector_devices(self) -> list[object]:
+        return self.ports_for(SELECTOR)
 
 
 @dataclass(frozen=True, slots=True)
