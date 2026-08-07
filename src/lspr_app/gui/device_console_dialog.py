@@ -264,6 +264,10 @@ class DeviceManagerDialog(QDialog):
         self.setWindowTitle("Device Manager")
         self.setObjectName("deviceManagerDialog")
         self.setWindowModality(Qt.WindowModality.NonModal)
+        # Plain QDialogs are already edge-draggable, but Windows hides the
+        # maximize button unless this hint is set explicitly - without it,
+        # resizing isn't discoverable.
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMinMaxButtonsHint)
         self.resize(1180, 760)
         self._service = getattr(parent, "_device_comm_service", None)
         if not isinstance(self._service, DeviceCommunicationService):
