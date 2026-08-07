@@ -2,16 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-import re
 
+# Moved into lspr_acq_shell.user_profile (Phase 1 shell extraction,
+# 2026-08-07) since that module needs it too and now sits below this app in
+# the dependency graph. Re-exported here so existing
+# `from lspr_app.storage.output_paths import safe_path_component` call sites
+# keep working unchanged.
+from lspr_acq_shell.user_profile import safe_path_component
 
-def safe_path_component(value: object, *, fallback: str = "experiment") -> str:
-    text = " ".join(str(value or "").strip().split())
-    if not text:
-        return fallback
-    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", text)
-    text = text.strip(" ._")
-    return text or fallback
+__all__ = ["safe_path_component", "build_recording_experiment_base_dir", "recording_experiment_base_dir_for"]
 
 
 def build_recording_experiment_base_dir(

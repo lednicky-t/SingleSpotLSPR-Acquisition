@@ -1,17 +1,24 @@
 from __future__ import annotations
 
-import copy
-import json
 import logging
-import shutil
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
 import h5py
 import numpy as np
-from platformdirs import user_config_dir
 
+from lspr_acq_shell.settings_store import (
+    get_and_clear_settings_corruption_notice,
+    load_app_setting,
+    load_ui_state,
+    load_window_ui_state,
+    read_settings_payload,
+    save_app_setting,
+    save_ui_state,
+    save_window_ui_state,
+    write_settings_payload,
+)
 from lspr_app.domain.models import ProcessingSettings, Spectrum
 from lspr_app import __version__ as APP_VERSION
 from lspr_app.storage.user_profile import GLOBAL_CONFIG_PATH, active_user, current_config_path
@@ -22,6 +29,29 @@ from lspr_io import (
     write_processed_metrics_metadata,
     write_processing_settings_metadata,
 )
+
+# Re-exported for existing call sites (`from lspr_app.storage.app_config import
+# save_app_setting`, etc.) - the actual implementation is
+# lspr_acq_shell.settings_store as of the Phase 1 shell extraction,
+# 2026-08-07. See that module's docstring for why.
+__all__ = [
+    "DEFAULT_CONFIG_PATH",
+    "get_and_clear_settings_corruption_notice",
+    "load_acquisition_state",
+    "load_app_setting",
+    "load_dark_reference_cache",
+    "load_processing_settings",
+    "load_processing_settings_from_hdf5",
+    "load_ui_state",
+    "load_window_ui_state",
+    "save_acquisition_state",
+    "save_app_setting",
+    "save_dark_reference_cache",
+    "save_processing_settings",
+    "save_processing_settings_to_hdf5",
+    "save_ui_state",
+    "save_window_ui_state",
+]
 
 
 # The flat, pre-user settings file. Still used as-is: as the starting
@@ -43,98 +73,6 @@ def _resolve_path(path: Path | None) -> Path:
     return path if path is not None else current_config_path()
 
 _logger = logging.getLogger(__name__)
-
-# Set by _load_payload() when it has to quarantine a corrupted settings file.
-# main() checks this once QApplication exists so the user sees a warning
-# instead of silently getting fresh-default settings.
-_last_corruption_notice: str | None = None
-
-
-def get_and_clear_settings_corruption_notice() -> str | None:
-    """Return (and clear) the most recent settings-file corruption notice, if any."""
-    global _last_corruption_notice
-    notice = _last_corruption_notice
-    _last_corruption_notice = None
-    return notice
-
-
-def _quarantine_corrupt_file(path: Path, exc: Exception) -> Path:
-    """Move an unreadable settings file aside so a fresh one can be written."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    quarantine_path = path.with_name(f"{path.name}.corrupt-{timestamp}")
-    try:
-        shutil.move(str(path), str(quarantine_path))
-    except OSError:
-        quarantine_path = path  # best effort - leave the original in place
-    _logger.warning("Settings file %s was unreadable (%s); moved to %s and reset to defaults.", path, exc, quarantine_path)
-    global _last_corruption_notice
-    _last_corruption_notice = (
-        "Your saved settings file could not be read and was reset to defaults.\n\n"
-        f"The corrupted file was moved to:\n{quarantine_path}\n\n"
-        f"Reason: {exc}"
-    )
-    return quarantine_path
-
-
-# In-process cache for _load_payload/_write_payload, keyed by path and validated
-# against the file's mtime. This module has ~100 call sites app-wide (every
-# load_app_setting/save_app_setting/save_window_ui_state/etc. call goes through
-# here), so avoiding a disk read + full JSON parse on every single one is a real
-# win. The mtime check means an external writer (e.g. the suite launcher's
-# "reset settings" / "restore backup" actions, which touch this same file
-# directly while the app may be running) is still picked up on the next call
-# instead of being silently overwritten by a stale in-memory copy.
-_payload_cache: dict | None = None
-_payload_cache_mtime: float | None = None
-_payload_cache_path: Path | None = None
-
-
-def _reset_payload_cache() -> None:
-    global _payload_cache, _payload_cache_mtime, _payload_cache_path
-    _payload_cache = None
-    _payload_cache_mtime = None
-    _payload_cache_path = None
-
-
-def _load_payload(path: Path) -> dict:
-    """Read+parse *path* as JSON, returning {} if missing/corrupt.
-
-    Always returns a deep copy of the cached payload, so callers remain free
-    to mutate the result without corrupting the cache or a later save -
-    matching the old no-cache behavior where every call freshly parsed the
-    file from scratch.
-    """
-    global _payload_cache, _payload_cache_mtime, _payload_cache_path
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        _reset_payload_cache()
-        return {}
-    if _payload_cache is not None and _payload_cache_path == path and _payload_cache_mtime == mtime:
-        return copy.deepcopy(_payload_cache)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
-        _quarantine_corrupt_file(path, exc)
-        _reset_payload_cache()
-        return {}
-    _payload_cache, _payload_cache_mtime, _payload_cache_path = payload, mtime, path
-    return copy.deepcopy(payload)
-
-
-def _write_payload(payload: dict, path: Path) -> None:
-    """Write *payload* atomically so a crash mid-write can't corrupt the file."""
-    global _payload_cache, _payload_cache_mtime, _payload_cache_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    tmp_path.replace(path)
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        _reset_payload_cache()
-        return
-    _payload_cache, _payload_cache_mtime, _payload_cache_path = copy.deepcopy(payload), mtime, path
 
 
 # Renamed fields from older config/HDF5 schemas: old_name → new_name.
@@ -185,9 +123,9 @@ def _coerce_processing_settings(raw: object) -> ProcessingSettings:
 
 def save_processing_settings(settings: ProcessingSettings, path: Path | None = None) -> None:
     path = _resolve_path(path)
-    payload = _load_payload(path)
+    payload = read_settings_payload(path)
     payload["processing"] = asdict(settings)
-    _write_payload(payload, path)
+    write_settings_payload(payload, path)
 
 
 def save_processing_settings_to_hdf5(settings: ProcessingSettings, path: Path) -> None:
@@ -237,7 +175,7 @@ def load_processing_settings(path: Path | None = None) -> ProcessingSettings:
     if not path.exists():
         return ProcessingSettings()
 
-    payload = _load_payload(path)
+    payload = read_settings_payload(path)
     processing = payload.get("processing", {})
     return _coerce_processing_settings(processing)
 
@@ -287,79 +225,6 @@ def load_processing_settings_from_hdf5(path: Path) -> ProcessingSettings:
             elif trace_metrics is not None:
                 legacy_payload["trace_metrics"] = [str(trace_metrics)]
         return _coerce_processing_settings(legacy_payload)
-
-
-def save_ui_state(state: dict[str, object], path: Path | None = None) -> None:
-    path = _resolve_path(path)
-    payload = _load_payload(path)
-    payload["ui_state"] = state
-    _write_payload(payload, path)
-
-
-def load_ui_state(path: Path | None = None) -> dict[str, object]:
-    path = _resolve_path(path)
-    if not path.exists():
-        return {}
-    payload = _load_payload(path)
-    ui_state = payload.get("ui_state", {})
-    return ui_state if isinstance(ui_state, dict) else {}
-
-
-def save_window_ui_state(
-    window_name: str,
-    state: dict[str, object],
-    path: Path | None = None,
-) -> None:
-    path = _resolve_path(path)
-    payload = _load_payload(path)
-    ui_state = payload.get("ui_state", {})
-    if not isinstance(ui_state, dict):
-        ui_state = {}
-    ui_state[window_name] = state
-    payload["ui_state"] = ui_state
-    _write_payload(payload, path)
-
-
-def load_window_ui_state(window_name: str, path: Path | None = None) -> dict[str, object]:
-    path = _resolve_path(path)
-    ui_state = load_ui_state(path)
-    window_state = ui_state.get(window_name)
-    if isinstance(window_state, dict):
-        return window_state
-    if window_name == "main_window":
-        # Backward compatibility with older flat ui_state payloads.
-        legacy_keys = {"x", "y", "width", "height", "maximized", "splitter_sizes"}
-        if any(key in ui_state for key in legacy_keys):
-            return ui_state
-    return {}
-
-
-def save_app_setting(
-    key: str,
-    value: object,
-    path: Path | None = None,
-) -> None:
-    path = _resolve_path(path)
-    payload = _load_payload(path)
-    app_state = payload.get("app", {})
-    if not isinstance(app_state, dict):
-        app_state = {}
-    app_state[key] = value
-    payload["app"] = app_state
-    _write_payload(payload, path)
-
-
-def load_app_setting(
-    key: str,
-    default: object = None,
-    path: Path | None = None,
-) -> object:
-    path = _resolve_path(path)
-    payload = _load_payload(path)
-    app_state = payload.get("app", {})
-    if not isinstance(app_state, dict):
-        return default
-    return app_state.get(key, default)
 
 
 def save_acquisition_state(
