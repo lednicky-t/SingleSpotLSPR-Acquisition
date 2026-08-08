@@ -1,79 +1,26 @@
+"""Re-export shim over `lspr_acq_shell.connection_registry` (Phase 1 shell
+extraction, 2026-08-08) - kept here so every existing
+`from lspr_app.device.connection_registry import ...` call site in this app
+keeps working unchanged.
+"""
 from __future__ import annotations
 
-from contextlib import contextmanager
-from threading import RLock
+from lspr_acq_shell.connection_registry import (
+    PortBusyError,
+    claim_port,
+    claim_port_context,
+    port_owners,
+    release_port,
+    snapshot_port_ownership,
+    try_claim_port,
+)
 
-
-_LOCK = RLock()
-_PORT_OWNERS: dict[str, set[str]] = {}
-
-
-class PortBusyError(RuntimeError):
-    pass
-
-
-def claim_port(port: str, owner: str) -> None:
-    port_key = str(port or "").strip()
-    owner_name = str(owner or "").strip()
-    if not port_key or not owner_name:
-        return
-    with _LOCK:
-        owners = _PORT_OWNERS.setdefault(port_key, set())
-        owners.add(owner_name)
-
-
-def try_claim_port(port: str, owner: str) -> bool:
-    port_key = str(port or "").strip()
-    owner_name = str(owner or "").strip()
-    if not port_key or not owner_name:
-        return False
-    with _LOCK:
-        owners = _PORT_OWNERS.setdefault(port_key, set())
-        if owners and owner_name not in owners:
-            return False
-        owners.add(owner_name)
-        return True
-
-
-@contextmanager
-def claim_port_context(port: str, owner: str):
-    claimed = try_claim_port(port, owner)
-    try:
-        yield claimed
-    finally:
-        if claimed:
-            release_port(port, owner)
-
-
-def release_port(port: str, owner: str | None = None) -> None:
-    port_key = str(port or "").strip()
-    if not port_key:
-        return
-    with _LOCK:
-        if port_key not in _PORT_OWNERS:
-            return
-        if owner is None:
-            _PORT_OWNERS.pop(port_key, None)
-            return
-        owner_name = str(owner or "").strip()
-        if not owner_name:
-            _PORT_OWNERS.pop(port_key, None)
-            return
-        owners = _PORT_OWNERS[port_key]
-        owners.discard(owner_name)
-        if not owners:
-            _PORT_OWNERS.pop(port_key, None)
-
-
-def port_owners(port: str) -> tuple[str, ...]:
-    port_key = str(port or "").strip()
-    if not port_key:
-        return ()
-    with _LOCK:
-        owners = _PORT_OWNERS.get(port_key, set())
-        return tuple(sorted(owners))
-
-
-def snapshot_port_ownership() -> dict[str, str]:
-    with _LOCK:
-        return {port: ", ".join(sorted(owners)) for port, owners in _PORT_OWNERS.items() if owners}
+__all__ = [
+    "PortBusyError",
+    "claim_port",
+    "claim_port_context",
+    "port_owners",
+    "release_port",
+    "snapshot_port_ownership",
+    "try_claim_port",
+]

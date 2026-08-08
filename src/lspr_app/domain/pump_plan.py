@@ -7,16 +7,17 @@ from lspr_core import ExperimentPlan, ExperimentPlanStep as CoreExperimentPlanSt
 from lspr_io import build_legacy_experiment_plan_row_table
 from lspr_app.version import APP_VERSION
 
-ACTIVE_PUMP_CHANNELS = 4
+# Moved to lspr_acq_shell.reglo_icc (Phase 1 shell extraction, 2026-08-08) -
+# these are pump-hardware facts (the Reglo ICC driver's own constants), not
+# plan-execution facts, so that driver module is their more natural owner.
+# Re-imported here so every existing consumer of pump_plan.ACTIVE_PUMP_CHANNELS
+# etc. is unaffected.
+from lspr_acq_shell.reglo_icc import ACTIVE_PUMP_CHANNELS, DEFAULT_ROLLER_COUNT, VALID_ROLLER_COUNTS
+
+_ = (DEFAULT_ROLLER_COUNT, VALID_ROLLER_COUNTS)  # re-exported for other modules; not used in this file
+
 HDF5_PUMP_CHANNELS = 6
 DEFAULT_TUBE_MM = 0.25
-
-# Reglo ICC cassette heads are interchangeable and come in 6/8/12-roller
-# variants (manual sec. 6.2's "xt" command lists these as the only valid
-# roller counts). 8 is the standard head, and the one the manual's own
-# Tubing Size and Flow Rate Chart (sec. 13) is computed for.
-VALID_ROLLER_COUNTS = (6, 8, 12)
-DEFAULT_ROLLER_COUNT = 8
 
 
 @dataclass(slots=True, frozen=True)
