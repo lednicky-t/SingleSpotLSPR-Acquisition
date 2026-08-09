@@ -64,6 +64,7 @@ from lspr_app.domain.pump_plan import (
     recompute_plan_timing,
     to_core_experiment_plan,
 )
+from lspr_app.domain.pump_plan import PLAN_COLOR_OPTIONS as _SHARED_PLAN_COLOR_OPTIONS
 from lspr_app.gui.experiment_control_builders import (
     create_direction_button,
     create_flow_step_action_button,
@@ -150,16 +151,10 @@ class ExperimentControlWindow(PlanRunLoopMixin, QWidget):
     # "step applied" event only fires on completion and the busy dot needs
     # to appear immediately, not just after the command finishes.
     hw_status_refresh_requested = pyqtSignal()
-    PLAN_COLOR_OPTIONS = [
-        ("Blue", "#4E79A7"),
-        ("Green", "#59A14F"),
-        ("Red", "#E15759"),
-        ("Orange", "#F28E2B"),
-        ("Purple", "#B07AA1"),
-        ("Teal", "#76B7B2"),
-        ("Gold", "#EDC948"),
-        ("Gray", "#9C9DA1"),
-    ]
+    # Moved to lspr_acq_shell.pump_plan.PLAN_COLOR_OPTIONS (Phase 2, LSPRi acq
+    # experiment-control reuse - visual-parity effort, 2026-08-09); kept as a
+    # list here (not the shared tuple directly) since this was always a list.
+    PLAN_COLOR_OPTIONS = list(_SHARED_PLAN_COLOR_OPTIONS)
     PLAN_COLUMNS = [
         "step",
         "duration_s",
