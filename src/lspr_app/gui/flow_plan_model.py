@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 )
 
 from lspr_core import ExperimentPlan
+from lspr_acq_shell.pump_plan import clamped_switch_position, normalized_pump_direction, normalized_valve_state
 from lspr_app.domain.pump_plan import (
     ACTIVE_PUMP_CHANNELS,
     PumpPlanStep,
@@ -82,22 +83,11 @@ def clamped_flow_ul_min(value: object) -> int:
     return max(round(float(value)), 0)
 
 
-def normalized_pump_direction(value: object) -> str:
-    return "CCW" if str(value or "").upper() == "CCW" else "CW"
-
-
-def normalized_valve_state(value: object) -> str:
-    return "Close" if str(value or "").strip().lower() == "close" else "Open"
-
-
-def clamped_switch_position(value: object) -> int:
-    """Coerce *value* to a valid switch/selector position (1-12), defaulting to 1
-    if it can't be parsed as an int - both existing callers already wanted that
-    same fallback, so it's baked in here rather than left to each call site."""
-    try:
-        return max(min(int(value), 12), 1)
-    except (TypeError, ValueError):
-        return 1
+# normalized_pump_direction / normalized_valve_state / clamped_switch_position
+# moved to lspr_acq_shell.pump_plan (Phase 2, LSPRi acq experiment-control
+# reuse - Tier 2 extraction, 2026-08-09) - imported above, re-exported here
+# under their original names so every existing call site in this module and
+# in experiment_control_window.py keeps working unchanged.
 
 
 class ExperimentPlanTableModel(QAbstractTableModel):

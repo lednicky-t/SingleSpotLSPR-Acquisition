@@ -120,6 +120,7 @@ from lspr_app.gui.experiment_control_step_runner import (
     _StepApplyResult,
     _StepApplyRunnable,
 )
+from lspr_app.gui.experiment_control_step_decision import StepCommandContext, plan_step_commands
 from lspr_app.gui.icon_helpers import flow_tabler_icon, tint_tabler_icon, transport_icon
 from lspr_app.gui.panel_help import make_help_button
 from lspr_app.gui.panel_help_text import EXPERIMENT_CONTROL_BODY, EXPERIMENT_CONTROL_TITLE, EXPERIMENT_CONTROL_TOOLTIP
@@ -4934,161 +4935,35 @@ class ExperimentControlWindow(QWidget):
     ) -> tuple[list[_PlannedCommand], bool, list[str]]:
         """Build an ordered command list for a step transition (main-thread only — reads widget state).
 
+        Thin wrapper: gathers the explicit inputs the shared, pure
+        `lspr_acq_shell.experiment_control_step_decision.plan_step_commands`
+        needs from this window's live state (widgets, device connections,
+        settings) and delegates the actual decision to it (Phase 2, LSPRi
+        acq experiment-control reuse - Tier 2 extraction, 2026-08-09) - see
+        that module's docstring for why this is safe to share (no window
+        coupling once these inputs are made explicit).
+
         Returns (commands, needs_mswitch_refresh, pre_status_messages).
         """
-        previous = self._applied_plan_step
-        status_messages: list[str] = []
-        commands: list[_PlannedCommand] = []
-        needs_mswitch_refresh = False
-
-        valve = str(step.valve or "").strip()
-        previous_valve = str(previous.valve or "").strip().lower() if previous is not None else ""
-        switch_position = int(max(min(int(step.switch_position), 12), 1))
-        previous_switch = int(max(min(int(previous.switch_position), 12), 1)) if previous is not None else -1
-        switch_changed = switch_position != previous_switch
-        wait_for_switch_first = bool(self._wait_for_mswitch_first and switch_changed)
-
-        pump_label = self._device_label_for("pump")
-        valve_label = self._device_label_for(SWITCH)
-        switch_label = self._device_label_for(SELECTOR)
-        pump_connected = self._service_device_connected("pump")
-        valve_connected = self._service_device_connected(SWITCH)
-        mswitch_connected = self._service_device_connected(SELECTOR)
-
-        channels_to_stop: list[int] = []
-        channels_to_start: list[int] = []
-        channels_to_configure: list[tuple[int, float, str, float]] = []
-        channels_to_restart_after_switch: list[int] = []
-
-        _LOGGER.info(
-            "Applying experiment-plan step | step=%s valve=%s previous_valve=%s controller=%s port=%s running=%s holding=%s start=%s",
-            step.step,
-            valve or "-",
-            str(previous.valve or "").strip() or "-" if previous is not None else "-",
-            *self._service_connection_detail(SWITCH),
-            self._plan_running,
-            self._plan_holding,
-            start,
+        switch_controller_type, switch_port = self._service_connection_detail(SWITCH)
+        context = StepCommandContext(
+            wait_for_mswitch_first=self._wait_for_mswitch_first,
+            pump_label=self._device_label_for("pump"),
+            valve_label=self._device_label_for(SWITCH),
+            switch_label=self._device_label_for(SELECTOR),
+            pump_connected=self._service_device_connected("pump"),
+            valve_connected=self._service_device_connected(SWITCH),
+            mswitch_connected=self._service_device_connected(SELECTOR),
+            tube_mm_by_channel=[spin.value() for spin in self.manual_tube_spins],
+            pump_backsteps=self._device_manager_settings.pump.backsteps,
+            pump_roller_count=self._device_manager_settings.pump.roller_count,
+            pump_display_enabled=self._pump_display_enabled,
+            plan_running=self._plan_running,
+            plan_holding=self._plan_holding,
+            switch_controller_type=switch_controller_type,
+            switch_port=switch_port,
         )
-
-        if pump_connected:
-            for index, channel in enumerate(step.channels, start=1):
-                # Normalize exactly like the table's own display/write path
-                # (flow_plan_model.normalized_pump_direction) - a channel's
-                # raw direction defaults to "OFF" until its cell is
-                # explicitly touched, but the table has always *displayed*
-                # that default as "CW" (the function never returns "OFF").
-                # Reading the raw value here instead meant a channel whose
-                # direction cell nobody ever clicked - despite showing "CW"
-                # - was silently skipped even with a real flow rate set,
-                # since only this dispatch code (not the table) still
-                # treated "OFF" as a real third state blocking the channel.
-                direction = normalized_pump_direction(channel.direction)
-                active = channel.flow_ul_min > 0.0
-                tube_mm = self.manual_tube_spins[index - 1].value()
-                previous_channel = previous.channels[index - 1] if previous is not None else None
-                previous_direction = (
-                    normalized_pump_direction(previous_channel.direction) if previous_channel is not None else "CW"
-                )
-                previous_active = previous_channel is not None and previous_channel.flow_ul_min > 0.0
-                previous_flow = float(previous_channel.flow_ul_min) if previous_channel is not None else 0.0
-                channel_changed = (
-                    previous is None
-                    or previous_channel is None
-                    or previous_direction != direction
-                    or abs(previous_flow - float(channel.flow_ul_min)) > 1e-9
-                )
-                if previous_active and (not active or channel_changed or (wait_for_switch_first and switch_changed)):
-                    channels_to_stop.append(index)
-                if wait_for_switch_first and switch_changed and previous_active and active and not channel_changed:
-                    channels_to_restart_after_switch.append(index)
-                if active and channel_changed:
-                    channels_to_configure.append((index, float(channel.flow_ul_min), direction, tube_mm))
-                    if start:
-                        channels_to_start.append(index)
-                elif active and start and not previous_active:
-                    channels_to_start.append(index)
-        else:
-            _LOGGER.warning("Pump controller offline; skipping pump channel updates | step=%s", step.step)
-            status_messages.append("Pump controller not connected.")
-
-        effective_starts_after_switch = list(channels_to_start)
-        if wait_for_switch_first and switch_changed:
-            for index in channels_to_restart_after_switch:
-                if index not in effective_starts_after_switch:
-                    effective_starts_after_switch.append(index)
-
-        def _pump_stop_cmds(indices: list[int]) -> list[_PlannedCommand]:
-            return [_PlannedCommand(pump_label, "pump.stop", {"channel": i}, f"pump.stop ch={i}") for i in indices]
-
-        def _pump_configure_cmds() -> list[_PlannedCommand]:
-            backsteps = self._device_manager_settings.pump.backsteps
-            roller_count = self._device_manager_settings.pump.roller_count
-            return [
-                _PlannedCommand(
-                    pump_label, "pump.set_flow",
-                    {
-                        "channel": i, "flow_ul_min": fl, "direction": d, "tube_mm": t,
-                        "backsteps": backsteps, "roller_count": roller_count, "start": False,
-                    },
-                    f"pump.set_flow ch={i} flow={fl:.2f} dir={d}",
-                )
-                for i, fl, d, t in channels_to_configure
-            ]
-
-        def _pump_start_cmds(indices: list[int]) -> list[_PlannedCommand]:
-            return [_PlannedCommand(pump_label, "pump.start", {"channel": i}, f"pump.start ch={i}") for i in indices]
-
-        def _valve_cmd() -> list[_PlannedCommand]:
-            if not (valve and valve.lower() != previous_valve):
-                return []
-            if valve_connected:
-                return [_PlannedCommand(valve_label, "switch.set_position", {"position": valve}, f"switch.set_position pos={valve}")]
-            status_messages.append("Switch controller not connected.")
-            _LOGGER.warning("Valve command skipped | controller not connected | step=%s valve=%s", step.step, valve)
-            return []
-
-        def _switch_cmd() -> list[_PlannedCommand]:
-            if not switch_changed:
-                return []
-            if mswitch_connected:
-                return [_PlannedCommand(
-                    switch_label, "switch.move_to", {"position": switch_position, "block": True},
-                    f"switch.move_to pos={switch_position}", is_switch_move=True,
-                )]
-            status_messages.append("Switch rotary valve not connected.")
-            _LOGGER.warning("Switch rotary valve command skipped | controller not connected | step=%s switch=%s", step.step, switch_position)
-            return []
-
-        def _pump_display_cmd() -> list[_PlannedCommand]:
-            # Always sent (not diffed against the previous step) so a step with the
-            # option off reliably clears whatever the previous step left showing,
-            # instead of leaving a stale comment on the pump's display.
-            if not pump_connected:
-                return []
-            text = str(step.description or "").strip() if self._pump_display_enabled else ""
-            return [_PlannedCommand(pump_label, "pump.set_display", {"text": text}, f"pump.set_display text={text!r}")]
-
-        if wait_for_switch_first:
-            if pump_connected:
-                commands.extend(_pump_stop_cmds(channels_to_stop))
-            commands.extend(_switch_cmd())
-            commands.extend(_valve_cmd())
-            if pump_connected:
-                commands.extend(_pump_configure_cmds())
-                commands.extend(_pump_start_cmds(effective_starts_after_switch))
-                commands.extend(_pump_display_cmd())
-        else:
-            if pump_connected:
-                commands.extend(_pump_stop_cmds(channels_to_stop))
-                commands.extend(_pump_configure_cmds())
-                commands.extend(_pump_start_cmds(channels_to_start))
-                commands.extend(_pump_display_cmd())
-            commands.extend(_valve_cmd())
-            commands.extend(_switch_cmd())
-
-        needs_mswitch_refresh = any(c.is_switch_move for c in commands)
-        return commands, needs_mswitch_refresh, status_messages
+        return plan_step_commands(step, self._applied_plan_step, context, start=start)
 
     @property
     def _step_apply_pending(self) -> bool:
