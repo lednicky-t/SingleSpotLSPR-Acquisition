@@ -56,6 +56,7 @@ from lspr_app.device.serial_controllers import ControllerProbe
 from lspr_app.device.reglo_icc import PumpProbe
 from lspr_app import __version__
 from lspr_app.resources import app_icon_path
+from lspr_app.version import APP_VERSION
 from lspr_app.domain.pump_plan import (
     ACTIVE_PUMP_CHANNELS,
     HDF5_PUMP_CHANNELS,
@@ -517,7 +518,7 @@ class ExperimentControlWindow(PlanRunLoopMixin, QWidget):
         self.plan_table = ExperimentControlTableView()
         self.plan_table.setObjectName("flowControlTable")
         # The plan table setup is centralized so the view, model, delegates, and layout rules stay in one place.
-        configure_experiment_control_plan_table(self)
+        configure_experiment_control_plan_table(self, app_name="LSPR Acquisition", app_version=APP_VERSION)
 
         self.pause_table = QTableWidget(self)
         self.pause_table.setObjectName("flowControlPauseTable")
@@ -2092,7 +2093,10 @@ class ExperimentControlWindow(PlanRunLoopMixin, QWidget):
     # ═══════════════════════════════════════════════════════════════════
 
     def _edit_switch_solution_labels(self, anchor: QWidget | None = None) -> None:
-        dialogs = ExperimentControlDialogs(self, self._theme_palette(), self._contrast_text_color, self._tint_icon)
+        dialogs = ExperimentControlDialogs(
+            self, self._theme_palette(), self._contrast_text_color, self._tint_icon,
+            app_name="LSPR Acquisition", app_version=APP_VERSION,
+        )
         result = dialogs.edit_switch_solution_labels(self._switch_solution_labels, self._switch_solution_details, anchor)
         if result is None:
             return
@@ -2103,7 +2107,10 @@ class ExperimentControlWindow(PlanRunLoopMixin, QWidget):
         self._update_timeline_selection()
 
     def _edit_pause_state(self, anchor: QWidget | None = None) -> None:
-        dialogs = ExperimentControlDialogs(self, self._theme_palette(), self._contrast_text_color, self._tint_icon)
+        dialogs = ExperimentControlDialogs(
+            self, self._theme_palette(), self._contrast_text_color, self._tint_icon,
+            app_name="LSPR Acquisition", app_version=APP_VERSION,
+        )
         updated_step = dialogs.edit_pause_state(self._pause_row_step(), anchor or self.pause_state_button)
         if updated_step is None:
             return
@@ -2115,7 +2122,10 @@ class ExperimentControlWindow(PlanRunLoopMixin, QWidget):
     # _apply_pause_state moved to lspr_acq_shell.experiment_control_run_loop.PlanRunLoopMixin (Tier 2)
 
     def _edit_color_palette_entries(self, anchor: QWidget | None = None) -> None:
-        dialogs = ExperimentControlDialogs(self, self._theme_palette(), self._contrast_text_color, self._tint_icon)
+        dialogs = ExperimentControlDialogs(
+            self, self._theme_palette(), self._contrast_text_color, self._tint_icon,
+            app_name="LSPR Acquisition", app_version=APP_VERSION,
+        )
         updated_entries = dialogs.edit_color_palette_entries(self._color_palette_entries, anchor)
         if updated_entries is None:
             return
@@ -2172,7 +2182,10 @@ class ExperimentControlWindow(PlanRunLoopMixin, QWidget):
         return "#4E79A7" if normalized == "Open" else "#B44A4A"
 
     def _edit_valve_state_labels(self, anchor: QWidget | None = None) -> None:
-        dialogs = ExperimentControlDialogs(self, self._theme_palette(), self._contrast_text_color, self._tint_icon)
+        dialogs = ExperimentControlDialogs(
+            self, self._theme_palette(), self._contrast_text_color, self._tint_icon,
+            app_name="LSPR Acquisition", app_version=APP_VERSION,
+        )
         updated = dialogs.edit_valve_labels(self._valve_state_labels, self._valve_state_colors, anchor)
         if updated is None:
             return
@@ -2185,7 +2198,10 @@ class ExperimentControlWindow(PlanRunLoopMixin, QWidget):
         return
 
     def _edit_pump_display_settings(self, anchor: QWidget | None = None) -> None:
-        dialogs = ExperimentControlDialogs(self, self._theme_palette(), self._contrast_text_color, self._tint_icon)
+        dialogs = ExperimentControlDialogs(
+            self, self._theme_palette(), self._contrast_text_color, self._tint_icon,
+            app_name="LSPR Acquisition", app_version=APP_VERSION,
+        )
         before = (self._pump_display_enabled, self._pump_display_highlight_enabled)
         updated = dialogs.edit_pump_display_settings(self.step_comment_edit, before[0], before[1], anchor)
         if updated is None:
