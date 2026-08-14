@@ -19,6 +19,8 @@ from lspr_ui import (
     trash_icon,
 )
 
+from lspr_app.gui.theme_palette import theme_palette
+
 
 
 _PRISM_ICON_SVG = """
@@ -31,6 +33,17 @@ _PRISM_ICON_SVG = """
   <path d="M4.731 19h11.539a1 1 0 0 0 .866 -1.5l-5.769 -10a1 1 0 0 0 -1.732 0l-5.769 10a1 1 0 0 0 .865 1.5" fill="#8edcff" fill-opacity="0.25" stroke="#8edcff"/>
 </svg>
 """
+
+
+def muted_icon_color(theme_mode: str) -> QColor:
+    # "Inactive"/secondary icon tint - see theme_palette.py for why Dark and
+    # Light need their own value rather than one fixed gray.
+    return QColor(theme_palette(theme_mode)["muted_icon"])
+
+
+def accent_icon_color(theme_mode: str) -> QColor:
+    # Light-blue "active"/emphasis icon tint, same idea as muted_icon_color.
+    return QColor(theme_palette(theme_mode)["accent_icon"])
 
 
 def prism_tab_icon() -> QIcon:
@@ -53,8 +66,9 @@ def math_function_tab_icon(color: QColor | None = None) -> QIcon:
         return tint_tabler_icon(tabler_icon("math"), tint)
 
 
-def storage_compression_icon(active: bool) -> QIcon:
-    tint = QColor("#f2c94c" if active else "#b9a24b")
+def storage_compression_icon(active: bool, theme_mode: str = "dark") -> QIcon:
+    palette = theme_palette(theme_mode)
+    tint = QColor(palette["compression_active"] if active else palette["compression_inactive"])
     try:
         return tint_tabler_icon(tabler_icon("file_zip"), tint)
     except Exception:
@@ -89,18 +103,24 @@ def humidity_status_icon() -> QIcon:
     return tint_tabler_icon(tabler_icon("droplet"), QColor("#4C78A8"))
 
 
-def crosshair_cursor_icon() -> QIcon:
-    # Muted gray, not the overlay's normal light text color (#d7dee6) - this
-    # icon marks the cursor readout as *off*, so it should read as dimmer/
-    # inactive rather than as another live value.
-    return tint_tabler_icon(tabler_icon("crosshair"), QColor("#8a94a6"))
+def _corner_overlay_off_icon_color(theme_mode: str) -> QColor:
+    # Muted gray, not the overlay's normal text color - this icon marks the
+    # cursor/stats readout as *off*, so it should read as dimmer/inactive
+    # rather than as another live value. The overlay backdrop itself is
+    # dark in Dark theme and light in Light theme (see
+    # main_window_plotting._style_corner_overlay_container), so the icon
+    # needs its own theme branch the same way the backdrop's text does.
+    return QColor("#8a94a6" if theme_mode == "dark" else "#5c6672")
 
 
-def stats_hidden_icon() -> QIcon:
-    # Same muted gray as crosshair_cursor_icon, for the same "this is off"
-    # reason - a distinct shape (bullet list vs. crosshair) so the two hidden
-    # states in adjacent plot corners aren't easy to confuse at a glance.
-    return tint_tabler_icon(tabler_icon("list"), QColor("#8a94a6"))
+def crosshair_cursor_icon(theme_mode: str = "dark") -> QIcon:
+    return tint_tabler_icon(tabler_icon("crosshair"), _corner_overlay_off_icon_color(theme_mode))
+
+
+def stats_hidden_icon(theme_mode: str = "dark") -> QIcon:
+    # Distinct shape (bullet list vs. crosshair) so the two hidden states in
+    # adjacent plot corners aren't easy to confuse at a glance.
+    return tint_tabler_icon(tabler_icon("list"), _corner_overlay_off_icon_color(theme_mode))
 
 
 def tracking_ready_icon(blink_visible: bool) -> QIcon:
@@ -117,6 +137,7 @@ def tracking_ready_icon(blink_visible: bool) -> QIcon:
 
 
 __all__ = [
+    "accent_icon_color",
     "bulb_icon",
     "crosshair_cursor_icon",
     "dark_icon",
@@ -125,6 +146,7 @@ __all__ = [
     "flow_tabler_icon",
     "humidity_status_icon",
     "math_function_tab_icon",
+    "muted_icon_color",
     "reload_icon",
     "prism_tab_icon",
     "reference_icon",

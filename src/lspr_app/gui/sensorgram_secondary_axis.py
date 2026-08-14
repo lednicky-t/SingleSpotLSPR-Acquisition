@@ -54,6 +54,8 @@ from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QPen
 from PyQt6.QtWidgets import QGraphicsItem, QGraphicsRectItem, QLabel, QMenu, QWidgetAction
 
+from lspr_app.gui.theme_palette import theme_palette
+
 
 if TYPE_CHECKING:
     from lspr_app.gui.main_window import MainWindow
@@ -130,10 +132,12 @@ SECONDARY_AXIS_MODE_LABELS: dict[str, str] = {
 
 # Purely a visual state indicator on the toggle button - "how many extra
 # axes are active right now", not a semantic color tied to any metric.
-SECONDARY_AXIS_MODE_COLORS: dict[str, str] = {
-    "xy": "#7a8291",
-    "xyy": "#e8d85f",
-    "xy2y": "#f2994a",
+# Values live in theme_palette.py (secondary_axis_xy/xyy/xy2y) alongside
+# every other named theme color this app uses.
+_SECONDARY_AXIS_MODE_PALETTE_KEYS: dict[str, str] = {
+    "xy": "secondary_axis_xy",
+    "xyy": "secondary_axis_xyy",
+    "xy2y": "secondary_axis_xy2y",
 }
 
 
@@ -245,8 +249,9 @@ def secondary_axis_mode_label(mode: object | None = None) -> str:
     return SECONDARY_AXIS_MODE_LABELS[normalize_secondary_axis_mode(mode)]
 
 
-def secondary_axis_mode_color(mode: object | None = None) -> str:
-    return SECONDARY_AXIS_MODE_COLORS[normalize_secondary_axis_mode(mode)]
+def secondary_axis_mode_color(mode: object | None = None, theme_mode: str = "dark") -> str:
+    key = _SECONDARY_AXIS_MODE_PALETTE_KEYS[normalize_secondary_axis_mode(mode)]
+    return theme_palette(theme_mode)[key]
 
 
 def _slot_active_for_mode(mode: str, slot: str) -> bool:

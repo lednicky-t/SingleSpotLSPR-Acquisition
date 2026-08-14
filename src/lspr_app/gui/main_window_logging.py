@@ -17,6 +17,7 @@ from lspr_app.diagnostics import DiagnosticsConfig
 from lspr_app.gui.main_window_logging_ui import apply_text_widget_font_size_for
 from lspr_app.gui.runtime_diagnostics import SessionDiagnosticsSnapshot, build_session_statistics_lines
 from lspr_app.gui.logging_utils import SUCCESS_LOG_LEVEL
+from lspr_app.gui.theme_palette import theme_palette
 from lspr_app.storage.output_paths import (
     build_recording_experiment_base_dir,
     recording_experiment_base_dir_for,
@@ -619,16 +620,23 @@ def append_log_record(window, levelno: int, source: str, text: str) -> None:
     append_log_record_now(window, levelno, source, line)
 
 
+# Maps each log level to its color's name in theme_palette.py. INFO and the
+# message body intentionally share "log_message" (near-black in Light theme,
+# near-white in Dark) - only the more attention-worthy levels (WARN/ERROR/
+# CRITICAL/SUCCESS/DEBUG) keep a distinct hue.
+_LOG_LEVEL_PALETTE_KEYS = {
+    logging.DEBUG: "log_debug",
+    logging.INFO: "log_message",
+    SUCCESS_LOG_LEVEL: "log_success",
+    logging.WARNING: "log_warning",
+    logging.ERROR: "log_error",
+    logging.CRITICAL: "log_critical",
+}
+
+
 def insert_log_record(window, cursor: QTextCursor, levelno: int, source: str, text: str) -> None:
     timestamp = datetime.now().strftime("%H:%M:%S")
-    color_map = {
-        logging.DEBUG: "#5fa8ff",
-        logging.INFO: "#c7d2e0",
-        SUCCESS_LOG_LEVEL: "#44d07b",
-        logging.WARNING: "#f4b23d",
-        logging.ERROR: "#ff6b6b",
-        logging.CRITICAL: "#f35f8d",
-    }
+    colors = theme_palette(getattr(window, "_theme_mode", "dark"))
     level_label_map = {
         logging.DEBUG: "DEBUG",
         logging.INFO: "INFO",
@@ -637,7 +645,7 @@ def insert_log_record(window, cursor: QTextCursor, levelno: int, source: str, te
         logging.ERROR: "ERROR",
         logging.CRITICAL: "CRIT",
     }
-    level_color = color_map.get(int(levelno), "#c7d2e0")
+    level_color = colors[_LOG_LEVEL_PALETTE_KEYS.get(int(levelno), "log_message")]
     level_label = level_label_map.get(int(levelno), "INFO")
     source_label = str(source).split(".")[-1] or "app"
     escaped = str(text).replace("\n", "<br>")
@@ -654,10 +662,10 @@ def insert_log_record(window, cursor: QTextCursor, levelno: int, source: str, te
         cursor.insertBlock()
     html = (
         "<span style='white-space:pre-wrap;'>"
-        f"<span style='color:#738193;'>{timestamp}</span> "
+        f"<span style='color:{colors['log_timestamp']};'>{timestamp}</span> "
         f"<span style='color:{level_color}; font-weight:600;'>[{level_label}]</span> "
-        f"<span style='color:#94a3b8;'>{source_label}</span> "
-        f"<span style='color:#e5edf7;'>{escaped}</span>"
+        f"<span style='color:{colors['log_source']};'>{source_label}</span> "
+        f"<span style='color:{colors['log_message']};'>{escaped}</span>"
         "</span>"
     )
     cursor.insertHtml(html)

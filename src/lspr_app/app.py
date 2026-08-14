@@ -29,7 +29,6 @@ from lspr_app.resources import app_icon_path
 from lspr_app.storage.app_config import (
     get_and_clear_settings_corruption_notice,
     load_app_setting,
-    save_app_setting,
 )
 
 from lspr_app import __version__
@@ -567,7 +566,6 @@ def main() -> None:
     app.setApplicationDisplayName("LSPR Acquisition")
     app.setApplicationVersion(__version__)
     apply_base_app_theme(app)
-    save_app_setting("theme_mode", "dark")
     corruption_notice = get_and_clear_settings_corruption_notice()
     if corruption_notice:
         QMessageBox.warning(None, "Settings reset", corruption_notice)

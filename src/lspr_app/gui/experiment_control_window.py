@@ -66,6 +66,7 @@ from lspr_app.domain.pump_plan import (
     to_core_experiment_plan,
 )
 from lspr_app.gui.experiment_control_builders import (
+    apply_direction_button_theme,
     create_direction_button,
     create_flow_step_action_button,
     direction_glyph,
@@ -120,8 +121,9 @@ from lspr_app.gui.experiment_control_step_runner import (
     _StepApplyResult,
     _StepApplyRunnable,
 )
-from lspr_app.gui.icon_helpers import flow_tabler_icon, tint_tabler_icon, transport_icon
-from lspr_app.gui.panel_help import make_help_button
+from lspr_app.gui.icon_helpers import accent_icon_color, flow_tabler_icon, muted_icon_color, tint_tabler_icon, transport_icon
+from lspr_app.gui.theme_palette import theme_palette
+from lspr_app.gui.panel_help import apply_help_button_theme, make_help_button
 from lspr_app.gui.panel_help_text import EXPERIMENT_CONTROL_BODY, EXPERIMENT_CONTROL_TITLE, EXPERIMENT_CONTROL_TOOLTIP
 from lspr_app.gui.ui_helpers import make_compact_spinbox
 from lspr_app.gui.undo_support import push_snapshot
@@ -419,7 +421,7 @@ class ExperimentControlWindow(QWidget):
         self.color_palette_button.setObjectName("flowColorAddButton")
         self.color_palette_button.setAutoRaise(True)
         self.color_palette_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.color_palette_button.setIcon(tint_tabler_icon(flow_tabler_icon("settings"), QColor("#f0f3f7")))
+        self.color_palette_button.setIcon(tint_tabler_icon(flow_tabler_icon("settings"), muted_icon_color(self._theme_mode)))
         self.color_palette_button.setIconSize(QSize(21, 21))
         self.color_palette_button.setToolTip("Edit and overwrite the color palette used by the dropdown.")
         self.remove_custom_color_button = QToolButton(self)
@@ -443,7 +445,7 @@ class ExperimentControlWindow(QWidget):
         self.step_valve_settings_button.setObjectName("flowValveSettingsButton")
         self.step_valve_settings_button.setAutoRaise(True)
         self.step_valve_settings_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.step_valve_settings_button.setIcon(tint_tabler_icon(flow_tabler_icon("settings"), QColor("#f0f3f7")))
+        self.step_valve_settings_button.setIcon(tint_tabler_icon(flow_tabler_icon("settings"), muted_icon_color(self._theme_mode)))
         self.step_valve_settings_button.setIconSize(QSize(20, 20))
         self.step_valve_settings_button.setToolTip("Edit the text labels used for valve states.")
         self._set_step_valve_button_state("Open")
@@ -475,14 +477,14 @@ class ExperimentControlWindow(QWidget):
         self.step_switch_settings_button.setObjectName("flowSwitchSettingsButton")
         self.step_switch_settings_button.setAutoRaise(True)
         self.step_switch_settings_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.step_switch_settings_button.setIcon(tint_tabler_icon(flow_tabler_icon("settings"), QColor("#f0f3f7")))
+        self.step_switch_settings_button.setIcon(tint_tabler_icon(flow_tabler_icon("settings"), muted_icon_color(self._theme_mode)))
         self.step_switch_settings_button.setIconSize(QSize(20, 20))
         self.step_switch_settings_button.setToolTip("Edit the switch solution labels.")
         self.step_comment_display_button = QToolButton(self)
         self.step_comment_display_button.setObjectName("flowCommentDisplayButton")
         self.step_comment_display_button.setAutoRaise(True)
         self.step_comment_display_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.step_comment_display_button.setIcon(tint_tabler_icon(flow_tabler_icon("settings"), QColor("#f0f3f7")))
+        self.step_comment_display_button.setIcon(tint_tabler_icon(flow_tabler_icon("settings"), muted_icon_color(self._theme_mode)))
         self.step_comment_display_button.setIconSize(QSize(20, 20))
         self.step_comment_display_button.setToolTip(
             "Show all step comments on the pump display, and preview the 16-character limit."
@@ -582,7 +584,7 @@ class ExperimentControlWindow(QWidget):
             "Remove the selected step.",
         )
         self.apply_step_button = create_flow_step_action_button(
-            tint_tabler_icon(flow_tabler_icon("edit"), QColor("#e8d85f")),
+            tint_tabler_icon(flow_tabler_icon("edit"), muted_icon_color(self._theme_mode)),
             "Toggle table edit mode.",
         )
         self.apply_step_button.setCheckable(True)
@@ -697,7 +699,7 @@ class ExperimentControlWindow(QWidget):
         editor_header_row_layout.addWidget(self._experiment_control_view_mode_button)
         editor_header_row_layout.addStretch(1)
         editor_header_row_layout.addWidget(
-            make_help_button(EXPERIMENT_CONTROL_TOOLTIP, title=EXPERIMENT_CONTROL_TITLE, body=EXPERIMENT_CONTROL_BODY)
+            make_help_button(EXPERIMENT_CONTROL_TOOLTIP, title=EXPERIMENT_CONTROL_TITLE, body=EXPERIMENT_CONTROL_BODY, theme_mode=self._theme_mode)
         )
         editor_header_row_layout.addWidget(editor_hide_button)
         editor_header_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -956,19 +958,10 @@ class ExperimentControlWindow(QWidget):
         content.setLayout(content_layout)
 
         scroller = QScrollArea(self)
+        scroller.setObjectName("flowContentScrollArea")
         scroller.setWidgetResizable(True)
         scroller.setFrameShape(QFrame.Shape.NoFrame)
-        scroller.setStyleSheet(
-            """
-            QScrollArea {
-                background: %(bg)s;
-                border: none;
-            }
-            QScrollArea > QWidget > QWidget {
-                background: %(bg)s;
-            }
-            """ % palette
-        )
+        scroller.setStyleSheet(self._flow_scroll_area_style(palette))
         scroller.setWidget(content)
         outer_layout = QVBoxLayout()
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -2229,7 +2222,7 @@ class ExperimentControlWindow(QWidget):
 
     def _update_step_comment_display_button_icon(self) -> None:
         enabled = self._pump_display_enabled
-        color = QColor("#5fa8ff") if enabled else QColor("#f0f3f7")
+        color = accent_icon_color(self._theme_mode) if enabled else muted_icon_color(self._theme_mode)
         self.step_comment_display_button.setIcon(tint_tabler_icon(flow_tabler_icon("settings"), color))
         self.step_comment_display_button.setToolTip(
             "Pump display: showing all step comments. Click to configure."
@@ -2725,53 +2718,86 @@ class ExperimentControlWindow(QWidget):
     # ═══════════════════════════════════════════════════════════════════
 
     def _theme_palette(self) -> dict[str, str]:
+        palette = theme_palette(self._theme_mode)
         if self._theme_mode == "dark":
-            return {
-                "bg": "#13161b",
-                "fg": "#e6ebf1",
+            palette.update({
                 "muted": "#a8b0ba",
-                "field": "#171b21",
-                "button": "#20252d",
-                "button_hover": "#272d36",
-                "button_pressed": "#303640",
-                "accent_button": "#5d6876",
-                "accent_hover": "#707d8c",
                 "title": "#8fbaff",
-                "danger_button": "#8f5a61",
-                "danger_hover": "#a46a72",
-                "border": "#2b3138",
-                "border_hover": "#414852",
-                "pressed": "#252b33",
-                "scroll": "#49505a",
-                "scroll_hover": "#5c6470",
-                "splitter": "#2b3138",
                 "timeline_bg": "#0f1216",
                 "header": "#1b2026",
                 "selection": "#252b33",
+            })
+        else:
+            palette.update({
+                "muted": "#5f7388",
+                "title": "#2f80c1",
+                "timeline_bg": "#ffffff",
+                "header": "#eef3f7",
+                "selection": "#dbeafe",
+            })
+        return palette
+
+    def _flow_scroll_area_style(self, palette: dict[str, str]) -> str:
+        # Set directly on the QScrollArea (like the direction/help buttons),
+        # not inherited from the window's cascading stylesheet: an
+        # intermediate widget with its own explicit stylesheet - which this
+        # one already needed, for its background - stops descendants from
+        # picking up ancestor rules for selectors it doesn't mention itself,
+        # so QScrollBar has to be spelled out here too or it falls back to
+        # an unstyled native scrollbar.
+        return (
+            """
+            QScrollArea {
+                background: %(bg)s;
+                border: none;
             }
-        return {
-            "bg": "#f4f6f8",
-            "fg": "#1d2733",
-            "muted": "#5f7388",
-            "field": "#f4f6f8",
-            "button": "#eef3f7",
-            "button_hover": "#e6edf3",
-            "button_pressed": "#dde9f3",
-            "accent_button": "#2f80c1",
-            "accent_hover": "#3e8dcf",
-            "title": "#2f80c1",
-            "danger_button": "#d65a63",
-            "danger_hover": "#e06a73",
-            "border": "#d9e0e7",
-            "border_hover": "#9dbbd4",
-            "pressed": "#dde9f3",
-            "scroll": "#bcc9d5",
-            "scroll_hover": "#9fb3c5",
-            "splitter": "#dde5ec",
-            "timeline_bg": "#f4f6f8",
-            "header": "#eef3f7",
-            "selection": "#dbeafe",
-        }
+            QScrollArea > QWidget > QWidget {
+                background: %(bg)s;
+            }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 8px;
+                margin: 2px 0 2px 0;
+            }
+            QScrollBar::handle:vertical {
+                background: %(scroll)s;
+                border-radius: 4px;
+                min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: %(scroll_hover)s;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+                background: transparent;
+                border: none;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+            QScrollBar:horizontal {
+                background: transparent;
+                height: 8px;
+                margin: 0 2px 0 2px;
+            }
+            QScrollBar::handle:horizontal {
+                background: %(scroll)s;
+                border-radius: 4px;
+                min-width: 30px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: %(scroll_hover)s;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+                background: transparent;
+                border: none;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: transparent;
+            }
+            """ % palette
+        )
 
     def _apply_style(self) -> None:
         palette = self._theme_palette()
@@ -2870,7 +2896,7 @@ class ExperimentControlWindow(QWidget):
                 border: none;
                 padding: 0px;
                 margin: 0px;
-                color: #e8d85f;
+                color: %(mode_toggle_accent)s;
                 font-weight: 600;
             }
             QToolButton#flowViewModeButton:hover {
@@ -2916,7 +2942,7 @@ class ExperimentControlWindow(QWidget):
                 padding: 0px;
                 min-width: 18px;
                 min-height: 18px;
-                color: #f0f3f7;
+                color: %(muted)s;
             }
             QToolButton#flowValveSettingsButton {
                 background: transparent;
@@ -2924,7 +2950,7 @@ class ExperimentControlWindow(QWidget):
                 padding: 0px;
                 min-width: 18px;
                 min-height: 18px;
-                color: #f0f3f7;
+                color: %(muted)s;
             }
             QToolButton#flowSwitchModeButton:hover,
             QToolButton#flowSwitchSettingsButton:hover,
@@ -3009,6 +3035,7 @@ class ExperimentControlWindow(QWidget):
             }
             QTableView#flowControlTable QHeaderView::section {
                 background: %(header)s;
+                color: %(fg)s;
                 border: none;
                 border-right: 1px solid %(border)s;
                 border-bottom: 1px solid %(border)s;
@@ -3019,6 +3046,7 @@ class ExperimentControlWindow(QWidget):
             QScrollBar:vertical {
                 background: transparent;
                 width: 8px;
+                margin: 2px 0 2px 0;
             }
             QScrollBar::handle:vertical {
                 background: %(scroll)s;
@@ -3027,6 +3055,35 @@ class ExperimentControlWindow(QWidget):
             }
             QScrollBar::handle:vertical:hover {
                 background: %(scroll_hover)s;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+                background: transparent;
+                border: none;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+            QScrollBar:horizontal {
+                background: transparent;
+                height: 8px;
+                margin: 0 2px 0 2px;
+            }
+            QScrollBar::handle:horizontal {
+                background: %(scroll)s;
+                border-radius: 4px;
+                min-width: 30px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: %(scroll_hover)s;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+                background: transparent;
+                border: none;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: transparent;
             }
             QSplitter::handle {
                 background: %(splitter)s;
@@ -3349,6 +3406,19 @@ class ExperimentControlWindow(QWidget):
         self._update_experiment_control_toggle_button()
         self.timeline_widget.set_theme(self._theme_mode)
         self.timeline_widget.set_theme_palette(self._theme_palette())
+        muted = muted_icon_color(self._theme_mode)
+        self.color_palette_button.setIcon(tint_tabler_icon(flow_tabler_icon("settings"), muted))
+        self.step_valve_settings_button.setIcon(tint_tabler_icon(flow_tabler_icon("settings"), muted))
+        self.step_switch_settings_button.setIcon(tint_tabler_icon(flow_tabler_icon("settings"), muted))
+        self._update_step_comment_display_button_icon()
+        self._update_experiment_control_edit_mode_button()
+        for help_button in self.findChildren(QToolButton, "helpButton"):
+            apply_help_button_theme(help_button, self._theme_mode)
+        for direction_button in self.findChildren(QToolButton, "directionButton"):
+            apply_direction_button_theme(direction_button, self)
+        flow_scroll_area = self.findChild(QScrollArea, "flowContentScrollArea")
+        if flow_scroll_area is not None:
+            flow_scroll_area.setStyleSheet(self._flow_scroll_area_style(self._theme_palette()))
         self.theme_changed.emit(self._theme_mode)
 
     def _default_color_palette_entries(self) -> list[tuple[str, str]]:
@@ -4236,7 +4306,7 @@ class ExperimentControlWindow(QWidget):
         )
 
     def _set_experiment_control_edit_mode_button_icon(self, active: bool) -> None:
-        color = QColor("#ffd84d" if active else "#8a98a8")
+        color = QColor(self._theme_palette()["mode_toggle_accent"]) if active else muted_icon_color(self._theme_mode)
         self.apply_step_button.setIcon(tint_tabler_icon(flow_tabler_icon("edit"), color))
 
 

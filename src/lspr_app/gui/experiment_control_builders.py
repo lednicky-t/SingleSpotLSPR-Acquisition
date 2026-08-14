@@ -22,11 +22,8 @@ def create_flow_step_action_button(icon: QIcon, tooltip: str) -> QToolButton:
     return button
 
 
-def create_direction_button(window, direction: str) -> QToolButton:
-    button = QToolButton()
-    button.setObjectName("directionButton")
-    button.setFixedSize(30, 28)
-    button.setStyleSheet(
+def _direction_button_style(palette: dict[str, str]) -> str:
+    return (
         "QToolButton#directionButton {"
         " background: transparent;"
         " border: 1px solid %(border)s;"
@@ -36,10 +33,30 @@ def create_direction_button(window, direction: str) -> QToolButton:
         " font-size: 15px;"
         " font-weight: 800;"
         " color: %(fg)s;"
-        "}" % window._theme_palette()
-        + "QToolButton#directionButton:hover { background: %(button_hover)s; border-color: %(border_hover)s; }"
-        + "QToolButton#directionButton:pressed { background: %(button_pressed)s; }" % window._theme_palette()
-    )
+        "}"
+        "QToolButton#directionButton:hover { background: %(button_hover)s; border-color: %(border_hover)s; }"
+        "QToolButton#directionButton:pressed { background: %(button_pressed)s; }"
+    ) % palette
+
+
+def apply_direction_button_theme(button: QToolButton, window) -> None:
+    """Re-apply the direction button's style for window's current theme -
+    call on any persistent window's live theme switch. The style is set
+    directly on the button (like the "?" help bubble) rather than inherited
+    from the window's cascading stylesheet, so it needs the same explicit
+    refresh; previously it was only ever set once at construction, via a
+    string-concatenation bug that also silently dropped the :hover rule's
+    palette substitution (operator precedence made `%` bind to the last
+    literal only, so the middle :hover rule kept its raw "%(button_hover)s"
+    placeholders instead of real colors)."""
+    button.setStyleSheet(_direction_button_style(window._theme_palette()))
+
+
+def create_direction_button(window, direction: str) -> QToolButton:
+    button = QToolButton()
+    button.setObjectName("directionButton")
+    button.setFixedSize(30, 28)
+    apply_direction_button_theme(button, window)
     button.setToolTip("Pump direction")
     set_direction_button(window, button, direction)
     return button

@@ -74,7 +74,7 @@ def build_simulation_page(window) -> QWidget:
     simulation_info_row = QHBoxLayout()
     simulation_info_row.setContentsMargins(0, 0, 0, 0)
     simulation_info_row.setSpacing(2)
-    simulation_info_row.addWidget(make_help_button(SIMULATION_TOOLTIP, title=SIMULATION_TITLE, body=SIMULATION_BODY))
+    simulation_info_row.addWidget(make_help_button(SIMULATION_TOOLTIP, title=SIMULATION_TITLE, body=SIMULATION_BODY, theme_mode=window._theme_mode))
     simulation_info_row.addStretch(1)
     simulation_layout.addLayout(simulation_info_row, 0, 0, 1, 2)
 

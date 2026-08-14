@@ -141,7 +141,6 @@ def build_main_layout_for(window) -> None:
 
     trace_title = QLabel("Sensorgram")
     trace_title.setObjectName("sensorgramHeaderLabel")
-    trace_title.setStyleSheet("color: #8FE3A1;")
     window._update_sensorgram_metric_y_axis_mode_button()
     window.sensorgram_settings_button.clicked.connect(window._show_sensorgram_plot_settings_dialog)
 
@@ -216,7 +215,7 @@ def build_main_layout_for(window) -> None:
         "Spectral source",
         source_block,
         expanded=True,
-        header_widgets=[make_help_button(SPECTRAL_SOURCE_TOOLTIP, title=SPECTRAL_SOURCE_TITLE, body=SPECTRAL_SOURCE_BODY)],
+        header_widgets=[make_help_button(SPECTRAL_SOURCE_TOOLTIP, title=SPECTRAL_SOURCE_TITLE, body=SPECTRAL_SOURCE_BODY, theme_mode=window._theme_mode)],
     )
     source_section.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
     spectra_processing_section = CollapsibleSection(
@@ -226,7 +225,7 @@ def build_main_layout_for(window) -> None:
         header_widgets=[
             window.save_processing_button,
             window.load_processing_button,
-            make_help_button(SPECTRA_PROCESSING_TOOLTIP, title=SPECTRA_PROCESSING_TITLE, body=SPECTRA_PROCESSING_BODY),
+            make_help_button(SPECTRA_PROCESSING_TOOLTIP, title=SPECTRA_PROCESSING_TITLE, body=SPECTRA_PROCESSING_BODY, theme_mode=window._theme_mode),
         ],
     )
     session_top_row = QHBoxLayout()
@@ -254,7 +253,7 @@ def build_main_layout_for(window) -> None:
         "Session",
         session_block,
         expanded=False,
-        header_widgets=[make_help_button(SESSION_TOOLTIP, title=SESSION_TITLE, body=SESSION_BODY)],
+        header_widgets=[make_help_button(SESSION_TOOLTIP, title=SESSION_TITLE, body=SESSION_BODY, theme_mode=window._theme_mode)],
     )
 
     log_header_row = QHBoxLayout()
@@ -280,7 +279,7 @@ def build_main_layout_for(window) -> None:
         "Log",
         log_block,
         expanded=True,
-        header_widgets=[make_help_button(LOG_TOOLTIP, title=LOG_TITLE, body=LOG_BODY)],
+        header_widgets=[make_help_button(LOG_TOOLTIP, title=LOG_TITLE, body=LOG_BODY, theme_mode=window._theme_mode)],
     )
     log_section.setVisible(bool(getattr(window, "_diagnostics_panel_enabled", False)))
 
@@ -300,7 +299,6 @@ def build_main_layout_for(window) -> None:
     tool_panel_title_layout.setSpacing(6)
     tool_panel_title = QLabel("Tool panel")
     tool_panel_title.setObjectName("toolPanelTitleLabel")
-    tool_panel_title.setStyleSheet("font-size: 13px; font-weight: 800; letter-spacing: 0.8px; color: #e0a84a;")
     tool_panel_title_layout.addWidget(tool_panel_title)
     _add_hide_panel_button(
         tool_panel_title_layout, window, "Hide left controls.", lambda: window._toggle_left_controls(False)
