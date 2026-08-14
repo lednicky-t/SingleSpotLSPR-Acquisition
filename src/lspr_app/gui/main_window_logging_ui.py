@@ -8,6 +8,7 @@ from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import QTextEdit, QToolButton
 
 from lspr_app.diagnostics import DiagnosticsConfig
+from lspr_app.gui.icon_helpers import accent_icon_color, muted_icon_color
 from lspr_app.gui.logging_utils import GuiLogBridge, GuiLogHandler, SUCCESS_LOG_LEVEL
 from lspr_ui import flow_tabler_icon, tint_tabler_icon
 
@@ -168,14 +169,14 @@ def initialize_logging_ui_for(window) -> None:
     window._set_log_view_mode("all", refresh=False)
 
     window.log_font_down_button = window._make_frameless_icon_button(
-        tint_tabler_icon(flow_tabler_icon("minus"), QColor("#e6ebf1")),
+        tint_tabler_icon(flow_tabler_icon("minus"), muted_icon_color(window._theme_mode)),
         "Decrease log panel font size.",
         size=24,
         parent=window,
     )
     window.log_font_down_button.clicked.connect(window._decrease_log_terminal_font_size)
     window.log_font_up_button = window._make_frameless_icon_button(
-        tint_tabler_icon(flow_tabler_icon("plus"), QColor("#8fbaff")),
+        tint_tabler_icon(flow_tabler_icon("plus"), accent_icon_color(window._theme_mode)),
         "Increase log panel font size.",
         size=24,
         parent=window,
@@ -183,7 +184,7 @@ def initialize_logging_ui_for(window) -> None:
     window.log_font_up_button.clicked.connect(window._increase_log_terminal_font_size)
 
     window.log_follow_button = window._make_frameless_icon_button(
-        tint_tabler_icon(flow_tabler_icon("arrow_autofit_down"), QColor("#e6ebf1")),
+        tint_tabler_icon(flow_tabler_icon("arrow_autofit_down"), muted_icon_color(window._theme_mode)),
         "Keep the log scrolled to the newest entry.",
         size=24,
         parent=window,
@@ -191,7 +192,7 @@ def initialize_logging_ui_for(window) -> None:
     window.log_follow_button.setCheckable(True)
     window.log_follow_button.setChecked(True)
     window.log_copy_button = window._make_frameless_icon_button(
-        tint_tabler_icon(flow_tabler_icon("copy"), QColor("#8fbaff")),
+        tint_tabler_icon(flow_tabler_icon("copy"), accent_icon_color(window._theme_mode)),
         "Copy the visible log text to the clipboard.",
         size=24,
         parent=window,

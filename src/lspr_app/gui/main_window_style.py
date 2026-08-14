@@ -75,7 +75,17 @@ def apply_modern_style_for(window) -> None:
             margin: 0px;
         }
         QLabel#sensorgramHeaderLabel {
-            color: %(title)s;
+            color: %(sensorgram_accent)s;
+            font-size: 13px;
+            font-weight: 800;
+            letter-spacing: 0.8px;
+            background: transparent;
+            border: none;
+            padding: 0px;
+            margin: 0px;
+        }
+        QLabel#toolPanelTitleLabel {
+            color: %(tool_panel_accent)s;
             font-size: 13px;
             font-weight: 800;
             letter-spacing: 0.8px;
@@ -121,7 +131,7 @@ def apply_modern_style_for(window) -> None:
             border: none;
             padding: 0px;
             margin: 0px;
-            color: #e8d85f;
+            color: %(mode_toggle_accent)s;
             font-weight: 600;
         }
         QToolButton#sensorgramViewModeButton:hover,
@@ -150,10 +160,10 @@ def apply_modern_style_for(window) -> None:
         }
         QToolButton#sensorgramSecondaryAxisToggleButton,
         QToolButton#spectrumResidualToggleButton {
-            color: #7a8291;
+            color: %(mode_toggle_muted)s;
         }
         QToolButton#spectrumResidualToggleButton:checked {
-            color: #e8d85f;
+            color: %(mode_toggle_accent)s;
         }
         QToolButton#sensorgramSecondaryAxisMetricButton::menu-indicator,
         QToolButton#spectrumPlotModeButton::menu-indicator {
@@ -295,6 +305,7 @@ def apply_modern_style_for(window) -> None:
         }
         QMenuBar::item {
             background: transparent;
+            color: %(fg)s;
             padding: 4px 10px;
             margin: 2px 2px;
             border-radius: 4px;
@@ -312,6 +323,7 @@ def apply_modern_style_for(window) -> None:
             padding: 4px;
         }
         QMenu::item {
+            color: %(fg)s;
             padding: 4px 20px 4px 20px;
             border-radius: 4px;
         }
@@ -539,12 +551,27 @@ def style_plot_widgets_for(window) -> None:
         left_axis.setTextPen(pg.mkPen(palette["axis_text"]))
         bottom_axis.setPen(pg.mkPen(palette["axis_pen"]))
         left_axis.setPen(pg.mkPen(palette["axis_pen"]))
+        # setTextPen only colors the tick numbers - the axis *title* ("Wavelength
+        # (nm)", "Signal", ...) is a separate pyqtgraph style (labelStyle) that
+        # defaults to a fixed light gray meant for a dark plot background.
+        # setLabel(text=None, ...) would blank the title, so the current text
+        # (possibly still "" this early - e.g. trace_plot's bottom-axis label
+        # text is set later, by sensorgram mode setup) is re-supplied rather
+        # than omitted. Called unconditionally, even with empty text: pyqtgraph
+        # stores labelStyle regardless and only *renders* it once real text
+        # eventually arrives, and that later setLabel(text) call - happening
+        # elsewhere, on its own schedule, without a color kwarg - leaves
+        # whatever labelStyle is already stored untouched rather than
+        # resetting it, so priming it here still takes effect then.
+        bottom_axis.setLabel(bottom_axis.labelText, color=palette["axis_text"])
+        left_axis.setLabel(left_axis.labelText, color=palette["axis_text"])
         plot.getPlotItem().titleLabel.item.setDefaultTextColor(QColor(palette["fg"]))
         plot.getPlotItem().showGrid(x=True, y=True, alpha=0.16 if window._theme_mode == "dark" else 0.18)
     if hasattr(window, "residual_axis"):
         window.residual_axis.setStyle(tickTextOffset=2)
         window.residual_axis.setTextPen(pg.mkPen(palette["axis_text"]))
         window.residual_axis.setPen(pg.mkPen(palette["axis_pen"]))
+        window.residual_axis.setLabel(window.residual_axis.labelText, color=palette["axis_text"])
     for slot in SECONDARY_AXIS_SLOTS:
         suffix = "" if slot == "a" else f"_{slot}"
         secondary_axis_item = getattr(window, f"secondary_axis{suffix}", None)
@@ -567,6 +594,7 @@ def style_plot_widgets_for(window) -> None:
         metric_color = secondary_axis_color_for(window, secondary_axis_metric_for(window, slot))
         secondary_axis_item.setTextPen(pg.mkPen(metric_color))
         secondary_axis_item.setPen(pg.mkPen(metric_color))
+        secondary_axis_item.setLabel(secondary_axis_item.labelText, color=metric_color)
     crosshair_color = "#7f93a8" if window._theme_mode == "dark" else "#666666"
     window.spectrum_vline.setPen(pg.mkPen(crosshair_color, width=1))
     window.spectrum_hline.setPen(pg.mkPen(crosshair_color, width=1))

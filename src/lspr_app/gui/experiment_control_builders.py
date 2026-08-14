@@ -7,6 +7,7 @@ here so every existing `from lspr_app.gui.experiment_control_builders import
 from __future__ import annotations
 
 from lspr_acq_shell.experiment_control_builders import (
+    apply_direction_button_theme,
     create_direction_button,
     create_flow_step_action_button,
     direction_glyph,
@@ -15,6 +16,7 @@ from lspr_acq_shell.experiment_control_builders import (
 )
 
 __all__ = [
+    "apply_direction_button_theme",
     "create_direction_button",
     "create_flow_step_action_button",
     "direction_glyph",

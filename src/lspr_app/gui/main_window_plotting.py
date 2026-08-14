@@ -1315,18 +1315,22 @@ _CORNER_OVERLAY_OBJECT_NAMES = (
 )
 
 
-def _style_corner_overlay_container(container: QWidget) -> None:
+def _style_corner_overlay_container(container: QWidget, theme_mode: str = "dark") -> None:
     container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-    # Deliberately theme-invariant (not %(fg)s/%(bg)s from main_window_style.py):
-    # this box needs to stay readable sitting on top of whatever the plot is
-    # currently drawing underneath it, in either light or dark app theme, so a
-    # fixed dark translucent backdrop + fixed light text is safer than
-    # tracking the app theme.
+    # Not %(fg)s/%(bg)s from main_window_style.py: this box needs to stay
+    # readable sitting on top of whatever the plot is currently drawing
+    # underneath it, so it uses its own translucent backdrop rather than the
+    # app's plain background - but that backdrop still has to be dark in
+    # Dark theme and light in Light theme, or it reads as a mismatched island
+    # floating over the plot (a translucent dark chip on a white plot looks
+    # broken even though the text on it is technically legible).
+    backdrop = "rgba(15, 17, 20, 0.72)" if theme_mode == "dark" else "rgba(255, 255, 255, 0.85)"
+    text_color = "#d7dee6" if theme_mode == "dark" else "#1d2733"
     selectors = ", ".join(f"QWidget#{name}" for name in _CORNER_OVERLAY_OBJECT_NAMES)
     label_selectors = ", ".join(f"QWidget#{name} QLabel" for name in _CORNER_OVERLAY_OBJECT_NAMES)
     container.setStyleSheet(
-        f"{selectors} {{ background: rgba(15, 17, 20, 0.72); border-radius: 6px; }}"
-        f" {label_selectors} {{ background: transparent; color: #d7dee6; }}"
+        f"{selectors} {{ background: {backdrop}; border-radius: 6px; }}"
+        f" {label_selectors} {{ background: transparent; color: {text_color}; }}"
     )
 
 
@@ -1376,7 +1380,7 @@ class _CornerOverlayContainer(QWidget):
         event.accept()
 
 
-def _make_corner_overlay_container(parent_viewport, object_name: str, label, plot_widget) -> QWidget:
+def _make_corner_overlay_container(parent_viewport, object_name: str, label, plot_widget, theme_mode: str = "dark") -> QWidget:
     container = _CornerOverlayContainer(parent_viewport, plot_widget)
     container.setObjectName(object_name)
     layout = QVBoxLayout()
@@ -1384,7 +1388,7 @@ def _make_corner_overlay_container(parent_viewport, object_name: str, label, plo
     layout.setSpacing(2)
     layout.addWidget(label)
     container.setLayout(layout)
-    _style_corner_overlay_container(container)
+    _style_corner_overlay_container(container, theme_mode)
     return container
 
 
@@ -1406,19 +1410,19 @@ def build_spectrum_corner_overlay_for(window) -> None:
     # (see toggle_spectrum_stats_enabled_for/toggle_spectrum_cursor_enabled_for)
     # still turns them on per-session.
     window._spectrum_stats_enabled = False
-    window._spectrum_stats_off_icon = stats_hidden_icon()
+    window._spectrum_stats_off_icon = stats_hidden_icon(window._theme_mode)
     _show_off_state(window.spectrum_stats_label, window._spectrum_stats_off_icon, _STATS_OFF_TEXT)
     window.spectrum_cursor_label.setCursor(Qt.CursorShape.PointingHandCursor)
     window.spectrum_cursor_label.setToolTip(
         "Spectrum cursor readout under the mouse pointer. Click to show/hide (also hides the plot crosshair)."
     )
     window._spectrum_cursor_enabled = False
-    window._spectrum_cursor_off_icon = crosshair_cursor_icon()
+    window._spectrum_cursor_off_icon = crosshair_cursor_icon(window._theme_mode)
     _show_off_state(window.spectrum_cursor_label, window._spectrum_cursor_off_icon, _CURSOR_OFF_TEXT)
 
     viewport = window.spectrum_plot.viewport()
-    window.spectrum_stats_overlay = _make_corner_overlay_container(viewport, "spectrumStatsOverlay", window.spectrum_stats_label, window.spectrum_plot)
-    window.spectrum_cursor_overlay = _make_corner_overlay_container(viewport, "spectrumCursorOverlay", window.spectrum_cursor_label, window.spectrum_plot)
+    window.spectrum_stats_overlay = _make_corner_overlay_container(viewport, "spectrumStatsOverlay", window.spectrum_stats_label, window.spectrum_plot, window._theme_mode)
+    window.spectrum_cursor_overlay = _make_corner_overlay_container(viewport, "spectrumCursorOverlay", window.spectrum_cursor_label, window.spectrum_plot, window._theme_mode)
     window.spectrum_cursor_label.installEventFilter(window)
 
     window.spectrum_plot.getPlotItem().vb.sigResized.connect(window._reposition_spectrum_corner_overlay)
@@ -1442,19 +1446,19 @@ def build_trace_corner_overlay_for(window) -> None:
     # See the matching comment in build_spectrum_corner_overlay_for - both
     # plots' in-plot stats and cursor/crosshair start hidden by default.
     window._trace_stats_enabled = False
-    window._trace_stats_off_icon = stats_hidden_icon()
+    window._trace_stats_off_icon = stats_hidden_icon(window._theme_mode)
     _show_off_state(window.trace_stats_label, window._trace_stats_off_icon, _STATS_OFF_TEXT)
     window.trace_cursor_label.setCursor(Qt.CursorShape.PointingHandCursor)
     window.trace_cursor_label.setToolTip(
         "Metric cursor readout under the mouse pointer. Click to show/hide (also hides the plot crosshair)."
     )
     window._trace_cursor_enabled = False
-    window._trace_cursor_off_icon = crosshair_cursor_icon()
+    window._trace_cursor_off_icon = crosshair_cursor_icon(window._theme_mode)
     _show_off_state(window.trace_cursor_label, window._trace_cursor_off_icon, _CURSOR_OFF_TEXT)
 
     viewport = window.trace_plot.viewport()
-    window.trace_stats_overlay = _make_corner_overlay_container(viewport, "traceStatsOverlay", window.trace_stats_label, window.trace_plot)
-    window.trace_cursor_overlay = _make_corner_overlay_container(viewport, "traceCursorOverlay", window.trace_cursor_label, window.trace_plot)
+    window.trace_stats_overlay = _make_corner_overlay_container(viewport, "traceStatsOverlay", window.trace_stats_label, window.trace_plot, window._theme_mode)
+    window.trace_cursor_overlay = _make_corner_overlay_container(viewport, "traceCursorOverlay", window.trace_cursor_label, window.trace_plot, window._theme_mode)
     window.trace_cursor_label.installEventFilter(window)
 
     window.trace_plot.getPlotItem().vb.sigResized.connect(window._reposition_trace_corner_overlay)
@@ -1586,3 +1590,28 @@ def toggle_trace_stats_enabled_for(window) -> None:
     else:
         _show_off_state(window.trace_stats_label, getattr(window, "_trace_stats_off_icon", None), _STATS_OFF_TEXT)
     reposition_trace_corner_overlay_for(window)
+
+
+def update_corner_overlay_theme_for(window) -> None:
+    """Re-style the four corner-overlay boxes (spectrum/trace stats & cursor)
+    and their cached "off" icons for the current window._theme_mode - call
+    on every theme switch, since _style_corner_overlay_container's colors
+    are baked into each container's own stylesheet at build time, not
+    inherited from the app-wide one."""
+    theme_mode = window._theme_mode
+    for overlay_attr in ("spectrum_stats_overlay", "spectrum_cursor_overlay", "trace_stats_overlay", "trace_cursor_overlay"):
+        container = getattr(window, overlay_attr, None)
+        if container is not None:
+            _style_corner_overlay_container(container, theme_mode)
+    window._spectrum_stats_off_icon = stats_hidden_icon(theme_mode)
+    window._spectrum_cursor_off_icon = crosshair_cursor_icon(theme_mode)
+    window._trace_stats_off_icon = stats_hidden_icon(theme_mode)
+    window._trace_cursor_off_icon = crosshair_cursor_icon(theme_mode)
+    if not getattr(window, "_spectrum_stats_enabled", True):
+        _show_off_state(window.spectrum_stats_label, window._spectrum_stats_off_icon, _STATS_OFF_TEXT)
+    if not getattr(window, "_spectrum_cursor_enabled", True):
+        _show_off_state(window.spectrum_cursor_label, window._spectrum_cursor_off_icon, _CURSOR_OFF_TEXT)
+    if not getattr(window, "_trace_stats_enabled", True):
+        _show_off_state(window.trace_stats_label, window._trace_stats_off_icon, _STATS_OFF_TEXT)
+    if not getattr(window, "_trace_cursor_enabled", True):
+        _show_off_state(window.trace_cursor_label, window._trace_cursor_off_icon, _CURSOR_OFF_TEXT)

@@ -35,7 +35,8 @@ from lspr_ui import CompactWedgeSlider
 
 from lspr_app.gui.ui_helpers import make_compact_spinbox
 from lspr_app.gui.main_window_processing import normalize_sensorgram_metric_name, sensorgram_metric_order
-from lspr_app.gui.icon_helpers import flow_tabler_icon, tint_tabler_icon
+from lspr_app.gui.icon_helpers import flow_tabler_icon, muted_icon_color, tint_tabler_icon
+from lspr_app.gui.theme_palette import theme_palette
 from lspr_app.storage.app_config import load_app_setting, save_app_setting
 
 
@@ -332,9 +333,11 @@ class MetricModeSelector(QWidget):
             row.color_button.set_color(metric_color)
             row.label.setStyleSheet(f"font-weight: 700; color: {metric_color};" if primary else f"color: {metric_color};")
             row.label.setToolTip(f"{mode}: {description}")
+            star_palette = theme_palette(str(getattr(self._window, "_theme_mode", "dark")))
+            star_color = star_palette["mode_toggle_accent"] if primary else star_palette["mode_toggle_muted"]
             row.star_label.setStyleSheet(
                 "QToolButton { background: transparent; border: none; padding: 0px; margin: 0px; "
-                f"color: {'#f2c94c' if primary else '#8a8a8a'}; font-size: 16px; font-weight: 700; }}"
+                f"color: {star_color}; font-size: 16px; font-weight: 700; }}"
             )
 
     def _emit_state_changed(self) -> None:
@@ -760,7 +763,7 @@ class SensorgramPlotSettingsDialog(QDialog):
         # "bottom", bar-to-top for "top") - the tooltip below carries the
         # "click to move it to..." destination text instead.
         icon_name = "arrow_bar_to_down" if position == "bottom" else "arrow_bar_to_up"
-        button.setIcon(tint_tabler_icon(flow_tabler_icon(icon_name), QColor("#f0f3f7")))
+        button.setIcon(tint_tabler_icon(flow_tabler_icon(icon_name), muted_icon_color(self._window._theme_mode)))
         button.setToolTip(
             "Timeline at the bottom. Click to move it to the top."
             if position == "bottom"

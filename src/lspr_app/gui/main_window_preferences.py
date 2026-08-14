@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from lspr_app.gui.theme_palette import theme_palette
 from lspr_app.gui.undo_support import DEFAULT_UNDO_HISTORY_SIZE
 from lspr_app.storage import user_profile
 
@@ -39,27 +40,29 @@ _GUI_LOG_LEVELS = [
 # invisible text - this instance-level stylesheet overrides that (Qt's
 # cascade lets a widget's own stylesheet win over an ancestor/application
 # one) just for these boxes, without touching the shared app-wide style.
-_SECTION_BOX_STYLE = (
-    "QGroupBox {"
-    " border: 1px solid rgba(255, 255, 255, 0.10);"
-    " border-radius: 6px;"
-    " margin-top: 8px;"
-    " padding-top: 14px;"
-    "}"
-    "QGroupBox::title {"
-    " subcontrol-origin: margin;"
-    " subcontrol-position: top left;"
-    " left: 9px;"
-    " padding: 0px 4px;"
-    " color: #9fb3c5;"
-    " font-weight: 700;"
-    "}"
-)
+def _section_box_style(theme_mode: str) -> str:
+    palette = theme_palette(theme_mode)
+    return (
+        "QGroupBox {"
+        f" border: 1px solid {palette['section_box_border']};"
+        " border-radius: 6px;"
+        " margin-top: 8px;"
+        " padding-top: 14px;"
+        "}"
+        "QGroupBox::title {"
+        " subcontrol-origin: margin;"
+        " subcontrol-position: top left;"
+        " left: 9px;"
+        " padding: 0px 4px;"
+        f" color: {palette['section_box_title']};"
+        " font-weight: 700;"
+        "}"
+    )
 
 
-def _make_section_box(title: str) -> QGroupBox:
+def _make_section_box(title: str, theme_mode: str) -> QGroupBox:
     box = QGroupBox(title)
-    box.setStyleSheet(_SECTION_BOX_STYLE)
+    box.setStyleSheet(_section_box_style(theme_mode))
     return box
 
 
@@ -196,6 +199,7 @@ class PreferencesDialog(QDialog):
         self._fit_to_available_screen()
 
     def _build_ui(self) -> None:
+        theme_mode = str(getattr(self._window, "_theme_mode", "dark"))
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
@@ -216,7 +220,7 @@ class PreferencesDialog(QDialog):
         layout.setSpacing(10)
 
         # ── Appearance ────────────────────────────────────────────────────────
-        appearance_box = _make_section_box("Appearance")
+        appearance_box = _make_section_box("Appearance", theme_mode)
         appearance_layout = QFormLayout(appearance_box)
         appearance_layout.setHorizontalSpacing(16)
         appearance_layout.setVerticalSpacing(8)
@@ -224,7 +228,7 @@ class PreferencesDialog(QDialog):
         appearance_layout.addRow("Timing display unit", self.timing_unit_combo)
 
         # ── Users ─────────────────────────────────────────────────────────────
-        users_box = _make_section_box("Users")
+        users_box = _make_section_box("Users", theme_mode)
         users_layout = QVBoxLayout(users_box)
         users_layout.setSpacing(6)
         users_layout.addWidget(self.user_list)
@@ -235,7 +239,7 @@ class PreferencesDialog(QDialog):
         users_layout.addLayout(user_button_row)
 
         # ── Startup ───────────────────────────────────────────────────────────
-        startup_box = _make_section_box("Startup")
+        startup_box = _make_section_box("Startup", theme_mode)
         startup_layout = QFormLayout(startup_box)
         startup_layout.setHorizontalSpacing(16)
         startup_layout.setVerticalSpacing(8)
@@ -244,7 +248,7 @@ class PreferencesDialog(QDialog):
         startup_layout.addRow(self.confirm_exit_check)
 
         # ── Acquisition & storage ─────────────────────────────────────────────
-        acquisition_box = _make_section_box("Acquisition && storage")
+        acquisition_box = _make_section_box("Acquisition && storage", theme_mode)
         acquisition_layout = QFormLayout(acquisition_box)
         acquisition_layout.setHorizontalSpacing(16)
         acquisition_layout.setVerticalSpacing(8)
@@ -253,7 +257,7 @@ class PreferencesDialog(QDialog):
         acquisition_layout.addRow("Default live rate", self.default_live_rate_spin)
 
         # ── Performance ───────────────────────────────────────────────────────
-        performance_box = _make_section_box("Performance")
+        performance_box = _make_section_box("Performance", theme_mode)
         performance_layout = QFormLayout(performance_box)
         performance_layout.setHorizontalSpacing(16)
         performance_layout.setVerticalSpacing(8)
@@ -265,7 +269,7 @@ class PreferencesDialog(QDialog):
         performance_layout.addRow("Undo history size", self.undo_history_size_spin)
 
         # ── Developer ─────────────────────────────────────────────────────────
-        developer_box = _make_section_box("Developer")
+        developer_box = _make_section_box("Developer", theme_mode)
         developer_layout = QFormLayout(developer_box)
         developer_layout.setHorizontalSpacing(16)
         developer_layout.setVerticalSpacing(8)

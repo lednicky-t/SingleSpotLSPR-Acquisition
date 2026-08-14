@@ -90,8 +90,11 @@ from lspr_app.gui.main_window_runtime_state import UiRefreshState
 from lspr_app.gui.sensorgram_display_state import SensorgramDisplayState
 from lspr_app.gui.ui_persistence import UIPersistenceBinder
 from lspr_app.gui.undo_support import DEFAULT_UNDO_HISTORY_SIZE, push_snapshot
+from lspr_app.gui.theme_palette import theme_palette
 from lspr_app.gui.icon_helpers import (
+    accent_icon_color,
     dark_icon,
+    muted_icon_color,
     reference_icon,
     reload_icon,
     flow_tabler_icon,
@@ -318,6 +321,7 @@ from lspr_app.gui.main_window_plotting import (
     toggle_trace_cursor_enabled_for,
     toggle_spectrum_stats_enabled_for,
     toggle_trace_stats_enabled_for,
+    update_corner_overlay_theme_for,
 )
 from lspr_app.gui.plot_view_cache import (
     PlotViewCache,
@@ -371,7 +375,7 @@ from lspr_app.gui.acquisition_controller import (
     update_measurement_toggle_button,
     update_window_mode_label,
 )
-from lspr_app.gui.panel_help import make_help_button
+from lspr_app.gui.panel_help import apply_help_button_theme, make_help_button
 from lspr_app.gui.panel_help_text import STATUS_READOUTS_BODY, STATUS_READOUTS_TITLE
 from lspr_app.gui.shortcut_help import build_shortcuts_help_text
 from lspr_app.gui.spectrum_plot_controller import (
@@ -828,9 +832,6 @@ class MainWindow(QMainWindow):
         self._acquisition_state = load_acquisition_state()
         loaded_theme = str(load_app_setting("theme_mode", "dark"))
         self._theme_mode = "dark" if loaded_theme not in {"light", "dark"} else loaded_theme
-        if self._theme_mode != "dark":
-            self._theme_mode = "dark"
-            save_app_setting("theme_mode", self._theme_mode)
         loaded_timing_unit = str(load_app_setting("timing_display_unit", "hz"))
         self._timing_display_unit = loaded_timing_unit if loaded_timing_unit in {"hz", "ms"} else "hz"
         self.undo_stack = QUndoStack(self)
@@ -938,7 +939,7 @@ class MainWindow(QMainWindow):
         self.sensorgram_metric_y_axis_mode_button.clicked.connect(self._cycle_sensorgram_metric_y_axis_mode)
         self._update_sensorgram_metric_y_axis_mode_button()
         self.sensorgram_settings_button = self._make_frameless_icon_button(
-            tint_tabler_icon(flow_tabler_icon("settings"), QColor("#f0f3f7")),
+            tint_tabler_icon(flow_tabler_icon("settings"), muted_icon_color(self._theme_mode)),
             "Open sensorgram plot settings.",
             size=30,
         )
@@ -1162,7 +1163,7 @@ class MainWindow(QMainWindow):
         self.experiment_name_edit.setFrame(False)
         self.experiment_name_edit.setFixedHeight(24)
         self.measurement_compression_button = self._make_frameless_icon_button(
-            storage_compression_icon(self._hdf5_compression_enabled),
+            storage_compression_icon(self._hdf5_compression_enabled, self._theme_mode),
             "Toggle post-recording gzip compression for the finished HDF5 measurement file.",
             size=24,
         )
@@ -1219,12 +1220,12 @@ class MainWindow(QMainWindow):
         self.correct_nonlinearity_check.setChecked(True)
 
         self.acquire_dark_button = self._make_frameless_icon_button(
-            dark_icon(False),
+            dark_icon(False, self._theme_mode),
             "Acquire dark spectrum",
             size=30,
         )
         self.acquire_reference_button = self._make_frameless_icon_button(
-            reference_icon(False),
+            reference_icon(False, self._theme_mode),
             "Acquire reference spectrum",
             size=30,
         )
@@ -1265,6 +1266,7 @@ class MainWindow(QMainWindow):
             title=STATUS_READOUTS_TITLE,
             body=STATUS_READOUTS_BODY,
             parent=self,
+            theme_mode=self._theme_mode,
         )
         self.spectrometer_stats_label = _make_footer_label(
             QLabel,
@@ -1869,13 +1871,13 @@ class MainWindow(QMainWindow):
         self.session_stats_record_button.setChecked(False)
         self.session_stats_record_button.clicked.connect(self._toggle_session_stats_recording)
         self.session_font_down_button = self._make_frameless_icon_button(
-            tint_tabler_icon(flow_tabler_icon("minus"), QColor("#e6ebf1")),
+            tint_tabler_icon(flow_tabler_icon("minus"), muted_icon_color(self._theme_mode)),
             "Decrease session panel font size.",
             size=24,
         )
         self.session_font_down_button.clicked.connect(self._decrease_session_summary_font_size)
         self.session_font_up_button = self._make_frameless_icon_button(
-            tint_tabler_icon(flow_tabler_icon("plus"), QColor("#8fbaff")),
+            tint_tabler_icon(flow_tabler_icon("plus"), accent_icon_color(self._theme_mode)),
             "Increase session panel font size.",
             size=24,
         )
@@ -2127,7 +2129,7 @@ class MainWindow(QMainWindow):
             self.measurement_compression_button.blockSignals(False)
             if not bool(getattr(self, "_measurement_compression_task", None)):
                 self.measurement_compression_button.setIcon(
-                    storage_compression_icon(self._hdf5_compression_enabled)
+                    storage_compression_icon(self._hdf5_compression_enabled, self._theme_mode)
                 )
         state_text = "enabled" if self._hdf5_compression_enabled else "disabled"
         self._log_info(f"HDF5 compression {state_text}.")
@@ -2162,13 +2164,13 @@ class MainWindow(QMainWindow):
             return
         if bool(getattr(self, "_measurement_compression_task", None)):
             if bool(getattr(self, "_measurement_compression_blink_visible", True)):
-                button.setIcon(storage_compression_icon(self._hdf5_compression_enabled))
+                button.setIcon(storage_compression_icon(self._hdf5_compression_enabled, self._theme_mode))
             else:
                 blank = QIcon()
                 button.setIcon(blank)
             button.setToolTip("Compressing finished measurement file...")
             return
-        button.setIcon(storage_compression_icon(self._hdf5_compression_enabled))
+        button.setIcon(storage_compression_icon(self._hdf5_compression_enabled, self._theme_mode))
         button.setToolTip("Toggle post-recording gzip compression for the finished HDF5 measurement file.")
 
     def _set_status_indicator(
@@ -2208,31 +2210,16 @@ class MainWindow(QMainWindow):
         refresh_hw_device_status_strip(self)
 
     def _theme_palette(self) -> dict[str, str]:
+        palette = theme_palette(self._theme_mode)
         if self._theme_mode == "dark":
-            return {
-                "bg": "#13161b",
-                "fg": "#e6ebf1",
+            palette.update({
                 "muted": "#a8b0ba",
                 "panel": "#15191f",
-                "field": "#171b21",
-                "button": "#20252d",
-                "button_hover": "#272d36",
-                "button_pressed": "#303640",
-                "accent_button": "#5d6876",
-                "accent_hover": "#707d8c",
                 "checkbox_accent": "#3a86d1",
-                "danger_button": "#8f5a61",
-                "danger_hover": "#a46a72",
-                "border": "#2b3138",
-                "border_hover": "#414852",
-                "pressed": "#252b33",
                 "tab": "#1b2026",
                 "tab_selected": "#13161b",
                 "accent": "#b2bac4",
                 "title": "#b2bac4",
-                "scroll": "#49505a",
-                "scroll_hover": "#5c6470",
-                "splitter": "#2b3138",
                 "splitter_hover": "#404854",
                 "plot_bg": "#0f1216",
                 "plot_border": "#2b3138",
@@ -2240,39 +2227,25 @@ class MainWindow(QMainWindow):
                 "axis_pen": "#39404a",
                 "grid": "#232830",
                 "window": "#101318",
-            }
-        return {
-            "bg": "#f4f6f8",
-            "fg": "#1d2733",
-            "muted": "#243241",
-            "panel": "#f4f6f8",
-            "field": "#f4f6f8",
-            "button": "#eef3f7",
-            "button_hover": "#e6edf3",
-            "button_pressed": "#dde9f3",
-            "accent_button": "#2f80c1",
-            "accent_hover": "#3e8dcf",
-            "checkbox_accent": "#2f80c1",
-            "danger_button": "#d65a63",
-            "danger_hover": "#e06a73",
-            "border": "#d9e0e7",
-            "border_hover": "#9dbbd4",
-            "pressed": "#dde9f3",
-            "tab": "#e8eef3",
-            "tab_selected": "#f4f6f8",
-            "accent": "#2f80c1",
-            "title": "#2f80c1",
-            "scroll": "#bcc9d5",
-            "scroll_hover": "#9fb3c5",
-            "splitter": "#dde5ec",
-            "splitter_hover": "#c7d5e2",
-            "plot_bg": "#ffffff",
-            "plot_border": "#d9e0e7",
-            "axis_text": "#5e7288",
-            "axis_pen": "#c8d3dd",
-            "grid": "#d8e2ea",
-            "window": "#f4f6f8",
-        }
+            })
+        else:
+            palette.update({
+                "muted": "#243241",
+                "panel": "#ffffff",
+                "checkbox_accent": "#2f80c1",
+                "tab": "#e8eef3",
+                "tab_selected": "#ffffff",
+                "accent": "#2f80c1",
+                "title": "#2f80c1",
+                "splitter_hover": "#c7d5e2",
+                "plot_bg": "#ffffff",
+                "plot_border": "#d9e0e7",
+                "axis_text": "#3f4c59",
+                "axis_pen": "#c8d3dd",
+                "grid": "#d8e2ea",
+                "window": "#ffffff",
+            })
+        return palette
 
     def _apply_modern_style(self) -> None:
         apply_modern_style_for(self)
@@ -2287,6 +2260,14 @@ class MainWindow(QMainWindow):
         self._apply_sensorgram_display_style()
         self._update_measurement_toggle_button()
         self._render_session_stats_recording_blink_indicator()
+        self._update_freeze_button_icon()
+        self._update_sensorgram_freeze_button_icon()
+        self._update_start_tracking_button_icon()
+        self._update_themed_icon_buttons()
+        self._update_secondary_axis_button_icon()
+        self._render_measurement_compression_blink_indicator()
+        self._update_dark_reference_button_icons()
+        update_corner_overlay_theme_for(self)
         self._log_info(f"Theme switched to {self._theme_mode}.")
         if self._experiment_control_window is not None:
             self._experiment_control_window.set_theme(self._theme_mode)
@@ -3942,6 +3923,30 @@ class MainWindow(QMainWindow):
             return
         self.sensorgram_freeze_button.setIcon(snowflake_icon(self._theme_mode, self._sensorgram_frozen))
 
+    def _update_themed_icon_buttons(self) -> None:
+        # Frameless icon-only buttons whose tint is baked into the pixmap
+        # (not styleable via QSS), so a theme switch has to re-render them
+        # explicitly - unlike text-based widgets, which pick up the new
+        # colors automatically from the cascading stylesheet.
+        muted = muted_icon_color(self._theme_mode)
+        accent = accent_icon_color(self._theme_mode)
+        if hasattr(self, "sensorgram_settings_button"):
+            self.sensorgram_settings_button.setIcon(tint_tabler_icon(flow_tabler_icon("settings"), muted))
+        if hasattr(self, "session_font_down_button"):
+            self.session_font_down_button.setIcon(tint_tabler_icon(flow_tabler_icon("minus"), muted))
+        if hasattr(self, "session_font_up_button"):
+            self.session_font_up_button.setIcon(tint_tabler_icon(flow_tabler_icon("plus"), accent))
+        if hasattr(self, "log_font_down_button"):
+            self.log_font_down_button.setIcon(tint_tabler_icon(flow_tabler_icon("minus"), muted))
+        if hasattr(self, "log_font_up_button"):
+            self.log_font_up_button.setIcon(tint_tabler_icon(flow_tabler_icon("plus"), accent))
+        if hasattr(self, "log_follow_button"):
+            self.log_follow_button.setIcon(tint_tabler_icon(flow_tabler_icon("arrow_autofit_down"), muted))
+        if hasattr(self, "log_copy_button"):
+            self.log_copy_button.setIcon(tint_tabler_icon(flow_tabler_icon("copy"), accent))
+        for help_button in self.findChildren(QToolButton, "helpButton"):
+            apply_help_button_theme(help_button, self._theme_mode)
+
     def _reposition_discovery_placeholder(self) -> None:
         placeholder = getattr(self, "_discovery_placeholder_text", None)
         if placeholder is None or not placeholder.isVisible():
@@ -4068,7 +4073,7 @@ class MainWindow(QMainWindow):
             return
         mode = getattr(self, "_secondary_axis_mode", "xy")
         self.show_secondary_axis_button.setText(f"[{secondary_axis_mode_label(mode)}]")
-        color = secondary_axis_mode_color(mode)
+        color = secondary_axis_mode_color(mode, self._theme_mode)
         self.show_secondary_axis_button.setStyleSheet(
             f"QToolButton#sensorgramSecondaryAxisToggleButton {{ color: {color}; }}"
         )
@@ -4117,9 +4122,9 @@ class MainWindow(QMainWindow):
 
     def _update_dark_reference_button_icons(self) -> None:
         if hasattr(self, "acquire_dark_button"):
-            self.acquire_dark_button.setIcon(dark_icon(self._session.state.dark is not None))
+            self.acquire_dark_button.setIcon(dark_icon(self._session.state.dark is not None, self._theme_mode))
         if hasattr(self, "acquire_reference_button"):
-            self.acquire_reference_button.setIcon(reference_icon(self._session.state.reference is not None))
+            self.acquire_reference_button.setIcon(reference_icon(self._session.state.reference is not None, self._theme_mode))
         self._refresh_tracking_ready_indicator()
 
     def _export_current_plot(self) -> None:
