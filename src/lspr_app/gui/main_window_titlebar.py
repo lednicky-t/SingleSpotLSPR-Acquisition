@@ -11,7 +11,8 @@ from lspr_app.device.device_types import PUMP, SELECTOR, SWITCH
 from lspr_app.gui.icon_helpers import device_status_icon, humidity_status_icon, temperature_status_icon
 
 # DeviceCommunicationService labels are fixed for the three canonical
-# devices - see device_lifecycle._DEVICE_LABEL, which this mirrors so the
+# devices - see device_lifecycle's device family registry (device_label_for()),
+# which this mirrors so the
 # busy check below can call DeviceCommunicationService.status(...) directly
 # without going through DeviceLifecycleController (whose is_connected_cached
 # is deliberately a cached snapshot, not a live read - see its docstring).

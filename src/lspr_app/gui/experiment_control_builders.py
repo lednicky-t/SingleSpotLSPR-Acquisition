@@ -1,90 +1,25 @@
-﻿from __future__ import annotations
+"""Re-export shim over `lspr_acq_shell.experiment_control_builders` (Phase 2,
+LSPRi acq experiment-control reuse - visual-parity effort, 2026-08-09) - kept
+here so every existing `from lspr_app.gui.experiment_control_builders import
+...` call site in this app keeps working unchanged.
+"""
 
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QToolButton
+from __future__ import annotations
 
+from lspr_acq_shell.experiment_control_builders import (
+    apply_direction_button_theme,
+    create_direction_button,
+    create_flow_step_action_button,
+    direction_glyph,
+    set_direction_button,
+    set_step_valve_button_state_for_button,
+)
 
-def create_flow_step_action_button(icon: QIcon, tooltip: str) -> QToolButton:
-    button = QToolButton()
-    button.setObjectName("flowStepActionButton")
-    button.setAutoRaise(True)
-    button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-    button.setFixedSize(32, 32)
-    button.setIconSize(QSize(24, 24))
-    button.setIcon(icon)
-    button.setToolTip(tooltip)
-    button.setStyleSheet(
-        "QToolButton#flowStepActionButton { background: transparent; border: none; padding: 0px; margin: 0px; }"
-        "QToolButton#flowStepActionButton:hover { background: rgba(127, 127, 127, 0.10); border: none; }"
-        "QToolButton#flowStepActionButton:pressed { background: rgba(127, 127, 127, 0.18); border: none; }"
-    )
-    return button
-
-
-def _direction_button_style(palette: dict[str, str]) -> str:
-    return (
-        "QToolButton#directionButton {"
-        " background: transparent;"
-        " border: 1px solid %(border)s;"
-        " border-radius: 10px;"
-        " padding: 0px;"
-        " margin: 0px;"
-        " font-size: 15px;"
-        " font-weight: 800;"
-        " color: %(fg)s;"
-        "}"
-        "QToolButton#directionButton:hover { background: %(button_hover)s; border-color: %(border_hover)s; }"
-        "QToolButton#directionButton:pressed { background: %(button_pressed)s; }"
-    ) % palette
-
-
-def apply_direction_button_theme(button: QToolButton, window) -> None:
-    """Re-apply the direction button's style for window's current theme -
-    call on any persistent window's live theme switch. The style is set
-    directly on the button (like the "?" help bubble) rather than inherited
-    from the window's cascading stylesheet, so it needs the same explicit
-    refresh; previously it was only ever set once at construction, via a
-    string-concatenation bug that also silently dropped the :hover rule's
-    palette substitution (operator precedence made `%` bind to the last
-    literal only, so the middle :hover rule kept its raw "%(button_hover)s"
-    placeholders instead of real colors)."""
-    button.setStyleSheet(_direction_button_style(window._theme_palette()))
-
-
-def create_direction_button(window, direction: str) -> QToolButton:
-    button = QToolButton()
-    button.setObjectName("directionButton")
-    button.setFixedSize(30, 28)
-    apply_direction_button_theme(button, window)
-    button.setToolTip("Pump direction")
-    set_direction_button(window, button, direction)
-    return button
-
-
-def direction_glyph(direction: str) -> str:
-    normalized = "CCW" if str(direction or "").upper() == "CCW" else "CW"
-    return "\u21ba" if normalized == "CCW" else "\u21bb"
-
-
-def set_direction_button(window, button: QToolButton, direction: str) -> None:
-    normalized = "CCW" if str(direction or "").upper() == "CCW" else "CW"
-    button.setText(direction_glyph(normalized))
-    button.setProperty("direction", normalized)
-    button.setToolTip(
-        f"Pump direction. Current state: {normalized} ({direction_glyph(normalized)})."
-        f" Click to toggle between CW and CCW."
-    )
-
-
-def set_step_valve_button_state_for_button(window, button: QToolButton, valve: str) -> None:
-    normalized = "Close" if str(valve or "").strip().lower() == "close" else "Open"
-    button.setProperty("valve", normalized)
-    button.setChecked(normalized == "Close")
-    button.setText(window._valve_state_label(normalized))
-    button.setToolTip(
-        f"Valve state to associate with this step. Current state: {normalized}."
-        f" Display label: {window._valve_state_label(normalized)}. Click to toggle."
-    )
-
-
+__all__ = [
+    "apply_direction_button_theme",
+    "create_direction_button",
+    "create_flow_step_action_button",
+    "direction_glyph",
+    "set_direction_button",
+    "set_step_valve_button_state_for_button",
+]

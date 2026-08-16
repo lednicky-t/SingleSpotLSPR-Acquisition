@@ -3,18 +3,16 @@ from __future__ import annotations
 import json
 import logging
 import os
-import queue
-import threading
 import tempfile
 from dataclasses import asdict
 from pathlib import Path
-from time import monotonic
 from datetime import datetime, timezone
 from typing import Callable
 
 import h5py
 import numpy as np
 
+from lspr_acq_shell import AsyncTaggedWriter
 from lspr_core import ExperimentPlan
 from lspr_io import (
     LSPR_DEVICE_ENVIRONMENT_GROUP_NAME,
@@ -760,7 +758,17 @@ class HDF5MeasurementWriter:
         self._upsert_table(self._metadata, LSPR_EXPERIMENT_PLAN_DATASET_NAME, rows, self._plan_table_columns)
 
 
-class AsyncHDF5MeasurementWriter:
+class AsyncHDF5MeasurementWriter(AsyncTaggedWriter):
+    """`AsyncTaggedWriter` subclass driving a `HDF5MeasurementWriter`.
+
+    Save copy note: a second h5py handle or a raw OS copy from another
+    thread/process while this writer's handle is still open would risk
+    either an HDF5 locking error or copying a file mid-write (no SWMR is
+    used here) - `save_copy`'s flush-then-copy-on-this-thread ordering
+    (inherited from `AsyncTaggedWriter`) is what avoids that, not anything
+    specific to this subclass.
+    """
+
     def __init__(
         self,
         path: Path,
@@ -784,38 +792,23 @@ class AsyncHDF5MeasurementWriter:
         self._dark: Spectrum | None = None
         self._reference: Spectrum | None = None
         self._acquisition_state: dict[str, object] | None = None
-        self._flush_interval_s = max(float(flush_interval_s), 0.25)
-        self._queue: queue.Queue[tuple[str, object]] = queue.Queue()
-        self._stop_event = threading.Event()
-        self._closed = False
-        self._state_lock = threading.Lock()
-        # Plain callback, not a Qt signal - this module has no Qt dependency by
-        # design (see CLAUDE.md "Don't mix scientific code with GUI code"), so
-        # marshaling onto the GUI thread is the caller's responsibility. Called
-        # from this object's background writer thread, not the caller's thread.
-        self._on_error = on_error
-        self._thread = threading.Thread(target=self._run, name="hdf5-writer", daemon=True)
-        self._thread.start()
+        self._pending_spectra: list[Spectrum] = []
+        self._pending_times: list[float] = []
+        self._pending_peaks: list[float] = []
+        self._pending_metrics: list[dict] = []
+        super().__init__(flush_interval_s=flush_interval_s, on_error=on_error, label=str(path))
 
     def update_processing(self, processing: ProcessingSettings) -> None:
-        if self._closed:
-            return
-        self._queue.put(("processing", processing))
+        self._put("processing", processing)
 
     def update_acquisition_state(self, state: dict[str, object]) -> None:
-        if self._closed:
-            return
-        self._queue.put(("acquisition_state", dict(state)))
+        self._put("acquisition_state", dict(state))
 
     def update_baselines(self, dark: Spectrum | None, reference: Spectrum | None) -> None:
-        if self._closed:
-            return
-        self._queue.put(("baselines", (dark, reference)))
+        self._put("baselines", (dark, reference))
 
     def write_device_inventory(self, rows: list[list[str]]) -> None:
-        if self._closed:
-            return
-        self._queue.put(("device_inventory", list(rows)))
+        self._put("device_inventory", list(rows))
 
     def append_batch(
         self,
@@ -825,14 +818,12 @@ class AsyncHDF5MeasurementWriter:
     ) -> None:
         if not spectra:
             return
-        if self._closed:
-            return
-        self._queue.put(("append", (spectra, time_series_s, peak_positions_nm)))
+        self._put("append", (spectra, time_series_s, peak_positions_nm))
 
     def append_metrics(self, rows: list[dict[str, object]]) -> None:
-        if not rows or self._closed:
+        if not rows:
             return
-        self._queue.put(("metrics", rows))
+        self._put("metrics", rows)
 
     def append_environment_reading(
         self,
@@ -840,191 +831,76 @@ class AsyncHDF5MeasurementWriter:
         temperature_c: float | None,
         humidity_percent: float | None,
     ) -> None:
-        if self._closed:
-            return
-        self._queue.put(("environment", (int(timestamp_utc_ms), temperature_c, humidity_percent)))
+        self._put("environment", (int(timestamp_utc_ms), temperature_c, humidity_percent))
 
     def append_experiment_control_runtime(self, row: dict[str, object]) -> None:
-        if self._closed:
-            return
-        self._queue.put(("experiment_control_runtime", row))
+        self._put("experiment_control_runtime", row)
 
     def append_flow_state(self, row: dict[str, object]) -> None:
         self.append_experiment_control_runtime(row)
 
     def append_device_state(self, row: dict[str, object]) -> None:
-        if self._closed:
-            return
-        self._queue.put(("device_state", row))
+        self._put("device_state", row)
 
-    def flush(self) -> None:
-        if self._closed:
-            return
-        self._queue.put(("flush", None))
+    def _open_error_message(self, exc: Exception) -> str:
+        return f"Could not open measurement file: {exc}"
 
-    def save_copy(self, dest_path: Path, on_done: Callable[[bool, str], None] | None = None) -> None:
-        """Flush pending data, then copy the file to *dest_path*.
+    def _run_error_message(self, exc: Exception) -> str:
+        return f"Measurement recording stopped unexpectedly: {exc}"
 
-        Runs entirely inside the writer's own background thread, after the
-        flush - so the copy only ever happens once every pending write has
-        been drained and nothing else is touching the file at the same time.
-        A second h5py handle or a raw OS copy from another thread/process
-        while this writer's handle is still open would risk either an HDF5
-        locking error or copying a file mid-write (no SWMR is used here).
+    def _open_writer(self) -> HDF5MeasurementWriter:
+        return HDF5MeasurementWriter(
+            self._path,
+            self._signal_kind,
+            self._wavelengths_nm,
+            self._processing,
+            self._experiment_name,
+            self._started_at_utc,
+            compression_enabled=self._compression_enabled,
+        )
 
-        *on_done* is called from that same background thread, not the
-        caller's - same contract as *on_error* above.
-        """
-        if self._closed:
-            if on_done is not None:
-                on_done(False, "Writer is already closed.")
-            return
-        self._queue.put(("save_copy", (Path(dest_path), on_done)))
+    def _apply(self, writer: HDF5MeasurementWriter, tag: str, payload: object) -> None:
+        if tag == "processing" and isinstance(payload, ProcessingSettings):
+            self._processing = payload
+            writer.update_processing(payload)
+        elif tag == "acquisition_state" and isinstance(payload, dict):
+            self._acquisition_state = dict(payload)
+            writer.update_acquisition_state(payload)
+        elif tag == "baselines" and isinstance(payload, tuple):
+            dark, reference = payload
+            self._dark = dark
+            self._reference = reference
+            writer.update_baselines(dark, reference)
+        elif tag == "device_inventory" and isinstance(payload, list):
+            writer.write_device_inventory(payload)
+        elif tag == "append" and isinstance(payload, tuple):
+            spectra, time_series_s, peak_positions_nm = payload
+            self._pending_spectra.extend(spectra)
+            self._pending_times.extend(time_series_s)
+            self._pending_peaks.extend(peak_positions_nm)
+        elif tag == "metrics" and isinstance(payload, list):
+            # Accumulate metric rows and write as a single batch on the next
+            # flush.  Writing one row at a time caused one HDF5 resize per
+            # dataset per spectrum (h5py holds the GIL), which progressively
+            # blocked the GUI thread and degraded acquisition rate.
+            self._pending_metrics.extend(payload)
+        elif tag == "experiment_control_runtime" and isinstance(payload, dict):
+            writer.append_flow_state([payload])
+        elif tag == "device_state" and isinstance(payload, dict):
+            writer.append_device_state(payload)
+        elif tag == "environment" and isinstance(payload, tuple):
+            timestamp_utc_ms, temperature_c, humidity_percent = payload
+            writer.append_environment_reading(timestamp_utc_ms, temperature_c, humidity_percent)
 
-    def close(self) -> None:
-        with self._state_lock:
-            if self._closed:
-                return
-            self._closed = True
-            self._stop_event.set()
-            self._queue.put(("close", None))
-        self._thread.join(timeout=10.0)
-        if self._thread.is_alive():
-            log.warning(
-                "HDF5 writer thread for %s did not stop within 10s of close(); "
-                "it may still be flushing or stuck.",
-                self._path,
-            )
-
-    def _notify_error(self, message: str) -> None:
-        if self._on_error is None:
-            return
-        try:
-            self._on_error(message)
-        except Exception:
-            log.exception("on_error callback for HDF5 writer (%s) raised", self._path)
-
-    def _run(self) -> None:
-        try:
-            writer = HDF5MeasurementWriter(
-                self._path,
-                self._signal_kind,
-                self._wavelengths_nm,
-                self._processing,
-                self._experiment_name,
-                self._started_at_utc,
-                compression_enabled=self._compression_enabled,
-            )
-        except Exception as exc:
-            log.exception("Failed to open HDF5 measurement file %s", self._path)
-            self._closed = True
-            self._notify_error(f"Could not open measurement file: {exc}")
-            return
-
-        pending_spectra: list[Spectrum] = []
-        pending_times: list[float] = []
-        pending_peaks: list[float] = []
-        pending_metrics: list[dict] = []
-        last_flush = monotonic()
-        try:
-            while True:
-                timeout = max(0.0, self._flush_interval_s - (monotonic() - last_flush))
-                try:
-                    kind, payload = self._queue.get(timeout=timeout)
-                except queue.Empty:
-                    kind, payload = "timeout", None
-
-                if kind == "processing" and isinstance(payload, ProcessingSettings):
-                    self._processing = payload
-                    writer.update_processing(payload)
-                elif kind == "acquisition_state" and isinstance(payload, dict):
-                    self._acquisition_state = dict(payload)
-                    writer.update_acquisition_state(payload)
-                elif kind == "baselines" and isinstance(payload, tuple):
-                    dark, reference = payload
-                    self._dark = dark
-                    self._reference = reference
-                    writer.update_baselines(dark, reference)
-                elif kind == "device_inventory" and isinstance(payload, list):
-                    writer.write_device_inventory(payload)
-                elif kind == "append" and isinstance(payload, tuple):
-                    spectra, time_series_s, peak_positions_nm = payload
-                    pending_spectra.extend(spectra)
-                    pending_times.extend(time_series_s)
-                    pending_peaks.extend(peak_positions_nm)
-                elif kind == "metrics" and isinstance(payload, list):
-                    # Accumulate metric rows and write as a single batch on the next
-                    # flush.  Writing one row at a time caused one HDF5 resize per
-                    # dataset per spectrum (h5py holds the GIL), which progressively
-                    # blocked the GUI thread and degraded acquisition rate.
-                    pending_metrics.extend(payload)
-                elif kind == "experiment_control_runtime" and isinstance(payload, dict):
-                    writer.append_flow_state([payload])
-                elif kind == "device_state" and isinstance(payload, dict):
-                    writer.append_device_state(payload)
-                elif kind == "environment" and isinstance(payload, tuple):
-                    timestamp_utc_ms, temperature_c, humidity_percent = payload
-                    writer.append_environment_reading(timestamp_utc_ms, temperature_c, humidity_percent)
-                elif kind == "flush":
-                    if pending_metrics:
-                        writer.append_metrics(pending_metrics)
-                        pending_metrics.clear()
-                    if pending_spectra:
-                        writer.append_batch(pending_spectra, pending_times, pending_peaks)
-                        pending_spectra.clear()
-                        pending_times.clear()
-                        pending_peaks.clear()
-                    writer.flush()
-                    last_flush = monotonic()
-                elif kind == "save_copy" and isinstance(payload, tuple):
-                    dest_path, on_done = payload
-                    if pending_metrics:
-                        writer.append_metrics(pending_metrics)
-                        pending_metrics.clear()
-                    if pending_spectra:
-                        writer.append_batch(pending_spectra, pending_times, pending_peaks)
-                        pending_spectra.clear()
-                        pending_times.clear()
-                        pending_peaks.clear()
-                    writer.flush()
-                    last_flush = monotonic()
-                    try:
-                        writer.copy_into(dest_path)
-                        if on_done is not None:
-                            on_done(True, "")
-                    except Exception as exc:
-                        log.exception("Failed to save a copy of %s to %s", self._path, dest_path)
-                        if on_done is not None:
-                            on_done(False, str(exc))
-                elif kind == "close":
-                    if pending_metrics:
-                        writer.append_metrics(pending_metrics)
-                    if pending_spectra:
-                        writer.append_batch(pending_spectra, pending_times, pending_peaks)
-                    writer.flush()
-                    break
-                elif kind == "timeout":
-                    if pending_metrics:
-                        writer.append_metrics(pending_metrics)
-                        pending_metrics.clear()
-                    if pending_spectra:
-                        writer.append_batch(pending_spectra, pending_times, pending_peaks)
-                        pending_spectra.clear()
-                        pending_times.clear()
-                        pending_peaks.clear()
-                    writer.flush()
-                    last_flush = monotonic()
-                if self._stop_event.is_set() and self._queue.empty():
-                    break
-        except Exception as exc:
-            log.exception("HDF5 measurement writer for %s stopped due to an error", self._path)
-            self._closed = True
-            self._notify_error(f"Measurement recording stopped unexpectedly: {exc}")
-        finally:
-            try:
-                writer.close()
-            except Exception:
-                log.exception("Failed to cleanly close HDF5 measurement file %s", self._path)
+    def _flush_pending(self, writer: HDF5MeasurementWriter) -> None:
+        if self._pending_metrics:
+            writer.append_metrics(self._pending_metrics)
+            self._pending_metrics.clear()
+        if self._pending_spectra:
+            writer.append_batch(self._pending_spectra, self._pending_times, self._pending_peaks)
+            self._pending_spectra.clear()
+            self._pending_times.clear()
+            self._pending_peaks.clear()
 
 
 def _string_array(values: list[str]) -> np.ndarray:

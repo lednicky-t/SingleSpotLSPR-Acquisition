@@ -15,23 +15,18 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 
+from lspr_acq_shell.device_io_pool import device_io_pool
 from lspr_app.device.communication_models import DeviceCommand
 from lspr_app.device.device_lifecycle import DeviceLifecycleController, DeviceLifecycleEvent, device_label_for
 from lspr_app.device.device_manager import DeviceCommunicationService
 from lspr_app.device.device_types import SWITCH
 
-_DEVICE_IO_POOL: QThreadPool | None = None
-
-
-def device_io_pool() -> QThreadPool:
-    """The single-lane thread pool used for all device lifecycle work."""
-    global _DEVICE_IO_POOL
-    if _DEVICE_IO_POOL is None:
-        _DEVICE_IO_POOL = QThreadPool()
-        _DEVICE_IO_POOL.setMaxThreadCount(1)
-    return _DEVICE_IO_POOL
+# device_io_pool re-exported (not called in this file) so existing
+# `from lspr_app.gui.device_lifecycle_task import device_io_pool` call sites
+# keep working unchanged after the move to lspr_acq_shell.device_io_pool.
+_ = device_io_pool
 
 
 class DeviceLifecycleSignals(QObject):

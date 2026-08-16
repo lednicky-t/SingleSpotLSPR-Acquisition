@@ -1,27 +1,10 @@
-"""Canonical device type identifiers.
-
-These string constants are the single source of truth for device type names used
-across the GUI and the device service layer.
-
-To rename a device category in the future:
-  1. Change the constant value here.
-  2. Add the old value as a recognized alias in ``_normalize_device_type()`` in
-     ``device_manager.py``.
-  3. Add a migration entry in ``_LEGACY_LABEL_MIGRATIONS`` in ``device_manager.py``
-     so that profiles saved under the old label are transparently upgraded on load.
-  4. Update display strings in ``experiment_control_window.py``.
+"""Re-export shim over `lspr_acq_shell.device_types` (Phase 1 shell
+extraction, 2026-08-08) - kept here so every existing
+`from lspr_app.device.device_types import ...` call site in this app keeps
+working unchanged.
 """
-
 from __future__ import annotations
 
-PUMP = "pump"
-SWITCH = "switch"       # injection valve / flow switch (formerly "valve")
-# AMF switch rotary valve (user-facing label: "Switch rotary valve"). Internal
-# key/class/file names still say "mswitch"/"selector" - not renamed yet.
-# TODO: this assumes a distribution/selector-head valve (one common port ->
-# N individually addressable positions). AMF also sells a switch-head variant
-# (N ports wired in pairs -> N/2 logical positions) which this code does not
-# yet distinguish or support. See the "Hardware Topology" section in
-# docs/experiment-control/mswitch_control_guide.md before trusting raw
-# switch_position numbers on a switch-head unit.
-SELECTOR = "selector"
+from lspr_acq_shell.device_types import PUMP, SELECTOR, SWITCH
+
+__all__ = ["PUMP", "SELECTOR", "SWITCH"]

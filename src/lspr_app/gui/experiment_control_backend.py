@@ -1,71 +1,31 @@
+"""Re-export shim over `lspr_acq_shell.experiment_control_backend` (Phase 1
+shell extraction, 2026-08-08) for the `ExperimentControlBackend` Protocol,
+`ExperimentControlDeviceState`, and `NullExperimentControlBackend` - kept
+here so every existing `from lspr_app.gui.experiment_control_backend import
+...` call site in this app keeps working unchanged.
+
+`AcquisitionExperimentControlBackend` stays defined here, not in the shell -
+it's the concrete sLSPR-specific implementation (wraps an
+`ExperimentControlWindow`, reaches into several of its private methods), not
+part of the reusable seam. LSPRi acq will write its own concrete class
+against the shared Protocol later.
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
-
+from lspr_acq_shell.experiment_control_backend import (
+    ExperimentControlBackend,
+    ExperimentControlDeviceState,
+    NullExperimentControlBackend,
+)
+from lspr_app.device.device_types import PUMP, SELECTOR, SWITCH
 from lspr_app.gui.experiment_control_capabilities import ExperimentControlCapabilities
 
-
-@dataclass(frozen=True, slots=True)
-class ExperimentControlDeviceState:
-    key: str
-    connected: bool
-    label: str = ""
-    detail: str = ""
-
-
-@runtime_checkable
-class ExperimentControlBackend(Protocol):
-    def capabilities(self) -> ExperimentControlCapabilities:
-        ...
-
-    def device_states(self) -> list[ExperimentControlDeviceState]:
-        ...
-
-    def is_device_connected(self, device_key: str) -> bool:
-        ...
-
-    def refresh_devices(self) -> bool:
-        ...
-
-    def send_command(self, device_key: str, command_type: str, payload: dict[str, object] | None = None) -> bool:
-        ...
-
-    def connect_device(self, device_key: str) -> bool:
-        ...
-
-    def disconnect_device(self, device_key: str) -> bool:
-        ...
-
-
-class NullExperimentControlBackend:
-    def __init__(self, capabilities: ExperimentControlCapabilities | None = None) -> None:
-        self._capabilities = capabilities or ExperimentControlCapabilities.evaluation()
-
-    def capabilities(self) -> ExperimentControlCapabilities:
-        return self._capabilities
-
-    def device_states(self) -> list[ExperimentControlDeviceState]:
-        return []
-
-    def is_device_connected(self, device_key: str) -> bool:
-        _ = device_key
-        return False
-
-    def refresh_devices(self) -> bool:
-        return False
-
-    def send_command(self, device_key: str, command_type: str, payload: dict[str, object] | None = None) -> bool:
-        _ = (device_key, command_type, payload)
-        return False
-
-    def connect_device(self, device_key: str) -> bool:
-        _ = device_key
-        return False
-
-    def disconnect_device(self, device_key: str) -> bool:
-        _ = device_key
-        return False
+__all__ = [
+    "ExperimentControlBackend",
+    "ExperimentControlDeviceState",
+    "NullExperimentControlBackend",
+    "AcquisitionExperimentControlBackend",
+]
 
 
 class AcquisitionExperimentControlBackend:
@@ -84,8 +44,23 @@ class AcquisitionExperimentControlBackend:
         return self._window._capabilities  # type: ignore[attr-defined]
 
     def device_states(self) -> list[ExperimentControlDeviceState]:
+        # PUMP/SWITCH/SELECTOR - the canonical device-family keys (post-V51
+        # registry generalization), not the old "pump"/"valve"/"mswitch"
+        # literals this used to iterate. device_label_for() (device_lifecycle.py)
+        # looks families up by these exact keys with no legacy-alias
+        # normalization of its own (unlike _normalize_device_type() in
+        # device_manager.py, a different function for a different purpose) -
+        # "valve"/"mswitch" would silently miss the registered family and
+        # fall back to a fabricated f"{key}_main" label that never matches a
+        # real connection. Flagged in the architecture plan (§4.3 item 5) as
+        # a pre-existing inconsistency to resolve during this extraction
+        # rather than carry forward; verified this method currently has no
+        # live callers (device_states() is anticipatory V49 infrastructure,
+        # not yet wired to any UI), so this was a latent bug, not a visible
+        # one - still worth fixing now rather than moving it into the shared
+        # package unexamined.
         states: list[ExperimentControlDeviceState] = []
-        for key in ("pump", "valve", "mswitch"):
+        for key in (PUMP, SWITCH, SELECTOR):
             connected = self._window._service_device_connected(key)  # type: ignore[attr-defined]
             ctrl_type, port = self._window._service_connection_detail(key)  # type: ignore[attr-defined]
             if ctrl_type and port:

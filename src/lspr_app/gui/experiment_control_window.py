@@ -6,7 +6,7 @@ import re
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from time import monotonic, perf_counter
+from time import perf_counter
 from typing import Callable
 
 try:
@@ -55,8 +55,8 @@ from lspr_app.device.communication_models import DeviceCommand
 from lspr_app.device.serial_controllers import ControllerProbe
 from lspr_app.device.reglo_icc import PumpProbe
 from lspr_app import __version__
-from lspr_app.gui.experiment_control_runtime import ExperimentRuntimeSnapshot, experiment_runtime_snapshot
 from lspr_app.resources import app_icon_path
+from lspr_app.version import APP_VERSION
 from lspr_app.domain.pump_plan import (
     ACTIVE_PUMP_CHANNELS,
     HDF5_PUMP_CHANNELS,
@@ -65,6 +65,7 @@ from lspr_app.domain.pump_plan import (
     recompute_plan_timing,
     to_core_experiment_plan,
 )
+from lspr_app.domain.pump_plan import PLAN_COLOR_OPTIONS as _SHARED_PLAN_COLOR_OPTIONS
 from lspr_app.gui.experiment_control_builders import (
     apply_direction_button_theme,
     create_direction_button,
@@ -91,6 +92,7 @@ from lspr_app.gui.experiment_control_table import (
 )
 from lspr_app.gui.experiment_control_editing import ExperimentControlEditingController
 from lspr_app.gui.experiment_control_dialogs import ExperimentControlDialogs
+from lspr_acq_shell.experiment_control_theme import apply_experiment_control_style, experiment_control_theme_palette
 from lspr_app.gui.experiment_control_controller import ExperimentControlController
 from lspr_app.gui.experiment_control_backend import AcquisitionExperimentControlBackend, ExperimentControlBackend, NullExperimentControlBackend
 from lspr_app.gui.experiment_control_capabilities import ExperimentControlCapabilities
@@ -121,6 +123,8 @@ from lspr_app.gui.experiment_control_step_runner import (
     _StepApplyResult,
     _StepApplyRunnable,
 )
+from lspr_app.gui.experiment_control_step_decision import StepCommandContext, plan_step_commands
+from lspr_app.gui.experiment_control_run_loop import PlanRunLoopMixin
 from lspr_app.gui.icon_helpers import accent_icon_color, flow_tabler_icon, muted_icon_color, tint_tabler_icon, transport_icon
 from lspr_app.gui.theme_palette import theme_palette
 from lspr_app.gui.panel_help import apply_help_button_theme, make_help_button
@@ -137,7 +141,7 @@ from lspr_io import (
 _LOGGER = logging.getLogger("lspr_app.experiment_control")
 
 
-class ExperimentControlWindow(QWidget):
+class ExperimentControlWindow(PlanRunLoopMixin, QWidget):
     availability_changed = pyqtSignal(object)
     valve_availability_changed = pyqtSignal(object)
     mswitch_availability_changed = pyqtSignal(object)
@@ -151,16 +155,10 @@ class ExperimentControlWindow(QWidget):
     # "step applied" event only fires on completion and the busy dot needs
     # to appear immediately, not just after the command finishes.
     hw_status_refresh_requested = pyqtSignal()
-    PLAN_COLOR_OPTIONS = [
-        ("Blue", "#4E79A7"),
-        ("Green", "#59A14F"),
-        ("Red", "#E15759"),
-        ("Orange", "#F28E2B"),
-        ("Purple", "#B07AA1"),
-        ("Teal", "#76B7B2"),
-        ("Gold", "#EDC948"),
-        ("Gray", "#9C9DA1"),
-    ]
+    # Moved to lspr_acq_shell.pump_plan.PLAN_COLOR_OPTIONS (Phase 2, LSPRi acq
+    # experiment-control reuse - visual-parity effort, 2026-08-09); kept as a
+    # list here (not the shared tuple directly) since this was always a list.
+    PLAN_COLOR_OPTIONS = list(_SHARED_PLAN_COLOR_OPTIONS)
     PLAN_COLUMNS = [
         "step",
         "duration_s",
@@ -523,7 +521,7 @@ class ExperimentControlWindow(QWidget):
         self.plan_table = ExperimentControlTableView()
         self.plan_table.setObjectName("flowControlTable")
         # The plan table setup is centralized so the view, model, delegates, and layout rules stay in one place.
-        configure_experiment_control_plan_table(self)
+        configure_experiment_control_plan_table(self, app_name="LSPR Acquisition", app_version=APP_VERSION)
 
         self.pause_table = QTableWidget(self)
         self.pause_table.setObjectName("flowControlPauseTable")
@@ -2089,7 +2087,10 @@ class ExperimentControlWindow(QWidget):
     # ═══════════════════════════════════════════════════════════════════
 
     def _edit_switch_solution_labels(self, anchor: QWidget | None = None) -> None:
-        dialogs = ExperimentControlDialogs(self, self._theme_palette(), self._contrast_text_color, self._tint_icon)
+        dialogs = ExperimentControlDialogs(
+            self, self._theme_palette(), self._contrast_text_color, self._tint_icon,
+            app_name="LSPR Acquisition", app_version=APP_VERSION,
+        )
         result = dialogs.edit_switch_solution_labels(self._switch_solution_labels, self._switch_solution_details, anchor)
         if result is None:
             return
@@ -2100,7 +2101,10 @@ class ExperimentControlWindow(QWidget):
         self._update_timeline_selection()
 
     def _edit_pause_state(self, anchor: QWidget | None = None) -> None:
-        dialogs = ExperimentControlDialogs(self, self._theme_palette(), self._contrast_text_color, self._tint_icon)
+        dialogs = ExperimentControlDialogs(
+            self, self._theme_palette(), self._contrast_text_color, self._tint_icon,
+            app_name="LSPR Acquisition", app_version=APP_VERSION,
+        )
         updated_step = dialogs.edit_pause_state(self._pause_row_step(), anchor or self.pause_state_button)
         if updated_step is None:
             return
@@ -2109,17 +2113,13 @@ class ExperimentControlWindow(QWidget):
         self._set_status_message("Pause state updated.")
         _LOGGER.info("Pause state updated.")
 
-    def _apply_pause_state(self) -> None:
-        step = self._pause_row_step()
-        if step is None:
-            return
-        # Dispatched async - _apply_step_to_pump_async already catches and
-        # logs internally, so no try/except is needed here (unlike the old
-        # synchronous call this replaces).
-        self._apply_step_to_pump_async(step, start=False)
+    # _apply_pause_state moved to lspr_acq_shell.experiment_control_run_loop.PlanRunLoopMixin (Tier 2)
 
     def _edit_color_palette_entries(self, anchor: QWidget | None = None) -> None:
-        dialogs = ExperimentControlDialogs(self, self._theme_palette(), self._contrast_text_color, self._tint_icon)
+        dialogs = ExperimentControlDialogs(
+            self, self._theme_palette(), self._contrast_text_color, self._tint_icon,
+            app_name="LSPR Acquisition", app_version=APP_VERSION,
+        )
         updated_entries = dialogs.edit_color_palette_entries(self._color_palette_entries, anchor)
         if updated_entries is None:
             return
@@ -2176,7 +2176,10 @@ class ExperimentControlWindow(QWidget):
         return "#4E79A7" if normalized == "Open" else "#B44A4A"
 
     def _edit_valve_state_labels(self, anchor: QWidget | None = None) -> None:
-        dialogs = ExperimentControlDialogs(self, self._theme_palette(), self._contrast_text_color, self._tint_icon)
+        dialogs = ExperimentControlDialogs(
+            self, self._theme_palette(), self._contrast_text_color, self._tint_icon,
+            app_name="LSPR Acquisition", app_version=APP_VERSION,
+        )
         updated = dialogs.edit_valve_labels(self._valve_state_labels, self._valve_state_colors, anchor)
         if updated is None:
             return
@@ -2189,7 +2192,10 @@ class ExperimentControlWindow(QWidget):
         return
 
     def _edit_pump_display_settings(self, anchor: QWidget | None = None) -> None:
-        dialogs = ExperimentControlDialogs(self, self._theme_palette(), self._contrast_text_color, self._tint_icon)
+        dialogs = ExperimentControlDialogs(
+            self, self._theme_palette(), self._contrast_text_color, self._tint_icon,
+            app_name="LSPR Acquisition", app_version=APP_VERSION,
+        )
         before = (self._pump_display_enabled, self._pump_display_highlight_enabled)
         updated = dialogs.edit_pump_display_settings(self.step_comment_edit, before[0], before[1], anchor)
         if updated is None:
@@ -2404,37 +2410,11 @@ class ExperimentControlWindow(QWidget):
             return
         self._start_paused_experiment_control()
 
-    def _set_plan_runtime_flags(self, *, running: bool, holding: bool, paused: bool) -> None:
-        self._plan_running = bool(running)
-        self._plan_holding = bool(holding)
-        self._plan_paused = bool(paused)
-
-    def _capture_plan_elapsed_from_clock(self) -> float:
-        if self._plan_started_monotonic is None:
-            return max(float(self._plan_elapsed_s), 0.0)
-        elapsed = self._plan_resume_elapsed_s + max(monotonic() - self._plan_started_monotonic, 0.0)
-        self._plan_elapsed_s = elapsed
-        self._plan_resume_elapsed_s = elapsed
-        return elapsed
-
-    def _reset_plan_runtime_counters(self) -> None:
-        self._plan_elapsed_s = 0.0
-        self._plan_resume_elapsed_s = 0.0
-        self._plan_runtime_s = 0.0
-        self._plan_resume_runtime_s = 0.0
-
-    def _ensure_measurement_started(self) -> None:
-        if self._measurement_started_monotonic is None:
-            self._measurement_started_monotonic = monotonic()
-
-    def _experiment_runtime_snapshot(self) -> ExperimentRuntimeSnapshot:
-        return experiment_runtime_snapshot(
-            running=self._plan_running,
-            holding=self._plan_holding,
-            paused=self._plan_paused,
-            recording=bool(self.__dict__.get("_measurement_started_monotonic") is not None),
-            has_steps=bool(self._read_experiment_control_steps()),
-        )
+    # _set_plan_runtime_flags, _capture_plan_elapsed_from_clock,
+    # _reset_plan_runtime_counters, _ensure_measurement_started,
+    # _experiment_runtime_snapshot, _timeline_progress_for_display,
+    # _plan_runtime_for_display, _step_runtime_for_display moved to
+    # lspr_acq_shell.experiment_control_run_loop.PlanRunLoopMixin (Tier 2)
 
     def _set_experiment_control_runtime_row_property(self, row: int | None) -> None:
         self.plan_table.setProperty("experiment_control_runtime_row", row)
@@ -2480,186 +2460,13 @@ class ExperimentControlWindow(QWidget):
         if refresh_status:
             self._refresh_status_line()
 
-    def _resume_experiment_plan(
-        self,
-        *,
-        restore_step: PumpPlanStep | None = None,
-        status_message: str,
-        log_message: str,
-        emit_event: str,
-        emit_step: PumpPlanStep | None = None,
-    ) -> None:
-        if restore_step is not None:
-            self._apply_step_to_pump_async(restore_step, start=True)
-        self._set_plan_runtime_flags(running=True, holding=False, paused=False)
-        self._plan_started_monotonic = monotonic()
-        self._plan_timer.stop()
-        self._schedule_plan_timer()
-        self._update_experiment_control_toggle_button()
-        self._set_status_message(status_message)
-        _LOGGER.info(log_message)
-        steps = self._read_experiment_control_steps()
-        if self._plan_active_row is not None and 0 <= self._plan_active_row < len(steps):
-            self._emit_experimental_control_state(emit_event, emit_step or steps[self._plan_active_row])
-
-    def _begin_experiment_plan_run(self, row: int, steps: list[PumpPlanStep]) -> None:
-        self._reset_plan_runtime_counters()
-        self._ensure_measurement_started()
-        self._step_started_monotonic = monotonic()
-        self._set_plan_runtime_flags(running=True, holding=False, paused=False)
-        self._plan_active_row = row
-        self._plan_started_monotonic = monotonic()
-        self._update_experiment_control_toggle_button()
-        self._activate_experiment_control_step_for_elapsed(0.0, force=True)
-        self._schedule_plan_timer()
-        self._set_status_message(f"Running experiment plan from step {self._plan_active_row + 1 if self._plan_active_row is not None else 1}.")
-        _LOGGER.info("Experiment plan started | step=%s", self._plan_active_row + 1 if self._plan_active_row is not None else 1)
-        if self._plan_active_row is not None and 0 <= self._plan_active_row < len(steps):
-            self._emit_experimental_control_state("plan_started", steps[self._plan_active_row])
-
-    def _begin_paused_experiment_plan_run(self, row: int, steps: list[PumpPlanStep]) -> None:
-        self._paused_plan_step = deepcopy(steps[row])
-        self._plan_active_row = row
-        self._plan_timer.stop()
-        self._reset_plan_runtime_counters()
-        self._ensure_measurement_started()
-        self._set_plan_runtime_flags(running=False, holding=False, paused=True)
-        self._plan_started_monotonic = None
-        self._step_started_monotonic = None
-        self._schedule_plan_timer()
-        self._apply_pause_state()
-        self._update_experiment_control_toggle_button()
-        self._set_status_message(
-            f"Experiment plan started in pause state on step {self._plan_active_row + 1 if self._plan_active_row is not None else 1}."
-        )
-        _LOGGER.info(
-            "Experiment plan started in pause state | step=%s",
-            self._plan_active_row + 1 if self._plan_active_row is not None else 1,
-        )
-        if self._plan_active_row is not None and 0 <= self._plan_active_row < len(steps):
-            self._emit_experimental_control_state("plan_pause", self._applied_plan_step, status="started in pause state")
-
-    def _resume_experiment_control_after_manual_step_change(
-        self,
-        row: int,
-        *,
-        status_message: str,
-        log_message: str,
-        emit_event: str,
-    ) -> None:
-        steps = self._read_experiment_control_steps()
-        if row < 0 or row >= len(steps):
-            return
-        # Dispatched async and not gated on the result: plan-runtime state
-        # always advances here, exactly like every other step-apply trigger.
-        # A hardware failure is surfaced via the status bar text a moment
-        # later (and durably logged to the session HDF5 file regardless of
-        # active recording - see _handle_experimental_control_state_recorded
-        # in main_window.py) rather than silently blocking the resume.
-        self._apply_step_to_pump_async(steps[row], start=True)
-        self._paused_plan_step = None
-        self._reset_plan_runtime_counters()
-        self._ensure_measurement_started()
-        self._set_plan_runtime_flags(running=True, holding=False, paused=False)
-        self._plan_active_row = row
-        self._plan_elapsed_s = 0.0
-        self._plan_resume_elapsed_s = 0.0
-        self._plan_started_monotonic = monotonic()
-        self._step_started_monotonic = monotonic()
-        self._plan_timer.stop()
-        self._schedule_plan_timer()
-        self._update_experiment_control_toggle_button()
-        self._sync_experiment_control_timeline(steps, row, refresh_status=True)
-        self._set_status_message(status_message)
-        _LOGGER.info(log_message)
-        self._emit_experimental_control_state(emit_event, steps[row])
-
-    def _queue_experiment_control_start_after_recording(self, *, paused: bool, row: int | None) -> None:
-        self._pending_experiment_control_start_after_recording = (bool(paused), row)
-
-    def _run_pending_experiment_control_start_after_recording(self) -> None:
-        pending = self._pending_experiment_control_start_after_recording
-        if pending is None:
-            return
-        self._pending_experiment_control_start_after_recording = None
-        paused, row = pending
-        steps = self._read_experiment_control_steps()
-        if not steps:
-            self._set_status_message("Experiment plan is empty.")
-            return
-        if row is None or not (0 <= int(row) < len(steps)):
-            row = self._selected_experiment_control_row()
-            if row is None:
-                row = 0
-                self._select_experiment_control_plan_row(0)
-        if paused:
-            self._begin_paused_experiment_plan_run(int(row), steps)
-        else:
-            self._begin_experiment_plan_run(int(row), steps)
-
-    def _enter_hold_state(self) -> None:
-        if not self._plan_running:
-            return
-        # HOLD freezes plan time and cursor position, but does not stop recording.
-        self._capture_plan_elapsed_from_clock()
-        self._set_plan_runtime_flags(running=False, holding=True, paused=False)
-        self._plan_started_monotonic = None
-        self._plan_runtime_s = self._step_runtime_for_display()
-        self._update_experiment_control_toggle_button()
-        self._set_status_message("Experiment plan hold.")
-        _LOGGER.info("Experiment plan hold.")
-        self._emit_experimental_control_state("plan_hold", self._applied_plan_step)
-
-    def _enter_pause_state(self, *, restore_step: PumpPlanStep | None = None) -> None:
-        if not (self._plan_running or self._plan_holding):
-            return
-        if self._plan_running:
-            self._capture_plan_elapsed_from_clock()
-        self._paused_plan_step = deepcopy(self._applied_plan_step) if self._applied_plan_step is not None else None
-        if restore_step is not None:
-            self._paused_plan_step = deepcopy(restore_step)
-        self._apply_pause_state()
-        self._set_plan_runtime_flags(running=False, holding=False, paused=True)
-        self._plan_started_monotonic = None
-        self._plan_runtime_s = self._step_runtime_for_display()
-        self._step_started_monotonic = None
-        self._update_experiment_control_toggle_button()
-        self._set_status_message("Experiment plan paused.")
-        _LOGGER.info("Experiment plan paused.")
-        self._emit_experimental_control_state("plan_pause", self._applied_plan_step)
-
-    def _stop_experiment_plan(self, last_step: PumpPlanStep | None) -> None:
-        steps = self._read_experiment_control_steps()
-        target_row = self._plan_active_row
-        if target_row is None:
-            target_row = self._selected_experiment_control_row()
-        if target_row is None and steps:
-            target_row = 0
-        if steps and target_row is not None:
-            target_row = min(max(int(target_row), 0), len(steps) - 1)
-            self._plan_active_row = target_row
-            if not (self._plan_running or self._plan_holding or self._plan_paused):
-                self._plan_elapsed_s = 0.0
-            self._plan_resume_elapsed_s = self._plan_elapsed_s
-            self._sync_experiment_control_timeline(steps, target_row)
-        if self._plan_running:
-            self._capture_plan_elapsed_from_clock()
-        self._set_plan_runtime_flags(running=False, holding=False, paused=False)
-        self._plan_started_monotonic = None
-        self._step_started_monotonic = None
-        self._measurement_started_monotonic = None
-        self._plan_runtime_s = self._plan_runtime_for_display()
-        self._plan_resume_runtime_s = self._step_runtime_for_display()
-        self._applied_plan_step = None
-        self._paused_plan_step = None
-        self._plan_timer.stop()
-        self._update_experiment_control_toggle_button()
-        if self._service_device_connected("pump"):
-            self._stop_all_channels()
-        else:
-            self._set_status_message("Experiment plan stopped.")
-        _LOGGER.info("Experiment plan stopped.")
-        self._emit_experimental_control_state("plan_stopped", last_step)
+    # _resume_experiment_plan, _begin_experiment_plan_run,
+    # _begin_paused_experiment_plan_run,
+    # _resume_experiment_control_after_manual_step_change,
+    # _queue_experiment_control_start_after_recording,
+    # _run_pending_experiment_control_start_after_recording,
+    # _enter_hold_state, _enter_pause_state, _stop_experiment_plan moved to
+    # lspr_acq_shell.experiment_control_run_loop.PlanRunLoopMixin (Tier 2)
         self._request_recording_control("stop")
 
     def _start_paused_experiment_control(self) -> None:
@@ -2718,24 +2525,7 @@ class ExperimentControlWindow(QWidget):
     # ═══════════════════════════════════════════════════════════════════
 
     def _theme_palette(self) -> dict[str, str]:
-        palette = theme_palette(self._theme_mode)
-        if self._theme_mode == "dark":
-            palette.update({
-                "muted": "#a8b0ba",
-                "title": "#8fbaff",
-                "timeline_bg": "#0f1216",
-                "header": "#1b2026",
-                "selection": "#252b33",
-            })
-        else:
-            palette.update({
-                "muted": "#5f7388",
-                "title": "#2f80c1",
-                "timeline_bg": "#ffffff",
-                "header": "#eef3f7",
-                "selection": "#dbeafe",
-            })
-        return palette
+        return experiment_control_theme_palette(self._theme_mode)
 
     def _flow_scroll_area_style(self, palette: dict[str, str]) -> str:
         # Set directly on the QScrollArea (like the direction/help buttons),
@@ -2800,301 +2590,7 @@ class ExperimentControlWindow(QWidget):
         )
 
     def _apply_style(self) -> None:
-        palette = self._theme_palette()
-        self.setStyleSheet(
-            """
-            QWidget {
-                background: %(bg)s;
-                color: %(fg)s;
-                font-size: 12px;
-            }
-            QToolTip {
-                background-color: %(bg)s;
-                color: %(fg)s;
-                border: 1px solid %(border)s;
-                padding: 4px 6px;
-            }
-            QGroupBox {
-                background: %(bg)s;
-                border: 1px solid %(border)s;
-                border-radius: 12px;
-                margin-top: 8px;
-                padding-top: 10px;
-                font-weight: 600;
-            }
-            QGroupBox::title {
-                left: 10px;
-                top: 2px;
-            }
-            QPushButton, QToolButton, QComboBox, QDoubleSpinBox, QLineEdit, QTableWidget {
-                background: %(field)s;
-                border: 1px solid %(border)s;
-                border-radius: 10px;
-                padding: 4px 6px;
-            }
-            QSpinBox, QDoubleSpinBox {
-                border-radius: 3px;
-                padding: 1px 4px;
-            }
-            QSpinBox::up-button, QSpinBox::down-button,
-            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
-                width: 0px;
-                border: none;
-                background: transparent;
-            }
-            QSpinBox::up-arrow, QSpinBox::down-arrow,
-            QDoubleSpinBox::up-arrow, QDoubleSpinBox::down-arrow {
-                width: 0px;
-                height: 0px;
-            }
-            QPushButton:hover, QToolButton:hover, QComboBox:hover, QDoubleSpinBox:hover, QLineEdit:hover {
-                border-color: %(border_hover)s;
-                background: %(button_hover)s;
-            }
-            QPushButton:pressed, QToolButton:pressed {
-                background: %(button_pressed)s;
-            }
-            QPushButton#accentButton {
-                background: %(accent_button)s;
-                border-color: %(accent_button)s;
-            }
-            QPushButton#accentButton:hover, QToolButton#accentButton:hover {
-                background: %(accent_hover)s;
-                border-color: %(accent_hover)s;
-            }
-            QToolButton#accentButton {
-                background: %(accent_button)s;
-                border-color: %(accent_button)s;
-            }
-            QPushButton#dangerButton {
-                background: %(danger_button)s;
-                border-color: %(danger_button)s;
-            }
-            QPushButton#dangerButton:hover, QToolButton#dangerButton:hover {
-                background: %(danger_hover)s;
-                border-color: %(danger_hover)s;
-            }
-            QToolButton#dangerButton {
-                background: %(danger_button)s;
-                border-color: %(danger_button)s;
-            }
-            QToolButton#flowIconButton {
-                background: transparent;
-                border: none;
-                padding: 0px;
-            }
-            QToolButton#flowIconButton:hover {
-                background: rgba(127, 127, 127, 0.10);
-                border: none;
-            }
-            QToolButton#flowIconButton:pressed {
-                background: rgba(127, 127, 127, 0.18);
-                border: none;
-            }
-            QToolButton#flowViewModeButton {
-                background: transparent;
-                border: none;
-                padding: 0px;
-                margin: 0px;
-                color: %(mode_toggle_accent)s;
-                font-weight: 600;
-            }
-            QToolButton#flowViewModeButton:hover {
-                background: rgba(127, 127, 127, 0.10);
-                border: none;
-            }
-            QToolButton#flowViewModeButton:pressed {
-                background: rgba(127, 127, 127, 0.18);
-                border: none;
-            }
-            QToolButton#flowColorAddButton {
-                background: transparent;
-                border: none;
-                padding: 0px;
-                min-width: 18px;
-                min-height: 18px;
-            }
-            QToolButton#flowColorAddButton:hover {
-                background: rgba(47, 143, 83, 0.10);
-            }
-            QToolButton#flowColorAddButton:pressed {
-                background: rgba(47, 143, 83, 0.18);
-            }
-            QToolButton#flowColorRemoveButton {
-                background: transparent;
-                border: none;
-                padding: 0px;
-                min-width: 18px;
-                min-height: 18px;
-                color: #b44a4a;
-            }
-            QToolButton#flowColorRemoveButton:hover {
-                background: rgba(180, 74, 74, 0.10);
-            }
-            QToolButton#flowColorRemoveButton:pressed {
-                background: rgba(180, 74, 74, 0.18);
-            }
-            QToolButton#flowSwitchModeButton,
-            QToolButton#flowSwitchSettingsButton,
-            QToolButton#flowCommentDisplayButton {
-                background: transparent;
-                border: none;
-                padding: 0px;
-                min-width: 18px;
-                min-height: 18px;
-                color: %(muted)s;
-            }
-            QToolButton#flowValveSettingsButton {
-                background: transparent;
-                border: none;
-                padding: 0px;
-                min-width: 18px;
-                min-height: 18px;
-                color: %(muted)s;
-            }
-            QToolButton#flowSwitchModeButton:hover,
-            QToolButton#flowSwitchSettingsButton:hover,
-            QToolButton#flowValveSettingsButton:hover,
-            QToolButton#flowCommentDisplayButton:hover {
-                background: rgba(127, 127, 127, 0.10);
-            }
-            QToolButton#flowSwitchModeButton:pressed,
-            QToolButton#flowSwitchSettingsButton:pressed,
-            QToolButton#flowValveSettingsButton:pressed,
-            QToolButton#flowCommentDisplayButton:pressed {
-                background: rgba(127, 127, 127, 0.18);
-            }
-            QLabel#flowHeaderLabel {
-                color: %(muted)s;
-                font-size: 13px;
-                font-weight: 800;
-                letter-spacing: 0.8px;
-            }
-            QWidget#flowContent, QWidget#flowEditorContainer {
-                background: %(bg)s;
-                border: none;
-            }
-            QTableView#flowControlTable {
-                background: %(bg)s;
-                border: none;
-                border-radius: 0px;
-                gridline-color: %(border)s;
-                alternate-background-color: %(button)s;
-                selection-background-color: transparent;
-                selection-color: %(fg)s;
-                font-size: 11px;
-            }
-            QTableView#flowControlTable::viewport {
-                background: %(bg)s;
-                border: none;
-            }
-            QTableView#flowControlTable::item {
-                border: none;
-                padding: 1px 4px;
-            }
-            QTableView#flowControlTable QComboBox,
-            QTableView#flowControlTable QDoubleSpinBox,
-            QTableView#flowControlTable QLineEdit,
-            QTableView#flowControlTable QToolButton {
-                background: transparent;
-                border: none;
-                padding: 0px 1px;
-                margin: 0px;
-            }
-            QTableView#flowControlTable QComboBox::drop-down {
-                border: none;
-                background: transparent;
-                width: 0px;
-            }
-            QTableView#flowControlTable QComboBox::down-arrow {
-                width: 0px;
-                height: 0px;
-            }
-            QTableView#flowControlTable QComboBox::item {
-                padding: 0px 4px;
-            }
-            QTableView#flowControlTable QDoubleSpinBox::up-button,
-            QTableView#flowControlTable QDoubleSpinBox::down-button {
-                width: 0px;
-                border: none;
-                background: transparent;
-            }
-            QTableView#flowControlTable QDoubleSpinBox::up-arrow,
-            QTableView#flowControlTable QDoubleSpinBox::down-arrow {
-                width: 0px;
-                height: 0px;
-            }
-            QTableView#flowControlTable::item:selected {
-                background: transparent;
-                background-color: transparent;
-            }
-            QTableView#flowControlTable::item:selected:active,
-            QTableView#flowControlTable::item:selected:!active {
-                background: transparent;
-                background-color: transparent;
-            }
-            QTableView#flowControlTable QHeaderView::section {
-                background: %(header)s;
-                color: %(fg)s;
-                border: none;
-                border-right: 1px solid %(border)s;
-                border-bottom: 1px solid %(border)s;
-                padding: 0px 1px;
-                font-size: 10px;
-                font-weight: 600;
-            }
-            QScrollBar:vertical {
-                background: transparent;
-                width: 8px;
-                margin: 2px 0 2px 0;
-            }
-            QScrollBar::handle:vertical {
-                background: %(scroll)s;
-                border-radius: 4px;
-                min-height: 30px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: %(scroll_hover)s;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-                background: transparent;
-                border: none;
-            }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-                background: transparent;
-            }
-            QScrollBar:horizontal {
-                background: transparent;
-                height: 8px;
-                margin: 0 2px 0 2px;
-            }
-            QScrollBar::handle:horizontal {
-                background: %(scroll)s;
-                border-radius: 4px;
-                min-width: 30px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background: %(scroll_hover)s;
-            }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-                width: 0px;
-                background: transparent;
-                border: none;
-            }
-            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
-                background: transparent;
-            }
-            QSplitter::handle {
-                background: %(splitter)s;
-            }
-            QSplitter::handle:vertical {
-                height: 6px;
-                margin: 0 4px;
-                border-radius: 3px;
-            }
-            """ % palette
-        )
+        apply_experiment_control_style(self, self._theme_palette())
 
     # ═══════════════════════════════════════════════════════════════════
     # Table columns, splitters, and layout persistence
@@ -5004,161 +4500,35 @@ class ExperimentControlWindow(QWidget):
     ) -> tuple[list[_PlannedCommand], bool, list[str]]:
         """Build an ordered command list for a step transition (main-thread only — reads widget state).
 
+        Thin wrapper: gathers the explicit inputs the shared, pure
+        `lspr_acq_shell.experiment_control_step_decision.plan_step_commands`
+        needs from this window's live state (widgets, device connections,
+        settings) and delegates the actual decision to it (Phase 2, LSPRi
+        acq experiment-control reuse - Tier 2 extraction, 2026-08-09) - see
+        that module's docstring for why this is safe to share (no window
+        coupling once these inputs are made explicit).
+
         Returns (commands, needs_mswitch_refresh, pre_status_messages).
         """
-        previous = self._applied_plan_step
-        status_messages: list[str] = []
-        commands: list[_PlannedCommand] = []
-        needs_mswitch_refresh = False
-
-        valve = str(step.valve or "").strip()
-        previous_valve = str(previous.valve or "").strip().lower() if previous is not None else ""
-        switch_position = int(max(min(int(step.switch_position), 12), 1))
-        previous_switch = int(max(min(int(previous.switch_position), 12), 1)) if previous is not None else -1
-        switch_changed = switch_position != previous_switch
-        wait_for_switch_first = bool(self._wait_for_mswitch_first and switch_changed)
-
-        pump_label = self._device_label_for("pump")
-        valve_label = self._device_label_for(SWITCH)
-        switch_label = self._device_label_for(SELECTOR)
-        pump_connected = self._service_device_connected("pump")
-        valve_connected = self._service_device_connected(SWITCH)
-        mswitch_connected = self._service_device_connected(SELECTOR)
-
-        channels_to_stop: list[int] = []
-        channels_to_start: list[int] = []
-        channels_to_configure: list[tuple[int, float, str, float]] = []
-        channels_to_restart_after_switch: list[int] = []
-
-        _LOGGER.info(
-            "Applying experiment-plan step | step=%s valve=%s previous_valve=%s controller=%s port=%s running=%s holding=%s start=%s",
-            step.step,
-            valve or "-",
-            str(previous.valve or "").strip() or "-" if previous is not None else "-",
-            *self._service_connection_detail(SWITCH),
-            self._plan_running,
-            self._plan_holding,
-            start,
+        switch_controller_type, switch_port = self._service_connection_detail(SWITCH)
+        context = StepCommandContext(
+            wait_for_mswitch_first=self._wait_for_mswitch_first,
+            pump_label=self._device_label_for("pump"),
+            valve_label=self._device_label_for(SWITCH),
+            switch_label=self._device_label_for(SELECTOR),
+            pump_connected=self._service_device_connected("pump"),
+            valve_connected=self._service_device_connected(SWITCH),
+            mswitch_connected=self._service_device_connected(SELECTOR),
+            tube_mm_by_channel=[spin.value() for spin in self.manual_tube_spins],
+            pump_backsteps=self._device_manager_settings.pump.backsteps,
+            pump_roller_count=self._device_manager_settings.pump.roller_count,
+            pump_display_enabled=self._pump_display_enabled,
+            plan_running=self._plan_running,
+            plan_holding=self._plan_holding,
+            switch_controller_type=switch_controller_type,
+            switch_port=switch_port,
         )
-
-        if pump_connected:
-            for index, channel in enumerate(step.channels, start=1):
-                # Normalize exactly like the table's own display/write path
-                # (flow_plan_model.normalized_pump_direction) - a channel's
-                # raw direction defaults to "OFF" until its cell is
-                # explicitly touched, but the table has always *displayed*
-                # that default as "CW" (the function never returns "OFF").
-                # Reading the raw value here instead meant a channel whose
-                # direction cell nobody ever clicked - despite showing "CW"
-                # - was silently skipped even with a real flow rate set,
-                # since only this dispatch code (not the table) still
-                # treated "OFF" as a real third state blocking the channel.
-                direction = normalized_pump_direction(channel.direction)
-                active = channel.flow_ul_min > 0.0
-                tube_mm = self.manual_tube_spins[index - 1].value()
-                previous_channel = previous.channels[index - 1] if previous is not None else None
-                previous_direction = (
-                    normalized_pump_direction(previous_channel.direction) if previous_channel is not None else "CW"
-                )
-                previous_active = previous_channel is not None and previous_channel.flow_ul_min > 0.0
-                previous_flow = float(previous_channel.flow_ul_min) if previous_channel is not None else 0.0
-                channel_changed = (
-                    previous is None
-                    or previous_channel is None
-                    or previous_direction != direction
-                    or abs(previous_flow - float(channel.flow_ul_min)) > 1e-9
-                )
-                if previous_active and (not active or channel_changed or (wait_for_switch_first and switch_changed)):
-                    channels_to_stop.append(index)
-                if wait_for_switch_first and switch_changed and previous_active and active and not channel_changed:
-                    channels_to_restart_after_switch.append(index)
-                if active and channel_changed:
-                    channels_to_configure.append((index, float(channel.flow_ul_min), direction, tube_mm))
-                    if start:
-                        channels_to_start.append(index)
-                elif active and start and not previous_active:
-                    channels_to_start.append(index)
-        else:
-            _LOGGER.warning("Pump controller offline; skipping pump channel updates | step=%s", step.step)
-            status_messages.append("Pump controller not connected.")
-
-        effective_starts_after_switch = list(channels_to_start)
-        if wait_for_switch_first and switch_changed:
-            for index in channels_to_restart_after_switch:
-                if index not in effective_starts_after_switch:
-                    effective_starts_after_switch.append(index)
-
-        def _pump_stop_cmds(indices: list[int]) -> list[_PlannedCommand]:
-            return [_PlannedCommand(pump_label, "pump.stop", {"channel": i}, f"pump.stop ch={i}") for i in indices]
-
-        def _pump_configure_cmds() -> list[_PlannedCommand]:
-            backsteps = self._device_manager_settings.pump.backsteps
-            roller_count = self._device_manager_settings.pump.roller_count
-            return [
-                _PlannedCommand(
-                    pump_label, "pump.set_flow",
-                    {
-                        "channel": i, "flow_ul_min": fl, "direction": d, "tube_mm": t,
-                        "backsteps": backsteps, "roller_count": roller_count, "start": False,
-                    },
-                    f"pump.set_flow ch={i} flow={fl:.2f} dir={d}",
-                )
-                for i, fl, d, t in channels_to_configure
-            ]
-
-        def _pump_start_cmds(indices: list[int]) -> list[_PlannedCommand]:
-            return [_PlannedCommand(pump_label, "pump.start", {"channel": i}, f"pump.start ch={i}") for i in indices]
-
-        def _valve_cmd() -> list[_PlannedCommand]:
-            if not (valve and valve.lower() != previous_valve):
-                return []
-            if valve_connected:
-                return [_PlannedCommand(valve_label, "switch.set_position", {"position": valve}, f"switch.set_position pos={valve}")]
-            status_messages.append("Switch controller not connected.")
-            _LOGGER.warning("Valve command skipped | controller not connected | step=%s valve=%s", step.step, valve)
-            return []
-
-        def _switch_cmd() -> list[_PlannedCommand]:
-            if not switch_changed:
-                return []
-            if mswitch_connected:
-                return [_PlannedCommand(
-                    switch_label, "switch.move_to", {"position": switch_position, "block": True},
-                    f"switch.move_to pos={switch_position}", is_switch_move=True,
-                )]
-            status_messages.append("Switch rotary valve not connected.")
-            _LOGGER.warning("Switch rotary valve command skipped | controller not connected | step=%s switch=%s", step.step, switch_position)
-            return []
-
-        def _pump_display_cmd() -> list[_PlannedCommand]:
-            # Always sent (not diffed against the previous step) so a step with the
-            # option off reliably clears whatever the previous step left showing,
-            # instead of leaving a stale comment on the pump's display.
-            if not pump_connected:
-                return []
-            text = str(step.description or "").strip() if self._pump_display_enabled else ""
-            return [_PlannedCommand(pump_label, "pump.set_display", {"text": text}, f"pump.set_display text={text!r}")]
-
-        if wait_for_switch_first:
-            if pump_connected:
-                commands.extend(_pump_stop_cmds(channels_to_stop))
-            commands.extend(_switch_cmd())
-            commands.extend(_valve_cmd())
-            if pump_connected:
-                commands.extend(_pump_configure_cmds())
-                commands.extend(_pump_start_cmds(effective_starts_after_switch))
-                commands.extend(_pump_display_cmd())
-        else:
-            if pump_connected:
-                commands.extend(_pump_stop_cmds(channels_to_stop))
-                commands.extend(_pump_configure_cmds())
-                commands.extend(_pump_start_cmds(channels_to_start))
-                commands.extend(_pump_display_cmd())
-            commands.extend(_valve_cmd())
-            commands.extend(_switch_cmd())
-
-        needs_mswitch_refresh = any(c.is_switch_move for c in commands)
-        return commands, needs_mswitch_refresh, status_messages
+        return plan_step_commands(step, self._applied_plan_step, context, start=start)
 
     @property
     def _step_apply_pending(self) -> bool:
@@ -5260,237 +4630,14 @@ class ExperimentControlWindow(QWidget):
             return ""
         return "Edited active step: " + "; ".join(changes)
 
-    def _set_experiment_control_runtime_row(
-        self,
-        row: int,
-        *,
-        event: str,
-        status: str = "",
-        apply_step: bool = False,
-        refresh_status: bool = True,
-    ) -> None:
-        steps = self._read_experiment_control_steps()
-        if row < 0 or row >= len(steps):
-            return
-        self._plan_active_row = row
-        if apply_step:
-            self._apply_step_to_pump_async(steps[row], start=True)
-        self._sync_experiment_control_timeline(steps, row, refresh_status=refresh_status)
-        self._emit_experimental_control_state(event, steps[row], status=status)
-
-    def _jump_to_experiment_control_step(self, row: int) -> None:
-        steps = self._read_experiment_control_steps()
-        if row < 0 or row >= len(steps):
-            return
-        if self._plan_running or self._plan_holding or self._plan_paused:
-            if self._plan_running:
-                self._plan_active_row = row
-                self._plan_elapsed_s = 0.0
-                self._plan_resume_elapsed_s = 0.0
-                self._plan_started_monotonic = monotonic()
-                self._step_started_monotonic = monotonic()
-                self._set_experiment_control_runtime_row(
-                    row,
-                    event="step_jump",
-                    apply_step=True,
-                )
-                self._plan_runtime_s = self._step_runtime_for_display()
-                self._plan_resume_runtime_s = self._plan_runtime_s
-                return
-            self._resume_experiment_control_after_manual_step_change(
-                row,
-                status_message=f"Running experiment plan from step {row + 1}.",
-                log_message=f"Experiment plan resumed on step {row + 1} after manual step change.",
-                emit_event="plan_resume",
-            )
-            return
-        self._select_experiment_control_plan_row(row)
-        self._load_selected_step_into_editor()
-        self._update_timeline_selection()
-        self._set_status_message(f"Selected experiment-plan step {row + 1}.")
-
-    def _apply_selected_experiment_control_step(self, row: int) -> None:
-        steps = self._read_experiment_control_steps()
-        if row < 0 or row >= len(steps):
-            return
-        if self._plan_running:
-            self._set_experiment_control_runtime_row(
-                row,
-                event="step_apply",
-                apply_step=True,
-            )
-            return
-        if self._plan_holding:
-            self._resume_experiment_control_after_manual_step_change(
-                row,
-                status_message=f"Running experiment plan from step {row + 1}.",
-                log_message=f"Experiment plan resumed on step {row + 1} after manual step apply.",
-                emit_event="plan_resume",
-            )
-            return
-        if self._plan_paused:
-            self._resume_experiment_control_after_manual_step_change(
-                row,
-                status_message=f"Running experiment plan from step {row + 1}.",
-                log_message=f"Experiment plan resumed on step {row + 1} after manual step apply.",
-                emit_event="plan_resume",
-            )
-            return
-        # Not running/holding/paused - only select the row. Applying the
-        # step to hardware here would start devices moving with no way to
-        # stop them: Stop is gated on _plan_running/_plan_holding/
-        # _plan_paused, none of which double-clicking a step outside those
-        # states ever sets, leaving the plan in an unstoppable "device is
-        # moving but nothing is running" state.
-        self._jump_to_experiment_control_step(row)
-
-    # ═══════════════════════════════════════════════════════════════════
-    # Runtime state machine: core run/hold/pause/stop loop
-    # ═══════════════════════════════════════════════════════════════════
-
-    def _run_experiment_control(self) -> None:
-        self._start_or_resume_experiment_control()
-
-    def _start_or_resume_experiment_control(self) -> None:
-        steps = self._read_experiment_control_steps()
-        if not steps:
-            self._set_status_message("Experiment plan is empty.")
-            return
-        if self._plan_running:
-            return
-        if self._plan_holding or self._plan_paused:
-            restore_step = None
-            if self._plan_paused and self._paused_plan_step is not None:
-                restore_step = deepcopy(self._paused_plan_step)
-                self._paused_plan_step = None
-            self._resume_experiment_plan(
-                restore_step=restore_step,
-                status_message=f"Resumed experiment plan on step {self._plan_active_row + 1 if self._plan_active_row is not None else 1}.",
-                log_message=f"Experiment plan resumed | step={self._plan_active_row + 1 if self._plan_active_row is not None else 1}",
-                emit_event="plan_resume",
-            )
-            return
-        recording_active = bool(getattr(getattr(self, "recording_controller", None), "_measurement_active", False))
-        if self.record_with_flow_button.isChecked() and not recording_active:
-            row = self._selected_experiment_control_row()
-            if row is None:
-                row = 0
-                self._select_experiment_control_plan_row(0)
-            self._queue_experiment_control_start_after_recording(paused=False, row=row)
-        if not self._request_recording_control("start"):
-            self._pending_experiment_control_start_after_recording = None
-            self._set_status_message("Experiment plan start cancelled because recording was not started.")
-            return
-        if self._pending_experiment_control_start_after_recording is not None:
-            return
-        row = self._selected_experiment_control_row()
-        if row is None:
-            row = 0
-            self._select_experiment_control_plan_row(0)
-        self._begin_experiment_plan_run(row, steps)
-
-    def _hold_experiment_control(self) -> None:
-        self._enter_hold_state()
-
-    def _pause_experiment_control(self) -> None:
-        self._enter_pause_state()
-
-    def _stop_experiment_control(self) -> None:
-        self._stop_experiment_plan(self._applied_plan_step)
-
-    def _schedule_plan_timer(self, steps: list | None = None) -> None:
-        if self._plan_timer.isActive():
-            return
-        if not self._plan_running and not self._plan_holding and not self._plan_paused:
-            return
-        if not self._plan_running or self._plan_started_monotonic is None or self._plan_holding or self._plan_paused:
-            self._plan_timer.start(150)
-            return
-        if steps is None:
-            steps = self._read_experiment_control_steps()
-        active_row = self._plan_active_row
-        if active_row is None or not steps or not (0 <= active_row < len(steps)):
-            self._plan_timer.start(150)
-            return
-        step = steps[active_row]
-        elapsed = self._plan_resume_elapsed_s + max(monotonic() - self._plan_started_monotonic, 0.0)
-        remaining_ms = int((float(step.duration_s) - elapsed) * 1000)
-        self._plan_timer.start(max(1, min(150, remaining_ms)))
-
-    def _move_to_relative_experiment_control_step(self, delta: int) -> None:
-        steps = self._read_experiment_control_steps()
-        if not steps:
-            return
-        running = self._plan_running
-        active = self._plan_running or self._plan_holding or self._plan_paused
-        row = self._plan_active_row if active else self._selected_experiment_control_row()
-        if row is None:
-            row = 0
-        raw_target = row + delta
-        if active and raw_target >= len(steps):
-            # Pressing Next past the last step finishes the plan, mirroring
-            # what _advance_experiment_control_progress already does when
-            # auto-advance reaches the end. Without this, target below just
-            # clamps to the last step (same row), and the running branch's
-            # elapsed-time reset would restart that same last step from 0
-            # instead of finishing - "Next" on the last step should finish
-            # the plan, not replay it.
-            self._plan_elapsed_s = max(float(steps[-1].duration_s), 0.0)
-            self._plan_resume_elapsed_s = self._plan_elapsed_s
-            self._stop_experiment_control()
-            self._set_status_message("Experiment plan finished.")
-            _LOGGER.info("Experiment plan finished.")
-            return
-        target = min(max(raw_target, 0), len(steps) - 1)
-        if active:
-            if running:
-                # Mirrors _jump_to_experiment_control_step's reset - without
-                # it, the new step's elapsed/ETA tracking kept accumulating
-                # from wherever the previous step left off instead of
-                # restarting at 0 (elapsed = _plan_resume_elapsed_s + time
-                # since _plan_started_monotonic, neither of which this used
-                # to touch).
-                self._plan_elapsed_s = 0.0
-                self._plan_resume_elapsed_s = 0.0
-                self._plan_started_monotonic = monotonic()
-                self._set_experiment_control_runtime_row(
-                    target,
-                    event="step_jump",
-                    apply_step=True,
-                )
-                self._step_started_monotonic = monotonic()
-                self._plan_runtime_s = self._step_runtime_for_display()
-                self._plan_resume_runtime_s = self._plan_runtime_s
-            else:
-                self._resume_experiment_control_after_manual_step_change(
-                    target,
-                    status_message=f"Running experiment plan from step {target + 1}.",
-                    log_message=f"Experiment plan resumed on step {target + 1} after step navigation.",
-                    emit_event="plan_resume",
-                )
-        else:
-            self._jump_to_experiment_control_step(target)
-        if not (self._plan_running or self._plan_holding or self._plan_paused):
-            self._set_status_message(f"Selected experiment-plan step {target + 1}.")
-
-    def _timeline_progress_for_display(self) -> float | None:
-        if self._plan_running or self._plan_holding or self._plan_paused:
-            row = self._plan_active_row if self._plan_active_row is not None else self._selected_experiment_control_row()
-            steps = self._read_experiment_control_steps()
-            if row is not None and 0 <= row < len(steps):
-                return max(float(steps[row].start_s) + max(float(self._plan_elapsed_s), 0.0), 0.0)
-            return max(float(self._plan_elapsed_s), 0.0)
-        return None
-
-    def _plan_runtime_for_display(self) -> float:
-        if self._measurement_started_monotonic is not None:
-            return max(monotonic() - self._measurement_started_monotonic, 0.0)
-        return max(float(self._plan_runtime_s), 0.0)
-
-    def _step_runtime_for_display(self) -> float:
-        if self._step_started_monotonic is not None:
-            return max(monotonic() - self._step_started_monotonic, 0.0)
-        return max(float(self._plan_resume_runtime_s), 0.0)
+    # _set_experiment_control_runtime_row, _jump_to_experiment_control_step,
+    # _apply_selected_experiment_control_step, _run_experiment_control,
+    # _start_or_resume_experiment_control, _hold_experiment_control,
+    # _pause_experiment_control, _stop_experiment_control,
+    # _schedule_plan_timer, _move_to_relative_experiment_control_step,
+    # _timeline_progress_for_display, _plan_runtime_for_display,
+    # _step_runtime_for_display moved to
+    # lspr_acq_shell.experiment_control_run_loop.PlanRunLoopMixin (Tier 2)
 
     def _experiment_control_step_label_for_overlay(self, step: PumpPlanStep) -> str:
         """Label text for a step, matching whichever label mode the
@@ -5537,68 +4684,9 @@ class ExperimentControlWindow(QWidget):
     def _emit_flow_state(self, event: str, step: PumpPlanStep | None = None, *, status: str = "") -> None:
         self._emit_experimental_control_state(event, step, status=status)
 
-    def _advance_experiment_control_progress(self) -> None:
-        steps: list | None = None
-
-        def _callback() -> None:
-            nonlocal steps
-            if self._plan_holding or self._plan_paused:
-                steps = self._read_experiment_control_steps()
-                if steps:
-                    self._sync_experiment_control_timeline(steps, self._plan_active_row, refresh_status=True)
-                return
-            if not self._plan_running or self._plan_started_monotonic is None:
-                return
-            if self._step_apply_pending:
-                # Previous step's device commands still running; wait and retry.
-                self._plan_timer.start(50)
-                return
-            steps = self._read_experiment_control_steps()
-            if not steps:
-                self._stop_experiment_control()
-                return
-            elapsed = self._plan_resume_elapsed_s + max(monotonic() - self._plan_started_monotonic, 0.0)
-            current_row = self._plan_active_row if self._plan_active_row is not None else self._selected_experiment_control_row()
-            if current_row is None or not (0 <= current_row < len(steps)):
-                current_row = 0
-            current_step = steps[current_row]
-            if elapsed >= max(float(current_step.duration_s), 0.0):
-                next_row = current_row + 1
-                if next_row >= len(steps):
-                    self._plan_elapsed_s = max(float(current_step.duration_s), 0.0)
-                    self._plan_resume_elapsed_s = self._plan_elapsed_s
-                    self._stop_experiment_control()
-                    self._set_status_message("Experiment plan finished.")
-                    _LOGGER.info("Experiment plan finished.")
-                    return
-                self._plan_active_row = next_row
-                self._apply_step_to_pump_async(steps[next_row], start=True)
-                self._plan_elapsed_s = 0.0
-                self._plan_resume_elapsed_s = 0.0
-                self._plan_started_monotonic = monotonic()
-                self._step_started_monotonic = monotonic()
-                self._sync_experiment_control_timeline(steps, next_row, refresh_status=True)
-                return
-            self._plan_elapsed_s = elapsed
-            self._sync_experiment_control_timeline(steps, current_row, refresh_status=True)
-
-        self._run_gui_callback_timed("experiment_control_progress", _callback)
-        self._schedule_plan_timer(steps)
-
-    def _activate_experiment_control_step_for_elapsed(self, elapsed_s: float, *, force: bool) -> None:
-        steps = self._read_experiment_control_steps()
-        if not steps:
-            self._plan_active_row = None
-            self._plan_elapsed_s = 0.0
-            return
-        self._plan_elapsed_s = max(float(elapsed_s), 0.0)
-        target_row = self._plan_active_row if self._plan_active_row is not None else self._selected_experiment_control_row()
-        if target_row is None or not (0 <= target_row < len(steps)):
-            target_row = 0
-        if force or target_row != self._plan_active_row:
-            self._plan_active_row = target_row
-            self._apply_step_to_pump_async(steps[target_row], start=True)
-        self._sync_experiment_control_timeline(steps, target_row)
+    # _advance_experiment_control_progress,
+    # _activate_experiment_control_step_for_elapsed moved to
+    # lspr_acq_shell.experiment_control_run_loop.PlanRunLoopMixin (Tier 2)
 
     def _stop_all_channels(self) -> None:
         if not self._service_device_connected("pump"):
