@@ -1111,7 +1111,7 @@ class MainWindow(QMainWindow):
 </svg>
 """
 
-        self.setWindowTitle(f"LSPR Acquisition {__version__}")
+        self.setWindowTitle("sLSPR Acquisition")
         self.setWindowIcon(QIcon(str(self._brand_icon_path)))
         self.resize(1380, 920)
         self._startup_window_revealed = False

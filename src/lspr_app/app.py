@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from lspr_ui import app_icon, apply_base_app_theme
+from lspr_ui import APP_ID_SLSPR_ACQUISITION, app_icon, apply_base_app_theme, set_windows_app_user_model_id
 from lspr_app.resources import app_icon_path
 from lspr_app.storage.app_config import (
     get_and_clear_settings_corruption_notice,
@@ -550,6 +550,7 @@ def _attach_startup_file_logging() -> tuple[logging.Handler | None, DiagnosticsC
 
 
 def main() -> None:
+    set_windows_app_user_model_id(APP_ID_SLSPR_ACQUISITION)
     file_handler, diagnostics = _attach_startup_file_logging()
     bootstrap_logger = logging.getLogger("lspr_app.bootstrap")
     bootstrap_level = logging.WARNING if diagnostics.profile == "off" else logging.INFO
@@ -563,7 +564,7 @@ def main() -> None:
     )
     app.installEventFilter(startup_widget_tracer)
     app._startup_widget_tracer = startup_widget_tracer
-    app.setApplicationDisplayName("LSPR Acquisition")
+    app.setApplicationDisplayName("sLSPR Acquisition")
     app.setApplicationVersion(__version__)
     apply_base_app_theme(app)
     corruption_notice = get_and_clear_settings_corruption_notice()
