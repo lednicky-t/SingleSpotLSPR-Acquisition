@@ -1,4 +1,4 @@
-﻿"""MainWindow layout persistence, view-mode switching, and acquisition-state
+"""MainWindow layout persistence, view-mode switching, and acquisition-state
 application.
 
 Despite the module name, most of this is not a passive state container -

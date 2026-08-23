@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QMenuBar, QWidget

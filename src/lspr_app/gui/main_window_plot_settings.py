@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from time import perf_counter
 
 from lspr_app.gui.main_window_plotting import apply_metric_color_styles_for
@@ -58,7 +57,7 @@ class MetricModeSelectionState:
 @dataclass(frozen=True)
 class MetricModeRow:
     mode: str
-    color_button: QToolButton
+    color_button: "MetricColorButton"
     checkbox: QCheckBox
     star_label: QToolButton
     label: QLabel
@@ -1202,7 +1201,6 @@ class SensorgramPlotSettingsDialog(QDialog):
             try:
                 if bool(getattr(window, "_live_active", False)):
                     selected_metrics = set(getattr(window, "_selected_trace_metrics", lambda: [])())
-                    archive_path = getattr(window, "_metric_archive_path", None)
                     if hasattr(window._plot_view_cache, "set_live_absolute_metric_tail_size"):
                         window._plot_view_cache.set_live_absolute_metric_tail_size(
                             selected_metrics,
@@ -1211,7 +1209,6 @@ class SensorgramPlotSettingsDialog(QDialog):
                     window._plot_view_cache.refresh_live_absolute_metric_cache(
                         selected_metrics,
                         target_points=int(window._plot_display_points),
-                        archive_path=Path(archive_path) if archive_path else None,
                     )
             except Exception:
                 pass
