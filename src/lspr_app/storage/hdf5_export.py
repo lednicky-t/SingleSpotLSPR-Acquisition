@@ -36,6 +36,8 @@ from lspr_io import (
     LSPR_PROCESSED_METRICS_ACQUIRED_AT_UNIX_MS_DATASET_NAME,
     LSPR_SESSION_SCHEMA_NAME,
     LSPR_SESSION_SCHEMA_VERSION,
+    LSPR_SINGLE_CHANNEL_ROI_ID,
+    create_roi_index_entry,
     standard_measurement_metadata,
     standard_session_identity,
     write_device_inventory_metadata,
@@ -97,7 +99,17 @@ def repack_measurement_hdf5_file(source_path: Path) -> Path:
 
 def _copy_hdf5_node(source_node, destination_node, *, compression: str | None = None) -> None:
     destination_node.attrs.update(source_node.attrs)
-    for name, item in source_node.items():
+    for name in source_node:
+        link = source_node.get(name, getlink=True)
+        if isinstance(link, h5py.SoftLink):
+            # Preserve as a link rather than following it - schema 6.5's
+            # /rois/<roi_id>/ index points at data that lives elsewhere in
+            # the same file (see create_roi_index_entry); resolving via
+            # source_node.items() here would silently deep-copy that data a
+            # second time on every repack.
+            destination_node[name] = h5py.SoftLink(link.path)
+            continue
+        item = source_node[name]
         if isinstance(item, h5py.Group):
             child = destination_node.create_group(name)
             _copy_hdf5_node(item, child, compression=compression)
@@ -225,6 +237,16 @@ class HDF5MeasurementWriter:
         self._reference_group = self._create_spectrum_group("reference")
         self._metrics_group = self._create_metrics_group()
         self._write_processed_metrics_metadata(processing)
+        # Schema 6.5: a uniform /rois/<roi_id>/ browsing index, shared with
+        # LSPRi eva's per-ROI export - sLSPR acq has exactly one channel (the
+        # fiber probe), so this is one static entry. Soft links only, no data
+        # duplication - see schema.py's 6.5 changelog entry.
+        create_roi_index_entry(
+            self._handle,
+            LSPR_SINGLE_CHANNEL_ROI_ID,
+            definition_attrs={"name": "Fiber probe", "geometry_type": "single_channel"},
+            links={"spectra": "/data/spectra", "metrics": "/processed/metrics"},
+        )
         self._runtime = self._create_runtime_dataset()
 
         self._time = self._data.create_dataset(
