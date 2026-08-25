@@ -1,4 +1,4 @@
-﻿# Flow Table Migration Plan
+# Flow Table Migration Plan
 
 Status: deferred
 

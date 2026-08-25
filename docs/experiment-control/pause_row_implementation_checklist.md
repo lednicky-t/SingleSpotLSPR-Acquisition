@@ -1,4 +1,4 @@
-﻿# Pause Row Implementation Checklist
+# Pause Row Implementation Checklist
 
 Status: living draft
 

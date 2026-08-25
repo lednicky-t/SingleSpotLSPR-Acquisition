@@ -1,4 +1,4 @@
-﻿# LSPR Measurement File Format
+# LSPR Measurement File Format
 
 This document describes the native HDF5 file layout for LSPR Acquisition measurement data.
 It is intended as the implementation contract for writers, readers, validators, and future analysis tools.

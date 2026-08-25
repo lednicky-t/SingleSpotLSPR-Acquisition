@@ -1,4 +1,4 @@
-﻿# Flow Plan Execution Model
+# Flow Plan Execution Model
 
 Status: living draft
 

@@ -1,4 +1,4 @@
-﻿# LSPR Acquisition
+# LSPR Acquisition
 
 Desktop application for live LSPR spectroscopy acquisition, analysis, and experiment control.
 

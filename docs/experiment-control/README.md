@@ -1,4 +1,4 @@
-﻿# Experiment Control
+# Experiment Control
 
 Reserve this folder for future experiment-control documentation, for example:
 

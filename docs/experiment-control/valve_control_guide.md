@@ -1,4 +1,4 @@
-﻿# Valve Control Guide for SeaSharp
+# Valve Control Guide for SeaSharp
 
 This document explains how the valve control code in LSPR is structured and how to extend or reimplement it safely.
 

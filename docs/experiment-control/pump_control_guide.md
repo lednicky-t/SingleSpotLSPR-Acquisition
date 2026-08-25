@@ -1,4 +1,4 @@
-﻿# Pump Control Guide for SeaSharp
+# Pump Control Guide for SeaSharp
 
 This document explains how the pump control code in LSPR is structured and how to extend or reimplement it safely.
 
