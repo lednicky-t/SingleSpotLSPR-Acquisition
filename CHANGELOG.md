@@ -4,6 +4,36 @@ All notable changes to LSPR Acquisition are tracked here.
 
 The project uses semantic versioning: `MAJOR.MINOR.PATCH`.
 
+## 0.4.1 - Shared acquisition shell extraction and reproducibility hardening
+
+### Changed
+
+- Large internal refactor: experiment-control (plan editing/execution, run-loop state machine, timeline/table widgets, theme), the fluidics device layer, plot view cache, HDF5 measurement writer, settings/user-profile persistence, and diagnostics config were extracted into the new shared `lspr_acq_shell` package, with this app now built as a thin layer over it - paving the way for LSPRimaging Acquisition to reuse the same code instead of duplicating it. No intended user-visible behavior change.
+- Generalized pump/switch/selector device dispatch into a shared registry.
+- Device Manager dialog now shows the maximize button on Windows.
+- Shortened the window title to "sLSPR Acquisition" and stamped an explicit Windows taskbar identity (AppUserModelID) so it no longer groups under Python's generic taskbar icon.
+- Every third-party dependency is now floor/ceiling version-pinned in `pyproject.toml` for reproducibility.
+
+### Fixed
+
+- Experiment-plan import freeze; added an external FR/Direction CSV format.
+- Duplicate "session_session" in always-on session-backup filenames.
+- Sensorgram control-step timeline overlay (Full style was invisible; top/bottom icon swap).
+- Reverted a change where "Start Trace" incorrectly reset the session, breaking the multi-measurement session view.
+- A stale simulation worker no longer lingers when auto-switching to a later-discovered spectrometer.
+- Bright (Light) theme visibility fixes across the GUI.
+- A dead-parameter type mismatch found via a mypy/vulture trial.
+
+### Added
+
+- HDF5: device inventory and switch-solution detail fields (schema 6.3).
+- HDF5: uniform `/rois/probe/` index via soft links to existing data (schema 6.5).
+
+### Notes
+
+- Stray UTF-8 BOM stripped from several docs/tests; added a `fix-byte-order-marker` pre-commit hook and `.editorconfig` so it stays fixed.
+- `PyQt6-sip>=13.12.0` pinned (dodges a Python 3.14 access-violation crash on close).
+
 ## 0.4.0 - Milestone: Status clarity and GUI safety polish
 
 ### Added
