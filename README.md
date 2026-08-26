@@ -53,3 +53,7 @@ python -m lspr_app.app
 - Versioning is documented in `docs/versioning.md`.
 - The native experiment-control plan format is documented in `docs/experiment_plan_format.md`.
 - M-Switch control requires the optional `AMFTools` package; without it, the HW testbench and experiment-control M-Switch actions are unavailable.
+
+## Citing this software
+
+This app is part of [LSPR Suite](https://github.com/lednicky-t/LSPR-Suite) — see that repo's `CITATION.cff` for how to cite it.
