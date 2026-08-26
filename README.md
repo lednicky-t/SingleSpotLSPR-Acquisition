@@ -1,5 +1,7 @@
 # LSPR Acquisition
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22111779.svg)](https://doi.org/10.5281/zenodo.22111779)
+
 Desktop application for live LSPR spectroscopy acquisition, analysis, and experiment control.
 
 ## Features
@@ -56,4 +58,8 @@ python -m lspr_app.app
 
 ## Citing this software
 
-This app is part of [LSPR Suite](https://github.com/lednicky-t/LSPR-Suite) — see that repo's `CITATION.cff` for how to cite it.
+This app has its own citable record — see the "Cite this repository" button
+on this repo's GitHub page, or [`CITATION.cff`](CITATION.cff) directly. It's
+also part of [LSPR Suite](https://github.com/lednicky-t/LSPR-Suite), which
+has its own separate citation if you used the Suite as a whole rather than
+just this app.
