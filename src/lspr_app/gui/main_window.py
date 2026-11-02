@@ -73,11 +73,17 @@ from lspr_app.storage.app_config import (
 )
 from lspr_app.storage.hdf5_export import AsyncHDF5MeasurementWriter
 from lspr_core import (
+    ACKNOWLEDGEMENT_REQUEST,
     DEFAULT_LAUNCH_PROFILE,
+    DISCLAIMER_POINTS,
     LAUNCH_PROFILE_CONTROL_EDITOR,
+    LICENSE_NAME,
+    NOTICE_URL,
+    citation_text,
     launch_profile_spec,
     normalize_launch_profile,
 )
+from lspr_ui import show_about_dialog
 from lspr_app.gui.chrome import build_menu_bar
 from lspr_app.gui.logging_utils import SUCCESS_LOG_LEVEL
 from lspr_app.gui.main_window_headers import (
@@ -3235,12 +3241,19 @@ class MainWindow(QMainWindow):
         show_sensorgram_plot_settings_dialog_for(self)
 
     def _show_about_dialog(self) -> None:
-        QMessageBox.about(
+        show_about_dialog(
             self,
-            "About LSPR Acquisition",
-            f"LSPR Acquisition {__version__}\n"
-            "Spectrometer acquisition and experiment control UI.\n"
-            "This view is optimized for fast acquisition first, display second.",
+            title="About LSPR Acquisition",
+            app_line=f"LSPR Acquisition {__version__}",
+            description=(
+                "Spectrometer acquisition and experiment control UI.\n"
+                "This view is optimized for fast acquisition first, display second."
+            ),
+            citation=citation_text("LSPR Acquisition", __version__),
+            acknowledgement=ACKNOWLEDGEMENT_REQUEST,
+            license_line=f"{LICENSE_NAME}, Copyright (c) 2026 Tomáš Lednický. Free to use, also commercially.",
+            notice_url=NOTICE_URL,
+            disclaimer=DISCLAIMER_POINTS,
         )
 
     def _show_preferences_dialog(self) -> None:
